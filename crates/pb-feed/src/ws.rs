@@ -95,8 +95,9 @@ impl WsClient {
             debug!(asset_id, "subscribed");
         }
 
-        let mut ping_interval =
-            tokio::time::interval(std::time::Duration::from_secs(self.config.ping_interval_secs));
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
+            self.config.ping_interval_secs,
+        ));
 
         loop {
             tokio::select! {

@@ -133,7 +133,11 @@ async fn test_dispatch_per_asset_sequences() {
     });
 
     // Send deltas for two different assets interleaved
-    for (asset, price) in [("asset-a", "0.50"), ("asset-b", "0.60"), ("asset-a", "0.51")] {
+    for (asset, price) in [
+        ("asset-a", "0.50"),
+        ("asset-b", "0.60"),
+        ("asset-a", "0.51"),
+    ] {
         let msg = serde_json::json!({
             "event_type": "price_change",
             "asset_id": asset,

@@ -54,9 +54,7 @@ pub async fn run(
         ws_url: settings
             .get_string("feed.ws_url")
             .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
-        ping_interval_secs: settings
-            .get_int("feed.ping_interval_secs")
-            .unwrap_or(10) as u64,
+        ping_interval_secs: settings.get_int("feed.ping_interval_secs").unwrap_or(10) as u64,
         reconnect_base_delay_ms: settings
             .get_int("feed.reconnect_base_delay_ms")
             .unwrap_or(100) as u64,

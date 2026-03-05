@@ -102,8 +102,7 @@ impl ParquetSink {
                 self.base_path, hour_key, asset_id, first_ts_us,
             );
 
-            let owned_events: Vec<OrderbookEvent> =
-                events.iter().map(|e| (*e).clone()).collect();
+            let owned_events: Vec<OrderbookEvent> = events.iter().map(|e| (*e).clone()).collect();
             let batch = events_to_record_batch(&owned_events)?;
 
             let schema = Arc::new(orderbook_schema());

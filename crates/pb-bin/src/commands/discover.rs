@@ -4,9 +4,7 @@ use config::Config;
 pub async fn run(settings: Config, filter: Option<String>) -> Result<()> {
     tracing::info!("Discovering active BTC 5-minute markets...");
 
-    let rate_requests = settings
-        .get_int("feed.rate_limit_requests")
-        .unwrap_or(1500) as u32;
+    let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
     let rate_window = settings
         .get_int("feed.rate_limit_window_secs")
         .unwrap_or(10) as u32;
