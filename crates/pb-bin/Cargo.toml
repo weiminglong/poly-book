@@ -15,6 +15,7 @@ pb-store = { workspace = true }
 pb-replay = { workspace = true }
 pb-metrics = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

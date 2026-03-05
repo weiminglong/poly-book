@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::error::FeedError;
@@ -56,9 +57,18 @@ impl WsClient {
     }
 
     pub async fn run(&self) -> Result<(), FeedError> {
+        self.run_with_token(CancellationToken::new()).await
+    }
+
+    pub async fn run_with_token(&self, token: CancellationToken) -> Result<(), FeedError> {
         let mut attempt: u32 = 0;
         loop {
-            match self.connect_and_listen().await {
+            if token.is_cancelled() {
+                info!("ws client shutdown requested");
+                return Ok(());
+            }
+
+            match self.connect_and_listen_with_token(&token).await {
                 Ok(()) => {
                     info!("ws connection closed gracefully");
                     attempt = 0;
@@ -72,15 +82,29 @@ impl WsClient {
                 }
             }
 
+            if token.is_cancelled() {
+                info!("ws client shutdown requested");
+                return Ok(());
+            }
+
             pb_metrics::record_reconnection();
             let backoff = self.backoff_ms(attempt);
             info!(backoff_ms = backoff, attempt, "reconnecting");
-            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
+                _ = token.cancelled() => {
+                    info!("ws client shutdown during backoff");
+                    return Ok(());
+                }
+            }
             attempt = attempt.saturating_add(1);
         }
     }
 
-    async fn connect_and_listen(&self) -> Result<(), FeedError> {
+    async fn connect_and_listen_with_token(
+        &self,
+        token: &CancellationToken,
+    ) -> Result<(), FeedError> {
         let (ws_stream, _) = connect_async(&self.config.ws_url).await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, "ws connected");
@@ -101,6 +125,11 @@ impl WsClient {
 
         loop {
             tokio::select! {
+                _ = token.cancelled() => {
+                    info!("ws shutdown requested, sending close frame");
+                    let _ = sink.send(Message::Close(None)).await;
+                    return Ok(());
+                }
                 _ = ping_interval.tick() => {
                     sink.send(Message::Ping(vec![])).await?;
                     debug!("sent ping");
