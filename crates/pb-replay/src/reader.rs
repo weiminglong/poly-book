@@ -189,6 +189,7 @@ impl EventReader for ParquetReader {
         end_us: u64,
     ) -> Result<Vec<OrderbookEvent>, ReplayError> {
         let hour_dirs = self.hour_paths(start_us, end_us);
+        let asset_file_prefix = format!("events_{}_", asset_id.as_str());
         let mut all_events = Vec::new();
 
         for dir in &hour_dirs {
@@ -204,7 +205,7 @@ impl EventReader for ParquetReader {
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("events_") && name.ends_with(".parquet") {
+                    if name.starts_with(&asset_file_prefix) && name.ends_with(".parquet") {
                         let file_events = self
                             .read_parquet_file(&path, asset_id, start_us, end_us)
                             .await?;

@@ -60,8 +60,11 @@ impl Dispatcher {
                 let exchange_ts = parse_timestamp(book.timestamp);
 
                 // Snapshot resets the per-asset sequence to 0
-                let asset_key = asset_id.as_str().to_string();
-                self.asset_sequences.insert(asset_key, 0);
+                if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
+                    *seq = 0;
+                } else {
+                    self.asset_sequences.insert(asset_id.as_str().to_owned(), 0);
+                }
 
                 for entry in &book.bids {
                     let event = self.make_event(
@@ -141,10 +144,7 @@ impl Dispatcher {
         let price = FixedPrice::try_from(price_str)?;
         let size = FixedSize::try_from(size_str)?;
 
-        let asset_key = asset_id.as_str().to_string();
-        let seq = self.asset_sequences.entry(asset_key).or_insert(0);
-        let sequence = Sequence::new(*seq);
-        *seq += 1;
+        let sequence = self.next_sequence_for(&asset_id);
 
         Ok(OrderbookEvent {
             recv_timestamp_us,
@@ -156,6 +156,18 @@ impl Dispatcher {
             size,
             sequence,
         })
+    }
+
+    fn next_sequence_for(&mut self, asset_id: &AssetId) -> Sequence {
+        if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
+            let current = *seq;
+            *seq += 1;
+            Sequence::new(current)
+        } else {
+            // New asset starts at sequence 0, then advances to 1.
+            self.asset_sequences.insert(asset_id.as_str().to_owned(), 1);
+            Sequence::new(0)
+        }
     }
 
     async fn send(&self, event: OrderbookEvent) -> Result<(), FeedError> {
@@ -184,4 +196,68 @@ impl Dispatcher {
 
 fn parse_timestamp(ts: Option<&str>) -> u64 {
     ts.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_message(text: String) -> WsRawMessage {
+        WsRawMessage {
+            text,
+            recv_timestamp_us: 1_700_000_000_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_resets_existing_asset_sequence_counter() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher.asset_sequences.insert("tok1".to_string(), 99);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+
+        dispatcher
+            .dispatch(&raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        let first = event_rx.recv().await.unwrap();
+        let second = event_rx.recv().await.unwrap();
+
+        assert_eq!(first.sequence.raw(), 0);
+        assert_eq!(second.sequence.raw(), 1);
+        assert_eq!(dispatcher.asset_sequences.get("tok1"), Some(&2));
+    }
+
+    #[tokio::test]
+    async fn snapshot_registers_new_asset_with_zero_sequence_even_if_empty() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok-new",
+            "timestamp": "1700000000000000",
+            "bids": [],
+            "asks": []
+        });
+
+        dispatcher
+            .dispatch(&raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(dispatcher.asset_sequences.get("tok-new"), Some(&0));
+        assert!(event_rx.try_recv().is_err());
+    }
 }

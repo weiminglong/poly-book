@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use pb_types::OrderbookEvent;
 
 use crate::error::StoreError;
-use crate::schema::{events_to_record_batch, orderbook_schema};
+use crate::schema::{event_refs_to_record_batch, orderbook_schema};
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(300);
 const ROW_GROUP_SIZE: usize = 65_536;
@@ -102,8 +102,7 @@ impl ParquetSink {
                 self.base_path, hour_key, asset_id, first_ts_us,
             );
 
-            let owned_events: Vec<OrderbookEvent> = events.iter().map(|e| (*e).clone()).collect();
-            let batch = events_to_record_batch(&owned_events)?;
+            let batch = event_refs_to_record_batch(events)?;
 
             let schema = Arc::new(orderbook_schema());
             let props = WriterProperties::builder()
