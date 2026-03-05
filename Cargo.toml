@@ -60,17 +60,12 @@ anyhow = "1"
 # Config
 config = "0.14"
 
-# Testing
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["clickhouse"] }
-
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
-tokio-util = "0.7"
 futures-util = "0.3"
 governor = "0.8"
 

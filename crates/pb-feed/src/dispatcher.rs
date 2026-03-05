@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::error::FeedError;
@@ -26,8 +25,6 @@ pub struct Dispatcher {
     /// Snapshots reset the counter; deltas increment it.
     /// This makes `L2Book::check_sequence()` meaningful during replay.
     asset_sequences: HashMap<String, u64>,
-    /// Per-asset last snapshot exchange timestamp for staleness detection.
-    last_snapshot_ts: HashMap<String, u64>,
 }
 
 impl Dispatcher {
@@ -36,41 +33,22 @@ impl Dispatcher {
             rx,
             tx,
             asset_sequences: HashMap::new(),
-            last_snapshot_ts: HashMap::new(),
         }
     }
 
     pub async fn run(&mut self) -> Result<(), FeedError> {
-        self.run_with_token(CancellationToken::new()).await
-    }
-
-    pub async fn run_with_token(&mut self, token: CancellationToken) -> Result<(), FeedError> {
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    debug!("dispatcher shutdown requested");
-                    return Ok(());
-                }
-                raw = self.rx.recv() => {
-                    match raw {
-                        Some(raw) => {
-                            let start = std::time::Instant::now();
-                            if let Err(e) = self.dispatch(&raw).await {
-                                match &e {
-                                    FeedError::ChannelSend => return Err(e),
-                                    _ => warn!("dispatch error: {e}"),
-                                }
-                            }
-                            pb_metrics::record_processing_duration_us(start.elapsed().as_micros() as f64);
-                        }
-                        None => {
-                            debug!("dispatcher input channel closed");
-                            return Ok(());
-                        }
-                    }
+        while let Some(raw) = self.rx.recv().await {
+            let start = std::time::Instant::now();
+            if let Err(e) = self.dispatch(&raw).await {
+                match &e {
+                    FeedError::ChannelSend => return Err(e),
+                    _ => warn!("dispatch error: {e}"),
                 }
             }
+            pb_metrics::record_processing_duration_us(start.elapsed().as_micros() as f64);
         }
+        debug!("dispatcher input channel closed");
+        Ok(())
     }
 
     async fn dispatch(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
@@ -80,25 +58,6 @@ impl Dispatcher {
             WsMessage::Book(book) => {
                 let asset_id = AssetId::new(book.asset_id);
                 let exchange_ts = parse_timestamp(book.timestamp);
-
-                // Staleness check: skip snapshots with exchange_ts <= last seen
-                if exchange_ts > 0 {
-                    if let Some(&last_ts) = self.last_snapshot_ts.get(asset_id.as_str()) {
-                        if exchange_ts <= last_ts {
-                            warn!(
-                                asset_id = %asset_id,
-                                exchange_ts,
-                                last_ts,
-                                "stale snapshot detected, skipping"
-                            );
-                            pb_metrics::record_stale_snapshot_skipped();
-                            return Ok(());
-                        }
-                    }
-                    self.last_snapshot_ts
-                        .insert(asset_id.as_str().to_owned(), exchange_ts);
-                }
-                pb_metrics::record_snapshot_reconciled();
 
                 // Snapshot resets the per-asset sequence to 0
                 if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
@@ -277,80 +236,6 @@ mod tests {
         assert_eq!(first.sequence.raw(), 0);
         assert_eq!(second.sequence.raw(), 1);
         assert_eq!(dispatcher.asset_sequences.get("tok1"), Some(&2));
-    }
-
-    #[tokio::test]
-    async fn stale_snapshot_is_skipped() {
-        let (_raw_tx, raw_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
-
-        // First snapshot at T=100
-        let msg1 = serde_json::json!({
-            "event_type": "book",
-            "asset_id": "tok1",
-            "timestamp": "100",
-            "bids": [{"price": "0.50", "size": "10"}],
-            "asks": []
-        });
-        dispatcher
-            .dispatch(&raw_message(msg1.to_string()))
-            .await
-            .unwrap();
-        let _ = event_rx.recv().await.unwrap(); // consume the event
-
-        // Stale snapshot at T=50 (older) — should be skipped
-        let msg2 = serde_json::json!({
-            "event_type": "book",
-            "asset_id": "tok1",
-            "timestamp": "50",
-            "bids": [{"price": "0.60", "size": "20"}],
-            "asks": []
-        });
-        dispatcher
-            .dispatch(&raw_message(msg2.to_string()))
-            .await
-            .unwrap();
-
-        // No event should be produced
-        assert!(event_rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn newer_snapshot_passes_through() {
-        let (_raw_tx, raw_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
-
-        // First snapshot at T=100
-        let msg1 = serde_json::json!({
-            "event_type": "book",
-            "asset_id": "tok1",
-            "timestamp": "100",
-            "bids": [{"price": "0.50", "size": "10"}],
-            "asks": []
-        });
-        dispatcher
-            .dispatch(&raw_message(msg1.to_string()))
-            .await
-            .unwrap();
-        let _ = event_rx.recv().await.unwrap();
-
-        // Newer snapshot at T=200 — should pass through
-        let msg2 = serde_json::json!({
-            "event_type": "book",
-            "asset_id": "tok1",
-            "timestamp": "200",
-            "bids": [{"price": "0.60", "size": "20"}],
-            "asks": []
-        });
-        dispatcher
-            .dispatch(&raw_message(msg2.to_string()))
-            .await
-            .unwrap();
-
-        let event = event_rx.recv().await.unwrap();
-        assert_eq!(event.price.raw(), 6000); // 0.60 * 10000
     }
 
     #[tokio::test]

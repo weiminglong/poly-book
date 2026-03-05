@@ -9,7 +9,6 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use pb_types::OrderbookEvent;
 
@@ -45,25 +44,13 @@ impl ParquetSink {
         self
     }
 
-    pub async fn run(self) -> Result<(), StoreError> {
-        self.run_with_token(CancellationToken::new()).await
-    }
-
-    pub async fn run_with_token(mut self, token: CancellationToken) -> Result<(), StoreError> {
+    pub async fn run(mut self) -> Result<(), StoreError> {
         let mut buffer: Vec<OrderbookEvent> = Vec::new();
         let mut interval = tokio::time::interval(self.flush_interval);
         interval.tick().await; // consume the immediate first tick
 
         loop {
             tokio::select! {
-                _ = token.cancelled() => {
-                    if !buffer.is_empty() {
-                        tracing::info!(buffered = buffer.len(), "ParquetSink flushing on shutdown");
-                        self.flush(&mut buffer).await?;
-                    }
-                    tracing::info!("ParquetSink graceful shutdown complete");
-                    return Ok(());
-                }
                 event = self.rx.recv() => {
                     match event {
                         Some(e) => buffer.push(e),

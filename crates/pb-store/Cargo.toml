@@ -7,7 +7,6 @@ edition.workspace = true
 pb-types = { workspace = true }
 pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
