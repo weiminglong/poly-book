@@ -1,0 +1,17 @@
+# Required: your GitHub username or organization
+github_org = "your-github-username"
+
+# Optional overrides (defaults shown)
+# aws_region         = "us-east-1"
+# project_name       = "poly-book"
+# github_repo        = "poly-book"
+# task_cpu           = 256
+# task_memory        = 512
+# desired_count      = 1
+# log_retention_days = 7
+
+# Extra environment variables for the app container
+# app_env_vars = {
+#   "PB__FEED__WS_URL"            = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+#   "PB__STORAGE__CLICKHOUSE_URL" = "https://your-clickhouse-cloud:8443"
+# }
