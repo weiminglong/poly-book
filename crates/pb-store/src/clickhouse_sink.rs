@@ -131,7 +131,8 @@ impl ClickHouseSink {
     }
 
     async fn flush(&self, buffer: &mut Vec<OrderbookEvent>) -> Result<(), StoreError> {
-        let rows: Vec<ClickHouseRow> = buffer.drain(..).map(|e| ClickHouseRow::from(&e)).collect();
+        let flush_start = std::time::Instant::now();
+        let rows: Vec<ClickHouseRow> = buffer.iter().map(ClickHouseRow::from).collect();
         let row_count = rows.len();
 
         let mut insert = self.client.insert("orderbook_events")?;
@@ -140,6 +141,11 @@ impl ClickHouseSink {
         }
         insert.end().await?;
 
+        // Only clear buffer after successful write
+        buffer.clear();
+
+        pb_metrics::record_storage_flush("clickhouse");
+        pb_metrics::record_flush_duration_ms(flush_start.elapsed().as_millis() as f64);
         tracing::debug!(rows = row_count, "Flushed batch to ClickHouse");
         Ok(())
     }

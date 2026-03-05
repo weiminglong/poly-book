@@ -17,6 +17,9 @@ pub enum FeedError {
     #[error("rate limited")]
     RateLimited,
 
+    #[error("HTTP status error: {0}")]
+    HttpStatus(u16),
+
     #[error("channel send error")]
     ChannelSend,
 

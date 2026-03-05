@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 pb-types = { workspace = true }
+pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 reqwest = { workspace = true }

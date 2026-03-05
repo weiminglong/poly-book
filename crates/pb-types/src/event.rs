@@ -68,7 +68,7 @@ mod tests {
             event_type: EventType::Delta,
             side: Some(Side::Bid),
             price: FixedPrice::from_f64(0.55).unwrap(),
-            size: FixedSize::from_f64(100.0),
+            size: FixedSize::from_f64(100.0).unwrap(),
             sequence: Sequence::new(42),
         };
         let json = serde_json::to_string(&event).unwrap();

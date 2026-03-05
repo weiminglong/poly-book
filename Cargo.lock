@@ -2260,6 +2260,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "governor",
+ "pb-metrics",
  "pb-types",
  "reqwest",
  "serde",
@@ -2315,6 +2316,7 @@ dependencies = [
  "object_store",
  "parquet",
  "pb-book",
+ "pb-metrics",
  "pb-types",
  "reqwest",
  "serde",
@@ -2333,6 +2335,7 @@ dependencies = [
  "clickhouse",
  "object_store",
  "parquet",
+ "pb-metrics",
  "pb-types",
  "serde",
  "thiserror 2.0.18",

@@ -6,7 +6,7 @@ pub async fn run(
     settings: Config,
     tokens: String,
     interval_secs: u64,
-    _duration_mins: u64,
+    duration_mins: u64,
 ) -> Result<()> {
     let token_ids: Vec<String> = tokens.split(',').map(|s| s.trim().to_string()).collect();
 
@@ -48,7 +48,15 @@ pub async fn run(
         rate_limit_pause: std::time::Duration::from_millis(100),
     };
 
-    pb_replay::backfill::run_backfill(config, event_tx).await?;
+    if duration_mins > 0 {
+        let dur = std::time::Duration::from_secs(duration_mins * 60);
+        match tokio::time::timeout(dur, pb_replay::backfill::run_backfill(config, event_tx)).await {
+            Ok(result) => result?,
+            Err(_) => tracing::info!(duration_mins, "backfill duration reached, stopping"),
+        }
+    } else {
+        pb_replay::backfill::run_backfill(config, event_tx).await?;
+    }
 
     tracing::info!("backfill complete");
     Ok(())

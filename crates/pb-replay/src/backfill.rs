@@ -59,7 +59,13 @@ pub async fn run_backfill(
                                 continue;
                             }
                         };
-                        let size = parse_size(&entry.size);
+                        let size = match parse_size(&entry.size) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                warn!(token_id, size = %entry.size, "skipping invalid bid size: {e}");
+                                continue;
+                            }
+                        };
                         sequence += 1;
 
                         let event = OrderbookEvent {
@@ -88,7 +94,13 @@ pub async fn run_backfill(
                                 continue;
                             }
                         };
-                        let size = parse_size(&entry.size);
+                        let size = match parse_size(&entry.size) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                warn!(token_id, size = %entry.size, "skipping invalid ask size: {e}");
+                                continue;
+                            }
+                        };
                         sequence += 1;
 
                         let event = OrderbookEvent {
@@ -160,6 +172,6 @@ fn parse_price(s: &str) -> Result<FixedPrice, pb_types::TypesError> {
     FixedPrice::try_from(s)
 }
 
-fn parse_size(s: &str) -> FixedSize {
-    FixedSize::try_from(s).unwrap_or(FixedSize::ZERO)
+fn parse_size(s: &str) -> Result<FixedSize, pb_types::TypesError> {
+    FixedSize::try_from(s)
 }

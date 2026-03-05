@@ -16,7 +16,7 @@ fn make_diverse_events() -> Vec<OrderbookEvent> {
             event_type: EventType::Snapshot,
             side: Some(Side::Bid),
             price: FixedPrice::from_f64(0.55).unwrap(),
-            size: FixedSize::from_f64(100.0),
+            size: FixedSize::from_f64(100.0).unwrap(),
             sequence: Sequence::new(0),
         },
         OrderbookEvent {
@@ -26,7 +26,7 @@ fn make_diverse_events() -> Vec<OrderbookEvent> {
             event_type: EventType::Delta,
             side: Some(Side::Ask),
             price: FixedPrice::from_f64(0.60).unwrap(),
-            size: FixedSize::from_f64(200.5),
+            size: FixedSize::from_f64(200.5).unwrap(),
             sequence: Sequence::new(1),
         },
         OrderbookEvent {

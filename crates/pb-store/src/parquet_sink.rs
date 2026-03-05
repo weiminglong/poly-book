@@ -74,33 +74,37 @@ impl ParquetSink {
     }
 
     async fn flush(&self, buffer: &mut Vec<OrderbookEvent>) -> Result<(), StoreError> {
-        // Group events by asset_id
-        let mut by_asset: HashMap<String, Vec<OrderbookEvent>> = HashMap::new();
-        for event in buffer.drain(..) {
-            by_asset
-                .entry(event.asset_id.as_str().to_string())
-                .or_default()
-                .push(event);
-        }
-
-        for (asset_id, events) in by_asset {
-            // Partition by the first event's timestamp (event time, not wall clock)
-            let first_ts_us = events[0].recv_timestamp_us;
-            let dt =
-                chrono::DateTime::from_timestamp_micros(first_ts_us as i64).unwrap_or_default();
-
-            let path = format!(
-                "{}/{}/{:02}/{:02}/{:02}/events_{}_{}.parquet",
-                self.base_path,
+        let flush_start = std::time::Instant::now();
+        // Group events by (asset_id, hour) to handle cross-hour flushes correctly
+        let mut by_asset_hour: HashMap<(String, String), Vec<&OrderbookEvent>> = HashMap::new();
+        for event in buffer.iter() {
+            let dt = chrono::DateTime::from_timestamp_micros(event.recv_timestamp_us as i64)
+                .unwrap_or_default();
+            let hour_key = format!(
+                "{}/{:02}/{:02}/{:02}",
                 dt.format("%Y"),
                 dt.format("%m"),
                 dt.format("%d"),
                 dt.format("%H"),
-                asset_id,
-                first_ts_us,
+            );
+            let asset_id = event.asset_id.as_str().to_string();
+            by_asset_hour
+                .entry((asset_id, hour_key))
+                .or_default()
+                .push(event);
+        }
+
+        for ((asset_id, hour_key), events) in &by_asset_hour {
+            let first_ts_us = events[0].recv_timestamp_us;
+
+            let path = format!(
+                "{}/{}/events_{}_{}.parquet",
+                self.base_path, hour_key, asset_id, first_ts_us,
             );
 
-            let batch = events_to_record_batch(&events)?;
+            let owned_events: Vec<OrderbookEvent> =
+                events.iter().map(|e| (*e).clone()).collect();
+            let batch = events_to_record_batch(&owned_events)?;
 
             let schema = Arc::new(orderbook_schema());
             let props = WriterProperties::builder()
@@ -123,6 +127,12 @@ impl ParquetSink {
                 "Flushed parquet file"
             );
         }
+
+        // Only clear buffer after all writes succeed
+        buffer.clear();
+
+        pb_metrics::record_storage_flush("parquet");
+        pb_metrics::record_flush_duration_ms(flush_start.elapsed().as_millis() as f64);
 
         Ok(())
     }

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 pb-types = { workspace = true }
 pb-book = { workspace = true }
+pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }

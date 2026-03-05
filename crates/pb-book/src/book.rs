@@ -157,25 +157,25 @@ mod tests {
             &[
                 (
                     FixedPrice::from_f64(0.50).unwrap(),
-                    FixedSize::from_f64(100.0),
+                    FixedSize::from_f64(100.0).unwrap(),
                 ),
                 (
                     FixedPrice::from_f64(0.49).unwrap(),
-                    FixedSize::from_f64(200.0),
+                    FixedSize::from_f64(200.0).unwrap(),
                 ),
                 (
                     FixedPrice::from_f64(0.48).unwrap(),
-                    FixedSize::from_f64(300.0),
+                    FixedSize::from_f64(300.0).unwrap(),
                 ),
             ],
             &[
                 (
                     FixedPrice::from_f64(0.55).unwrap(),
-                    FixedSize::from_f64(150.0),
+                    FixedSize::from_f64(150.0).unwrap(),
                 ),
                 (
                     FixedPrice::from_f64(0.56).unwrap(),
-                    FixedSize::from_f64(250.0),
+                    FixedSize::from_f64(250.0).unwrap(),
                 ),
             ],
             Sequence::new(1),
@@ -222,7 +222,7 @@ mod tests {
         book.apply_delta(
             Side::Bid,
             FixedPrice::from_f64(0.50).unwrap(),
-            FixedSize::from_f64(500.0),
+            FixedSize::from_f64(500.0).unwrap(),
             Sequence::new(2),
             2_000_000,
         );
@@ -252,7 +252,7 @@ mod tests {
         book.apply_delta(
             Side::Ask,
             FixedPrice::from_f64(0.52).unwrap(),
-            FixedSize::from_f64(75.0),
+            FixedSize::from_f64(75.0).unwrap(),
             Sequence::new(2),
             2_000_000,
         );
@@ -301,11 +301,11 @@ mod tests {
         book.apply_snapshot(
             &[(
                 FixedPrice::from_f64(0.30).unwrap(),
-                FixedSize::from_f64(10.0),
+                FixedSize::from_f64(10.0).unwrap(),
             )],
             &[(
                 FixedPrice::from_f64(0.70).unwrap(),
-                FixedSize::from_f64(10.0),
+                FixedSize::from_f64(10.0).unwrap(),
             )],
             Sequence::new(10),
             5_000_000,
