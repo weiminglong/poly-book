@@ -150,6 +150,54 @@ This project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec) for spec-dr
 | `replay-backfill` | Replay engine, readers, backfill CLI |
 | `observability` | Prometheus metrics, CLI, layered config |
 
+## CI/CD
+
+### Continuous Integration
+
+Every push and PR to `main` runs four checks in parallel:
+
+| Check | Command | Purpose |
+|-------|---------|---------|
+| Check | `cargo check --all-targets` | Type-check all code |
+| Test | `cargo test` | Run all 29 unit tests |
+| Clippy | `cargo clippy --all-targets` | Lint for correctness and idioms |
+| Format | `cargo fmt --all -- --check` | Verify rustfmt formatting |
+
+### Continuous Deployment
+
+Merging to `main` triggers automated deployment to AWS ECS:
+
+```
+merge to main -> CI passes -> Docker build -> push to ECR -> update ECS service
+```
+
+- **OIDC auth** — no long-lived AWS keys; GitHub Actions assumes an IAM role scoped to `main`
+- **Fargate Spot** — ~$4-5/mo running, ~$0.08/mo stopped
+- **Rolling deploy** — new task definition registered, service updated, waits for stability
+
+### Infrastructure
+
+Terraform configs in `infra/` provision all AWS resources:
+
+```
+ECR (container registry) + ECS Fargate Spot (compute) + S3 (Parquet storage)
+VPC (2 public subnets, no NAT) + IAM (OIDC, task roles) + CloudWatch (logs)
+```
+
+#### Setup
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars to set github_org
+terraform init && terraform apply
+# Copy github_actions_role_arn output -> GitHub secret AWS_DEPLOY_ROLE_ARN
+```
+
+#### Cost Control
+
+Set `desired_count = 0` in `terraform.tfvars` and `terraform apply` to stop all tasks (~$0.08/mo for idle resources). Set back to `1` to resume.
+
 ## Future: Market Making Extension (v2)
 
 The single-threaded book architecture directly supports adding a market making strategy:
