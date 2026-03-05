@@ -18,6 +18,10 @@ parquet = { workspace = true }
 object_store = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
+clickhouse = { workspace = true }
+serde = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
 tempfile = "3"
 
 [[test]]
@@ -39,3 +43,7 @@ path = "replay_engine.rs"
 [[test]]
 name = "schema_conversion"
 path = "schema_conversion.rs"
+
+[[test]]
+name = "clickhouse_roundtrip"
+path = "clickhouse_roundtrip.rs"

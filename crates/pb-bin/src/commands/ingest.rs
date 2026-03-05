@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub async fn run(
     settings: Config,
@@ -9,6 +10,7 @@ pub async fn run(
     enable_parquet: bool,
     enable_clickhouse: bool,
     enable_metrics: bool,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let token_ids: Vec<String> = match tokens {
         Some(t) => t.split(',').map(|s| s.trim().to_string()).collect(),
@@ -69,21 +71,25 @@ pub async fn run(
 
     // Spawn WebSocket client
     let ws_client = pb_feed::WsClient::new(token_ids.clone(), raw_tx).with_config(ws_config);
+    let ws_token = shutdown.child_token();
     tokio::spawn(async move {
-        if let Err(e) = ws_client.run().await {
+        if let Err(e) = ws_client.run_with_token(ws_token).await {
             tracing::error!(error = %e, "websocket client failed");
         }
     });
 
     // Spawn dispatcher
     let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx);
+    let dispatcher_token = shutdown.child_token();
     tokio::spawn(async move {
-        if let Err(e) = dispatcher.run().await {
+        if let Err(e) = dispatcher.run_with_token(dispatcher_token).await {
             tracing::error!(error = %e, "dispatcher failed");
         }
     });
 
     // Start storage sinks
+    let mut sink_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     let parquet_tx = if enable_parquet {
         let base_path = settings
             .get_string("storage.parquet_base_path")
@@ -97,11 +103,12 @@ pub async fn run(
             Arc::new(object_store::local::LocalFileSystem::new());
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
             .with_flush_interval(std::time::Duration::from_secs(flush_secs));
-        tokio::spawn(async move {
-            if let Err(e) = sink.run().await {
+        let sink_token = shutdown.child_token();
+        sink_handles.push(tokio::spawn(async move {
+            if let Err(e) = sink.run_with_token(sink_token).await {
                 tracing::error!(error = %e, "parquet sink failed");
             }
-        });
+        }));
         Some(ptx)
     } else {
         None
@@ -123,11 +130,12 @@ pub async fn run(
         if let Err(e) = sink.ensure_table().await {
             tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
         }
-        tokio::spawn(async move {
-            if let Err(e) = sink.run().await {
+        let sink_token = shutdown.child_token();
+        sink_handles.push(tokio::spawn(async move {
+            if let Err(e) = sink.run_with_token(sink_token).await {
                 tracing::error!(error = %e, "clickhouse sink failed");
             }
-        });
+        }));
         Some(ctx)
     } else {
         None
@@ -136,37 +144,58 @@ pub async fn run(
     // Fan-out events to storage sinks
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
     loop {
-        match event_rx.recv().await {
-            Some(event) => match (parquet_tx.as_ref(), clickhouse_tx.as_ref()) {
-                (Some(ptx), Some(ctx)) => {
-                    let parquet_event = event.clone();
-                    let (parquet_res, clickhouse_res) =
-                        tokio::join!(ptx.send(parquet_event), ctx.send(event));
-                    if let Err(e) = parquet_res {
-                        tracing::warn!("parquet sink send failed: {e}");
-                    }
-                    if let Err(e) = clickhouse_res {
-                        tracing::warn!("clickhouse sink send failed: {e}");
-                    }
-                }
-                (Some(ptx), None) => {
-                    if let Err(e) = ptx.send(event).await {
-                        tracing::warn!("parquet sink send failed: {e}");
-                    }
-                }
-                (None, Some(ctx)) => {
-                    if let Err(e) = ctx.send(event).await {
-                        tracing::warn!("clickhouse sink send failed: {e}");
-                    }
-                }
-                (None, None) => {}
-            },
-            None => {
-                tracing::info!("event channel closed, shutting down");
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::info!("shutdown signal received, stopping fan-out loop");
                 break;
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Some(event) => match (parquet_tx.as_ref(), clickhouse_tx.as_ref()) {
+                        (Some(ptx), Some(ctx)) => {
+                            let parquet_event = event.clone();
+                            let (parquet_res, clickhouse_res) =
+                                tokio::join!(ptx.send(parquet_event), ctx.send(event));
+                            if let Err(e) = parquet_res {
+                                tracing::warn!("parquet sink send failed: {e}");
+                            }
+                            if let Err(e) = clickhouse_res {
+                                tracing::warn!("clickhouse sink send failed: {e}");
+                            }
+                        }
+                        (Some(ptx), None) => {
+                            if let Err(e) = ptx.send(event).await {
+                                tracing::warn!("parquet sink send failed: {e}");
+                            }
+                        }
+                        (None, Some(ctx)) => {
+                            if let Err(e) = ctx.send(event).await {
+                                tracing::warn!("clickhouse sink send failed: {e}");
+                            }
+                        }
+                        (None, None) => {}
+                    },
+                    None => {
+                        tracing::info!("event channel closed, shutting down");
+                        break;
+                    }
+                }
             }
         }
     }
 
+    // Drop sink senders so sinks can finish draining
+    drop(parquet_tx);
+    drop(clickhouse_tx);
+
+    // Wait for sinks to flush with a 10s timeout
+    let timeout = std::time::Duration::from_secs(10);
+    for handle in sink_handles {
+        if tokio::time::timeout(timeout, handle).await.is_err() {
+            tracing::warn!("sink did not shut down within timeout");
+        }
+    }
+
+    tracing::info!("graceful shutdown complete");
     Ok(())
 }
