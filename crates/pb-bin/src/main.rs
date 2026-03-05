@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, EnvFilter};
 
 mod commands;
@@ -100,6 +101,18 @@ async fn main() -> Result<()> {
     };
     fmt().with_env_filter(filter).init();
 
+    // Create shutdown token
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "failed to listen for ctrl_c");
+            return;
+        }
+        tracing::info!("received Ctrl+C, initiating graceful shutdown");
+        shutdown_clone.cancel();
+    });
+
     match cli.command {
         Commands::Discover { filter } => {
             commands::discover::run(settings, filter).await?;
@@ -110,7 +123,7 @@ async fn main() -> Result<()> {
             clickhouse,
             metrics,
         } => {
-            commands::ingest::run(settings, tokens, parquet, clickhouse, metrics).await?;
+            commands::ingest::run(settings, tokens, parquet, clickhouse, metrics, shutdown).await?;
         }
         Commands::Replay { token, at, source } => {
             commands::replay::run(settings, token, at, source).await?;
@@ -120,7 +133,8 @@ async fn main() -> Result<()> {
             interval_secs,
             duration_mins,
         } => {
-            commands::backfill::run(settings, tokens, interval_secs, duration_mins).await?;
+            commands::backfill::run(settings, tokens, interval_secs, duration_mins, shutdown)
+                .await?;
         }
     }
 

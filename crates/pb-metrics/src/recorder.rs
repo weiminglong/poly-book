@@ -12,6 +12,14 @@ pub fn register_metrics() {
     describe_counter!("pb_gaps_detected_total", "Total sequence gaps detected");
     describe_counter!("pb_reconnections_total", "Total WebSocket reconnections");
     describe_counter!(
+        "pb_snapshots_reconciled_total",
+        "Total snapshots that passed staleness check"
+    );
+    describe_counter!(
+        "pb_stale_snapshots_skipped_total",
+        "Total stale snapshots skipped"
+    );
+    describe_counter!(
         "pb_storage_flushes_total",
         "Total storage flushes (parquet + clickhouse)"
     );
@@ -61,6 +69,14 @@ pub fn record_storage_flush(sink_type: &'static str) {
 
 pub fn record_rest_request() {
     counter!("pb_rest_requests_total").increment(1);
+}
+
+pub fn record_snapshot_reconciled() {
+    counter!("pb_snapshots_reconciled_total").increment(1);
+}
+
+pub fn record_stale_snapshot_skipped() {
+    counter!("pb_stale_snapshots_skipped_total").increment(1);
 }
 
 pub fn record_processing_duration_us(duration_us: f64) {

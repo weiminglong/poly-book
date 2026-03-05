@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use pb_types::event::{EventType, OrderbookEvent};
@@ -28,6 +29,15 @@ pub struct BackfillConfig {
 pub async fn run_backfill(
     config: BackfillConfig,
     tx: mpsc::Sender<OrderbookEvent>,
+) -> Result<(), ReplayError> {
+    run_backfill_with_token(config, tx, CancellationToken::new()).await
+}
+
+/// Run the backfill loop with a cancellation token for graceful shutdown.
+pub async fn run_backfill_with_token(
+    config: BackfillConfig,
+    tx: mpsc::Sender<OrderbookEvent>,
+    token: CancellationToken,
 ) -> Result<(), ReplayError> {
     let client = reqwest::Client::new();
     let mut sequence = 0u64;
@@ -132,10 +142,22 @@ pub async fn run_backfill(
                 }
             }
 
-            tokio::time::sleep(config.rate_limit_pause).await;
+            tokio::select! {
+                _ = tokio::time::sleep(config.rate_limit_pause) => {}
+                _ = token.cancelled() => {
+                    info!("backfill shutdown requested");
+                    return Ok(());
+                }
+            }
         }
 
-        tokio::time::sleep(config.interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(config.interval) => {}
+            _ = token.cancelled() => {
+                info!("backfill shutdown requested");
+                return Ok(());
+            }
+        }
     }
 }
 
