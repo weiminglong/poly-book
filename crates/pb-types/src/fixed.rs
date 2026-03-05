@@ -26,6 +26,9 @@ impl FixedPrice {
 
     /// Create from a float (e.g., 0.5 -> FixedPrice(5000))
     pub fn from_f64(v: f64) -> Result<Self, TypesError> {
+        if v.is_nan() || v.is_infinite() || v < 0.0 {
+            return Err(TypesError::InvalidPrice(0));
+        }
         let raw = (v * PRICE_SCALE as f64).round() as u32;
         Self::new(raw)
     }
@@ -86,8 +89,11 @@ impl FixedSize {
         Self(raw)
     }
 
-    pub fn from_f64(v: f64) -> Self {
-        Self((v * SIZE_SCALE as f64).round() as u64)
+    pub fn from_f64(v: f64) -> Result<Self, TypesError> {
+        if v.is_nan() || v.is_infinite() || v < 0.0 {
+            return Err(TypesError::SizeParse(v.to_string()));
+        }
+        Ok(Self((v * SIZE_SCALE as f64).round() as u64))
     }
 
     pub fn as_f64(self) -> f64 {
@@ -116,7 +122,7 @@ impl TryFrom<&str> for FixedSize {
         let v: f64 = s
             .parse()
             .map_err(|_| TypesError::SizeParse(s.to_string()))?;
-        Ok(Self::from_f64(v))
+        Self::from_f64(v)
     }
 }
 
@@ -175,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_fixed_size_roundtrip() {
-        let s = FixedSize::from_f64(123.456789);
+        let s = FixedSize::from_f64(123.456789).unwrap();
         assert_eq!(s.raw(), 123_456_789);
         assert!((s.as_f64() - 123.456789).abs() < 1e-6);
     }
@@ -188,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_fixed_size_serde() {
-        let s = FixedSize::from_f64(10.0);
+        let s = FixedSize::from_f64(10.0).unwrap();
         let json = serde_json::to_string(&s).unwrap();
         let s2: FixedSize = serde_json::from_str(&json).unwrap();
         assert_eq!(s, s2);
@@ -198,7 +204,39 @@ mod tests {
     fn test_display() {
         let p = FixedPrice::from_f64(0.5).unwrap();
         assert_eq!(format!("{p}"), "0.5000");
-        let s = FixedSize::from_f64(10.5);
+        let s = FixedSize::from_f64(10.5).unwrap();
         assert_eq!(format!("{s}"), "10.500000");
+    }
+
+    #[test]
+    fn test_fixed_price_rejects_nan() {
+        assert!(FixedPrice::from_f64(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn test_fixed_price_rejects_negative() {
+        assert!(FixedPrice::from_f64(-0.5).is_err());
+    }
+
+    #[test]
+    fn test_fixed_price_rejects_infinity() {
+        assert!(FixedPrice::from_f64(f64::INFINITY).is_err());
+        assert!(FixedPrice::from_f64(f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_fixed_size_rejects_nan() {
+        assert!(FixedSize::from_f64(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn test_fixed_size_rejects_negative() {
+        assert!(FixedSize::from_f64(-1.0).is_err());
+    }
+
+    #[test]
+    fn test_fixed_size_rejects_infinity() {
+        assert!(FixedSize::from_f64(f64::INFINITY).is_err());
+        assert!(FixedSize::from_f64(f64::NEG_INFINITY).is_err());
     }
 }

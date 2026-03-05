@@ -31,22 +31,44 @@ pub async fn run(
             .get_string("metrics.endpoint")
             .unwrap_or_else(|_| "/metrics".to_string());
 
+        // Install recorder BEFORE registering metrics
+        let handle = pb_metrics::install_recorder()
+            .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {e}"))?;
         pb_metrics::register_metrics();
 
+        // Bind listener synchronously so bind failures propagate to caller
+        let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+        tracing::info!(%metrics_addr, endpoint = metrics_endpoint.as_str(), "metrics server bound");
+
         tokio::spawn(async move {
-            if let Err(e) = pb_metrics::start_metrics_server(metrics_addr, &metrics_endpoint).await
+            if let Err(e) =
+                pb_metrics::serve_metrics_on_listener(handle, listener, &metrics_endpoint).await
             {
                 tracing::error!(error = %e, "metrics server failed");
             }
         });
     }
 
+    // Build WS config from settings
+    let ws_config = pb_feed::WsConfig {
+        ws_url: settings
+            .get_string("feed.ws_url")
+            .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
+        ping_interval_secs: settings.get_int("feed.ping_interval_secs").unwrap_or(10) as u64,
+        reconnect_base_delay_ms: settings
+            .get_int("feed.reconnect_base_delay_ms")
+            .unwrap_or(100) as u64,
+        reconnect_max_delay_ms: settings
+            .get_int("feed.reconnect_max_delay_ms")
+            .unwrap_or(30000) as u64,
+    };
+
     // Channels: WS raw -> dispatcher -> events
     let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(10_000);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
 
     // Spawn WebSocket client
-    let ws_client = pb_feed::WsClient::new(token_ids.clone(), raw_tx);
+    let ws_client = pb_feed::WsClient::new(token_ids.clone(), raw_tx).with_config(ws_config);
     tokio::spawn(async move {
         if let Err(e) = ws_client.run().await {
             tracing::error!(error = %e, "websocket client failed");
@@ -117,10 +139,14 @@ pub async fn run(
         match event_rx.recv().await {
             Some(event) => {
                 if let Some(ref ptx) = parquet_tx {
-                    let _ = ptx.send(event.clone()).await;
+                    if let Err(e) = ptx.send(event.clone()).await {
+                        tracing::warn!("parquet sink send failed: {e}");
+                    }
                 }
                 if let Some(ref ctx) = clickhouse_tx {
-                    let _ = ctx.send(event).await;
+                    if let Err(e) = ctx.send(event).await {
+                        tracing::warn!("clickhouse sink send failed: {e}");
+                    }
                 }
             }
             None => {

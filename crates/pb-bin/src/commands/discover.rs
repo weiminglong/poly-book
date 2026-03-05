@@ -1,11 +1,25 @@
 use anyhow::Result;
 use config::Config;
 
-pub async fn run(_settings: Config, filter: Option<String>) -> Result<()> {
+pub async fn run(settings: Config, filter: Option<String>) -> Result<()> {
     tracing::info!("Discovering active BTC 5-minute markets...");
 
-    let rate_limiter = pb_feed::RateLimiter::new();
-    let rest = pb_feed::RestClient::new(rate_limiter);
+    let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
+    let rate_window = settings
+        .get_int("feed.rate_limit_window_secs")
+        .unwrap_or(10) as u32;
+    let rate_limiter = pb_feed::RateLimiter::with_window(rate_requests, rate_window);
+
+    let rest_config = pb_feed::RestConfig {
+        clob_base_url: settings
+            .get_string("feed.rest_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().clob_base_url),
+        gamma_base_url: settings
+            .get_string("feed.gamma_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
+    };
+
+    let rest = pb_feed::RestClient::new(rate_limiter).with_config(rest_config);
     let events = rest.discover_markets(0, 100).await?;
 
     let keyword = filter.as_deref().unwrap_or("btc").to_lowercase();

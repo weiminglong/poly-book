@@ -214,7 +214,7 @@ impl EventReader for ParquetReader {
             }
         }
 
-        all_events.sort_by_key(|e| e.recv_timestamp_us);
+        all_events.sort_by_key(|e| (e.recv_timestamp_us, e.sequence));
         Ok(all_events)
     }
 }
@@ -232,7 +232,7 @@ struct EventRow {
     exchange_timestamp_us: u64,
     asset_id: String,
     event_type: String,
-    side: String,
+    side: Option<String>,
     price: u32,
     size: u64,
     sequence: u64,
@@ -257,11 +257,11 @@ impl ClickHouseReader {
             other => return Err(ReplayError::InvalidEventType(other.to_string())),
         };
 
-        let side = match row.side.as_str() {
-            "Bid" => Some(Side::Bid),
-            "Ask" => Some(Side::Ask),
-            "" => None,
-            other => return Err(ReplayError::InvalidSide(other.to_string())),
+        let side = match row.side.as_deref() {
+            Some("Bid") => Some(Side::Bid),
+            Some("Ask") => Some(Side::Ask),
+            None | Some("") => None,
+            Some(other) => return Err(ReplayError::InvalidSide(other.to_string())),
         };
 
         let price = FixedPrice::new(row.price)?;
@@ -291,7 +291,7 @@ impl EventReader for ClickHouseReader {
              event_type, side, price, size, sequence \
              FROM {} \
              WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? \
-             ORDER BY recv_timestamp_us",
+             ORDER BY recv_timestamp_us, sequence",
             self.table
         );
 

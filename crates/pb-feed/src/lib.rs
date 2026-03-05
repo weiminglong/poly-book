@@ -7,5 +7,5 @@ pub mod ws;
 pub use dispatcher::Dispatcher;
 pub use error::FeedError;
 pub use rate_limiter::RateLimiter;
-pub use rest::RestClient;
-pub use ws::{WsClient, WsRawMessage};
+pub use rest::{RestClient, RestConfig};
+pub use ws::{WsClient, WsConfig, WsRawMessage};

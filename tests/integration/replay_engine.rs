@@ -24,7 +24,7 @@ fn make_replay_events(asset_id: &str, base_ts: u64) -> Vec<OrderbookEvent> {
             event_type: EventType::Snapshot,
             side: Some(Side::Bid),
             price: FixedPrice::new(price).unwrap(),
-            size: FixedSize::from_f64(size),
+            size: FixedSize::from_f64(size).unwrap(),
             sequence: Sequence::new(seq),
         });
         seq += 1;
@@ -37,7 +37,7 @@ fn make_replay_events(asset_id: &str, base_ts: u64) -> Vec<OrderbookEvent> {
             event_type: EventType::Snapshot,
             side: Some(Side::Ask),
             price: FixedPrice::new(price).unwrap(),
-            size: FixedSize::from_f64(size),
+            size: FixedSize::from_f64(size).unwrap(),
             sequence: Sequence::new(seq),
         });
         seq += 1;
@@ -51,7 +51,7 @@ fn make_replay_events(asset_id: &str, base_ts: u64) -> Vec<OrderbookEvent> {
         event_type: EventType::Delta,
         side: Some(Side::Bid),
         price: FixedPrice::new(5000).unwrap(),
-        size: FixedSize::from_f64(500.0),
+        size: FixedSize::from_f64(500.0).unwrap(),
         sequence: Sequence::new(seq),
     });
     seq += 1;
@@ -64,7 +64,7 @@ fn make_replay_events(asset_id: &str, base_ts: u64) -> Vec<OrderbookEvent> {
         event_type: EventType::Delta,
         side: Some(Side::Ask),
         price: FixedPrice::new(5200).unwrap(),
-        size: FixedSize::from_f64(75.0),
+        size: FixedSize::from_f64(75.0).unwrap(),
         sequence: Sequence::new(seq),
     });
     seq += 1;

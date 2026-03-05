@@ -76,16 +76,29 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-    fmt().with_env_filter(filter).init();
-
-    // Load config
+    // Load config first so we can use logging settings
     let settings = config::Config::builder()
         .add_source(config::File::with_name(&cli.config).required(false))
         .add_source(config::Environment::with_prefix("PB").separator("__"))
         .build()?;
+
+    // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level > "info"
+    let log_level = if std::env::var("RUST_LOG").is_ok() {
+        // EnvFilter will read RUST_LOG directly
+        None
+    } else if cli.log_level != "info" {
+        // Explicit CLI override
+        Some(cli.log_level.clone())
+    } else {
+        // Fall back to config file
+        settings.get_string("logging.level").ok()
+    };
+
+    let filter = match log_level {
+        None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        Some(level) => EnvFilter::new(&level),
+    };
+    fmt().with_env_filter(filter).init();
 
     match cli.command {
         Commands::Discover { filter } => {

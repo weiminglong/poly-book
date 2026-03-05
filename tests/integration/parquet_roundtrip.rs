@@ -21,7 +21,7 @@ fn make_test_events(asset_id: &str, count: usize, base_timestamp: u64) -> Vec<Or
             },
             side: Some(if i % 2 == 0 { Side::Bid } else { Side::Ask }),
             price: FixedPrice::new((5000 + (i as u32 % 50) * 10).min(10000)).unwrap(),
-            size: FixedSize::from_f64(100.0 + i as f64),
+            size: FixedSize::from_f64(100.0 + i as f64).unwrap(),
             sequence: Sequence::new(i as u64),
         });
     }

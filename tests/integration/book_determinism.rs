@@ -8,33 +8,33 @@ fn make_events() -> Vec<(Side, FixedPrice, FixedSize)> {
         (
             Side::Bid,
             FixedPrice::from_f64(0.50).unwrap(),
-            FixedSize::from_f64(100.0),
+            FixedSize::from_f64(100.0).unwrap(),
         ),
         (
             Side::Bid,
             FixedPrice::from_f64(0.49).unwrap(),
-            FixedSize::from_f64(200.0),
+            FixedSize::from_f64(200.0).unwrap(),
         ),
         (
             Side::Ask,
             FixedPrice::from_f64(0.55).unwrap(),
-            FixedSize::from_f64(150.0),
+            FixedSize::from_f64(150.0).unwrap(),
         ),
         (
             Side::Ask,
             FixedPrice::from_f64(0.56).unwrap(),
-            FixedSize::from_f64(250.0),
+            FixedSize::from_f64(250.0).unwrap(),
         ),
         // Delta updates
         (
             Side::Bid,
             FixedPrice::from_f64(0.50).unwrap(),
-            FixedSize::from_f64(500.0),
+            FixedSize::from_f64(500.0).unwrap(),
         ),
         (
             Side::Ask,
             FixedPrice::from_f64(0.54).unwrap(),
-            FixedSize::from_f64(75.0),
+            FixedSize::from_f64(75.0).unwrap(),
         ),
         (
             Side::Bid,
@@ -44,7 +44,7 @@ fn make_events() -> Vec<(Side, FixedPrice, FixedSize)> {
         (
             Side::Bid,
             FixedPrice::from_f64(0.48).unwrap(),
-            FixedSize::from_f64(300.0),
+            FixedSize::from_f64(300.0).unwrap(),
         ),
         (
             Side::Ask,
@@ -100,11 +100,11 @@ fn test_snapshot_resets_state() {
     // Apply a new snapshot — should completely replace state
     let new_bids = vec![(
         FixedPrice::from_f64(0.30).unwrap(),
-        FixedSize::from_f64(10.0),
+        FixedSize::from_f64(10.0).unwrap(),
     )];
     let new_asks = vec![(
         FixedPrice::from_f64(0.70).unwrap(),
-        FixedSize::from_f64(10.0),
+        FixedSize::from_f64(10.0).unwrap(),
     )];
     book.apply_snapshot(&new_bids, &new_asks, Sequence::new(100), 100_000_000);
 
@@ -121,11 +121,11 @@ fn test_many_deltas_consistency() {
     // Start with a snapshot
     let bids = vec![(
         FixedPrice::from_f64(0.50).unwrap(),
-        FixedSize::from_f64(100.0),
+        FixedSize::from_f64(100.0).unwrap(),
     )];
     let asks = vec![(
         FixedPrice::from_f64(0.55).unwrap(),
-        FixedSize::from_f64(100.0),
+        FixedSize::from_f64(100.0).unwrap(),
     )];
     book.apply_snapshot(&bids, &asks, Sequence::new(0), 0);
 
@@ -137,7 +137,7 @@ fn test_many_deltas_consistency() {
         let size = if i % 7 == 0 {
             FixedSize::ZERO // remove every 7th
         } else {
-            FixedSize::from_f64((i % 500) as f64 + 1.0)
+            FixedSize::from_f64((i % 500) as f64 + 1.0).unwrap()
         };
         book.apply_delta(side, price, size, Sequence::new(i + 1), i * 1000);
     }

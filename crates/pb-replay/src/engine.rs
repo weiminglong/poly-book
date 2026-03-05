@@ -95,12 +95,23 @@ impl<R: EventReader> ReplayEngine<R> {
 
         book.apply_snapshot(&bids, &asks, snap_seq, snapshot_ts);
 
-        // Apply deltas between snapshot and target
+        // Apply deltas between snapshot and target.
+        // Sequences are per-asset, so check_sequence detects real gaps.
         for event in events.iter().skip(snapshot_idx + 1) {
             if event.recv_timestamp_us > target_timestamp_us {
                 break;
             }
             if event.event_type == EventType::Delta {
+                if let Err(e) = book.check_sequence(event.sequence) {
+                    tracing::warn!(
+                        asset_id = %asset_id,
+                        expected = book.sequence.raw() + 1,
+                        got = event.sequence.raw(),
+                        "sequence gap during replay"
+                    );
+                    pb_metrics::record_gap_detected();
+                    let _ = e;
+                }
                 if let Some(side) = event.side {
                     book.apply_delta(
                         side,
