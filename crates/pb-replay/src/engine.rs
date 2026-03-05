@@ -65,6 +65,16 @@ impl<R: EventReader> ReplayEngine<R> {
             "found snapshot for reconstruction"
         );
 
+        // Warn if the snapshot is more than 10 minutes old relative to target
+        const STALENESS_THRESHOLD_US: u64 = 600_000_000; // 10 minutes
+        if target_timestamp_us.saturating_sub(snapshot_ts) > STALENESS_THRESHOLD_US {
+            tracing::warn!(
+                asset_id = %asset_id,
+                snapshot_age_secs = (target_timestamp_us - snapshot_ts) / 1_000_000,
+                "snapshot is >10 min old relative to target timestamp"
+            );
+        }
+
         // Collect all snapshot events at this exact timestamp to build the full snapshot
         let snapshot_events: Vec<&OrderbookEvent> = events
             .iter()

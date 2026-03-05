@@ -3,6 +3,7 @@ use std::time::Duration;
 use clickhouse::Client;
 use serde::Serialize;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use pb_types::event::EventType;
 use pb_types::{OrderbookEvent, Side};
@@ -97,13 +98,25 @@ impl ClickHouseSink {
         Ok(())
     }
 
-    pub async fn run(mut self) -> Result<(), StoreError> {
+    pub async fn run(self) -> Result<(), StoreError> {
+        self.run_with_token(CancellationToken::new()).await
+    }
+
+    pub async fn run_with_token(mut self, token: CancellationToken) -> Result<(), StoreError> {
         let mut buffer: Vec<OrderbookEvent> = Vec::with_capacity(self.batch_size);
         let mut interval = tokio::time::interval(self.batch_interval);
         interval.tick().await; // consume immediate first tick
 
         loop {
             tokio::select! {
+                _ = token.cancelled() => {
+                    if !buffer.is_empty() {
+                        tracing::info!(buffered = buffer.len(), "ClickHouseSink flushing on shutdown");
+                        self.flush(&mut buffer).await?;
+                    }
+                    tracing::info!("ClickHouseSink graceful shutdown complete");
+                    return Ok(());
+                }
                 event = self.rx.recv() => {
                     match event {
                         Some(e) => {
