@@ -31,8 +31,8 @@ pub fn register_metrics() {
     );
 }
 
-pub fn record_message_received(event_type: &str) {
-    counter!("pb_messages_received_total", "event_type" => event_type.to_string()).increment(1);
+pub fn record_message_received(event_type: &'static str) {
+    counter!("pb_messages_received_total", "event_type" => event_type).increment(1);
 }
 
 pub fn record_snapshot_applied() {
@@ -55,8 +55,8 @@ pub fn record_reconnection() {
     counter!("pb_reconnections_total").increment(1);
 }
 
-pub fn record_storage_flush(sink_type: &str) {
-    counter!("pb_storage_flushes_total", "sink" => sink_type.to_string()).increment(1);
+pub fn record_storage_flush(sink_type: &'static str) {
+    counter!("pb_storage_flushes_total", "sink" => sink_type).increment(1);
 }
 
 pub fn record_rest_request() {

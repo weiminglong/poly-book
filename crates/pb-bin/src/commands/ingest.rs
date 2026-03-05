@@ -137,18 +137,30 @@ pub async fn run(
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
     loop {
         match event_rx.recv().await {
-            Some(event) => {
-                if let Some(ref ptx) = parquet_tx {
-                    if let Err(e) = ptx.send(event.clone()).await {
+            Some(event) => match (parquet_tx.as_ref(), clickhouse_tx.as_ref()) {
+                (Some(ptx), Some(ctx)) => {
+                    let parquet_event = event.clone();
+                    let (parquet_res, clickhouse_res) =
+                        tokio::join!(ptx.send(parquet_event), ctx.send(event));
+                    if let Err(e) = parquet_res {
+                        tracing::warn!("parquet sink send failed: {e}");
+                    }
+                    if let Err(e) = clickhouse_res {
+                        tracing::warn!("clickhouse sink send failed: {e}");
+                    }
+                }
+                (Some(ptx), None) => {
+                    if let Err(e) = ptx.send(event).await {
                         tracing::warn!("parquet sink send failed: {e}");
                     }
                 }
-                if let Some(ref ctx) = clickhouse_tx {
+                (None, Some(ctx)) => {
                     if let Err(e) = ctx.send(event).await {
                         tracing::warn!("clickhouse sink send failed: {e}");
                     }
                 }
-            }
+                (None, None) => {}
+            },
             None => {
                 tracing::info!("event channel closed, shutting down");
                 break;

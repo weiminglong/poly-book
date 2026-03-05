@@ -132,11 +132,11 @@ impl ClickHouseSink {
 
     async fn flush(&self, buffer: &mut Vec<OrderbookEvent>) -> Result<(), StoreError> {
         let flush_start = std::time::Instant::now();
-        let rows: Vec<ClickHouseRow> = buffer.iter().map(ClickHouseRow::from).collect();
-        let row_count = rows.len();
+        let row_count = buffer.len();
 
         let mut insert = self.client.insert("orderbook_events")?;
-        for row in rows {
+        for event in buffer.iter() {
+            let row = ClickHouseRow::from(event);
             insert.write(&row).await?;
         }
         insert.end().await?;
