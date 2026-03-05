@@ -1,0 +1,20 @@
+[package]
+name = "pb-replay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pb-types = { workspace = true }
+pb-book = { workspace = true }
+tokio = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+object_store = { workspace = true }
+clickhouse = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "pb-feed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pb-types = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+governor = { workspace = true }
+url = { workspace = true }

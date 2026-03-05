@@ -1,0 +1,26 @@
+[feed]
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+rest_url = "https://clob.polymarket.com"
+gamma_url = "https://gamma-api.polymarket.com"
+ping_interval_secs = 10
+reconnect_base_delay_ms = 100
+reconnect_max_delay_ms = 30000
+rate_limit_requests = 1500
+rate_limit_window_secs = 10
+
+[storage]
+parquet_base_path = "./data"
+parquet_flush_interval_secs = 300
+parquet_row_group_size = 65536
+clickhouse_url = "http://localhost:8123"
+clickhouse_database = "poly_book"
+clickhouse_batch_interval_secs = 1
+clickhouse_batch_size = 10000
+
+[metrics]
+listen_addr = "0.0.0.0:9090"
+endpoint = "/metrics"
+
+[logging]
+level = "info"
+format = "pretty"

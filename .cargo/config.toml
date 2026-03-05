@@ -1,0 +1,5 @@
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "target-cpu=native"]
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "target-cpu=native"]

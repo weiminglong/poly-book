@@ -1,0 +1,41 @@
+[package]
+name = "pb-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pb-types = { path = "../../crates/pb-types" }
+pb-book = { path = "../../crates/pb-book" }
+pb-feed = { path = "../../crates/pb-feed" }
+pb-store = { path = "../../crates/pb-store" }
+pb-replay = { path = "../../crates/pb-replay" }
+pb-metrics = { path = "../../crates/pb-metrics" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+object_store = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+tempfile = "3"
+
+[[test]]
+name = "book_determinism"
+path = "book_determinism.rs"
+
+[[test]]
+name = "parquet_roundtrip"
+path = "parquet_roundtrip.rs"
+
+[[test]]
+name = "dispatcher_pipeline"
+path = "dispatcher_pipeline.rs"
+
+[[test]]
+name = "replay_engine"
+path = "replay_engine.rs"
+
+[[test]]
+name = "schema_conversion"
+path = "schema_conversion.rs"

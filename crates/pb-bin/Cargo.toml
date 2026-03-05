@@ -1,0 +1,25 @@
+[package]
+name = "pb-bin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "poly-book"
+path = "src/main.rs"
+
+[dependencies]
+pb-types = { workspace = true }
+pb-book = { workspace = true }
+pb-feed = { workspace = true }
+pb-store = { workspace = true }
+pb-replay = { workspace = true }
+pb-metrics = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+config = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+object_store = { workspace = true }
+clickhouse = { workspace = true }

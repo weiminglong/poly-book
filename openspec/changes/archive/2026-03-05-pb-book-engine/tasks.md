@@ -1,0 +1,25 @@
+# pb-book-engine Tasks
+
+- [x] Define `L2Book` struct with `BTreeMap<Reverse<FixedPrice>, FixedSize>` for bids and `BTreeMap<FixedPrice, FixedSize>` for asks
+- [x] Implement `L2Book::new(asset_id)` constructor
+- [x] Implement `apply_snapshot` -- clears both sides, inserts non-zero levels, updates sequence and timestamp
+- [x] Implement `apply_delta` -- insert/update on non-zero size, remove on zero size, for both bid and ask sides
+- [x] Implement `best_bid()` and `best_ask()` via `iter().next()`
+- [x] Implement `mid_price()` as average of best bid and best ask (f64)
+- [x] Implement `spread()` as best ask minus best bid (f64)
+- [x] Implement `bid_depth()` and `ask_depth()` via `BTreeMap::len()`
+- [x] Implement `check_sequence` for gap detection (skip check when current sequence is 0)
+- [x] Implement `bids_sorted()` and `asks_sorted()` for ordered export
+- [x] Define `BookError` enum with `InvalidPrice`, `UnknownSide`, `SequenceGap` variants
+- [x] Unit test: snapshot apply (depth counts)
+- [x] Unit test: best bid/ask after snapshot
+- [x] Unit test: mid price calculation
+- [x] Unit test: spread calculation
+- [x] Unit test: delta update existing level
+- [x] Unit test: delta remove level (size=0)
+- [x] Unit test: delta add new level (new best ask)
+- [x] Unit test: sequence gap detection (ok and error cases)
+- [x] Unit test: bids sorted order (highest first)
+- [x] Unit test: asks sorted order (lowest first)
+- [x] Unit test: empty book returns None for all queries
+- [x] Unit test: snapshot clears previous state

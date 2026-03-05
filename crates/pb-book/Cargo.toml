@@ -1,0 +1,16 @@
+[package]
+name = "pb-book"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pb-types = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "book_ops"
+harness = false

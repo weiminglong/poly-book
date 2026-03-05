@@ -1,0 +1,29 @@
+# Build
+/target/
+
+# Data
+/data/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (local agent config)
+.claude/
+
+# Profiling
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg

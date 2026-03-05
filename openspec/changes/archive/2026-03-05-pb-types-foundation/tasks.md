@@ -1,0 +1,21 @@
+# pb-types-foundation Tasks
+
+- [x] Implement `FixedPrice` with scaled u32 (scale 10,000), boundary validation, `from_f64`, `as_f64`, `TryFrom<&str>`
+- [x] Implement `FixedSize` with scaled u64 (scale 1,000,000), `from_f64`, `as_f64`, `TryFrom<&str>`
+- [x] Custom `Serialize`/`Deserialize` for both fixed-point types (decimal string format)
+- [x] `Display` impl for `FixedPrice` (4 dp) and `FixedSize` (6 dp)
+- [x] Wire types: `WsMessage<'a>` enum with zero-copy `#[serde(borrow)]` deserialization
+- [x] Wire types: `BookMessage`, `PriceChangeMessage`, `LastTradePriceMessage`, `OrderEntry`
+- [x] Wire types: `RestBookResponse`, `RestOrderEntry` (owned REST types)
+- [x] Wire types: `GammaEvent`, `GammaMarket` (Gamma API discovery types)
+- [x] `OrderbookEvent` struct with all fields (`recv_timestamp_us`, `exchange_timestamp_us`, `asset_id`, `event_type`, `side`, `price`, `size`, `sequence`)
+- [x] `Side` enum (Bid/Ask) with `Display` and serde
+- [x] `EventType` enum (Snapshot/Delta/Trade)
+- [x] `PriceLevel` struct (price + size)
+- [x] `AssetId(String)` newtype with `From<String>`, `From<&str>`, `Display`
+- [x] `Sequence(u64)` newtype with `Ord`, `next()`, `Display`
+- [x] `TypesError` enum via thiserror: `InvalidPrice`, `PriceParse`, `SizeParse`, `InvalidSide`, `Deserialize`
+- [x] Unit tests for fixed-point types (9 tests: roundtrip, boundaries, ordering, from_str, serde, display)
+- [x] Unit tests for wire deserialization (4 tests: book, price_change, last_trade, gamma_event)
+- [x] Unit tests for event serde and side display (2 tests)
+- [x] Unit tests for newtypes (2 tests: asset_id, sequence_ordering)
