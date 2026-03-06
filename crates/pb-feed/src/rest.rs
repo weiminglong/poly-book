@@ -73,10 +73,7 @@ impl RestClient {
     pub async fn discover_by_slug(&self, slug: &str) -> Result<Vec<GammaEvent>, FeedError> {
         self.rate_limiter.acquire().await;
         pb_metrics::record_rest_request();
-        let url = format!(
-            "{}/events?slug={slug}",
-            self.config.gamma_base_url
-        );
+        let url = format!("{}/events?slug={slug}", self.config.gamma_base_url);
         debug!(url, "discovering by slug");
         let resp = self.client.get(&url).send().await?;
         let resp = classify_response(resp)?;
