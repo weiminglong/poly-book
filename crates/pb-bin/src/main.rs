@@ -61,6 +61,73 @@ enum Commands {
         /// Data source: "parquet" or "clickhouse"
         #[arg(long, default_value = "parquet")]
         source: String,
+        /// Replay ordering mode: "recv_time" or "exchange_time"
+        #[arg(long)]
+        mode: String,
+        /// Validate against the next checkpoint and persist the validation result
+        #[arg(long, default_value_t = false)]
+        validate: bool,
+    },
+    /// Replay stored execution history independently of market-data replay
+    ExecutionReplay {
+        /// Optional order ID filter
+        #[arg(long)]
+        order_id: Option<String>,
+        /// Start timestamp in microseconds since epoch
+        #[arg(long)]
+        start: u64,
+        /// End timestamp in microseconds since epoch
+        #[arg(long)]
+        end: u64,
+        /// Data source: "parquet" or "clickhouse"
+        #[arg(long, default_value = "parquet")]
+        source: String,
+    },
+    /// Append execution events to storage from flags or JSON input
+    ExecutionAppend {
+        /// Data sink: "parquet" or "clickhouse"
+        #[arg(long, default_value = "parquet")]
+        source: String,
+        /// Optional path to a JSON object or array payload
+        #[arg(long)]
+        json: Option<String>,
+        /// Required unless --json is used
+        #[arg(long)]
+        order_id: Option<String>,
+        /// Required unless --json is used
+        #[arg(long)]
+        event_kind: Option<String>,
+        /// Required unless --json is used
+        #[arg(long)]
+        event_timestamp_us: Option<u64>,
+        #[arg(long)]
+        asset_id: Option<String>,
+        #[arg(long)]
+        client_order_id: Option<String>,
+        #[arg(long)]
+        venue_order_id: Option<String>,
+        #[arg(long)]
+        side: Option<String>,
+        #[arg(long)]
+        price: Option<String>,
+        #[arg(long)]
+        size: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        market_data_recv_us: Option<u64>,
+        #[arg(long)]
+        normalization_done_us: Option<u64>,
+        #[arg(long)]
+        strategy_decision_us: Option<u64>,
+        #[arg(long)]
+        order_submit_us: Option<u64>,
+        #[arg(long)]
+        exchange_ack_us: Option<u64>,
+        #[arg(long)]
+        exchange_fill_us: Option<u64>,
     },
     /// Backfill historical data via REST API snapshots
     Backfill {
@@ -140,8 +207,67 @@ async fn main() -> Result<()> {
         } => {
             commands::ingest::run(settings, tokens, parquet, clickhouse, metrics, shutdown).await?;
         }
-        Commands::Replay { token, at, source } => {
-            commands::replay::run(settings, token, at, source).await?;
+        Commands::Replay {
+            token,
+            at,
+            source,
+            mode,
+            validate,
+        } => {
+            commands::replay::run(settings, token, at, source, mode, validate).await?;
+        }
+        Commands::ExecutionReplay {
+            order_id,
+            start,
+            end,
+            source,
+        } => {
+            commands::execution_replay::run(settings, order_id, start, end, source).await?;
+        }
+        Commands::ExecutionAppend {
+            source,
+            json,
+            order_id,
+            event_kind,
+            event_timestamp_us,
+            asset_id,
+            client_order_id,
+            venue_order_id,
+            side,
+            price,
+            size,
+            status,
+            reason,
+            market_data_recv_us,
+            normalization_done_us,
+            strategy_decision_us,
+            order_submit_us,
+            exchange_ack_us,
+            exchange_fill_us,
+        } => {
+            commands::execution_append::run(
+                settings,
+                source,
+                json,
+                order_id,
+                event_kind,
+                event_timestamp_us,
+                asset_id,
+                client_order_id,
+                venue_order_id,
+                side,
+                price,
+                size,
+                status,
+                reason,
+                market_data_recv_us,
+                normalization_done_us,
+                strategy_decision_us,
+                order_submit_us,
+                exchange_ack_us,
+                exchange_fill_us,
+            )
+            .await?;
         }
         Commands::Backfill {
             tokens,

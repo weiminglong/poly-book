@@ -66,8 +66,9 @@ pub async fn run(
     };
 
     // Channels: WS raw -> dispatcher -> events
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(2_048);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<pb_feed::FeedMessage>(2_048);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
+    let (_active_assets_tx, active_assets_rx) = tokio::sync::watch::channel(token_ids.clone());
 
     // Spawn WebSocket client
     let ws_client = pb_feed::WsClient::new(token_ids.clone(), raw_tx)?.with_config(ws_config);
@@ -79,13 +80,37 @@ pub async fn run(
     });
 
     // Spawn dispatcher
-    let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx);
+    let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx.clone());
     let dispatcher_token = shutdown.child_token();
     tokio::spawn(async move {
         if let Err(e) = dispatcher.run_with_token(dispatcher_token).await {
             tracing::error!(error = %e, "dispatcher failed");
         }
     });
+
+    let checkpoints_enabled = settings
+        .get_bool("storage.checkpoints_enabled")
+        .unwrap_or(true);
+    let checkpoint_interval_secs = settings
+        .get_int("storage.checkpoint_interval_secs")
+        .unwrap_or(60) as u64;
+    let checkpoint_handle = if checkpoints_enabled {
+        let checkpoint_config = crate::commands::checkpoint_producer::CheckpointProducerConfig {
+            rest_url: settings
+                .get_string("feed.rest_url")
+                .unwrap_or_else(|_| "https://clob.polymarket.com".to_string()),
+            interval: std::time::Duration::from_secs(checkpoint_interval_secs),
+            rate_limit_pause: std::time::Duration::from_millis(100),
+        };
+        Some(crate::commands::checkpoint_producer::spawn(
+            checkpoint_config,
+            active_assets_rx,
+            event_tx.clone(),
+            shutdown.child_token(),
+        ))
+    } else {
+        None
+    };
 
     // Start storage sinks
     let mut sink_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -106,7 +131,7 @@ pub async fn run(
             .get_int("storage.parquet_flush_interval_secs")
             .unwrap_or(300) as u64;
 
-        let (ptx, prx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
+        let (ptx, prx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
         let store: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::local::LocalFileSystem::new());
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
@@ -129,7 +154,7 @@ pub async fn run(
             .get_string("storage.clickhouse_database")
             .unwrap_or_else(|_| "poly_book".to_string());
 
-        let (ctx, crx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
+        let (ctx, crx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
         let client = clickhouse::Client::default()
             .with_url(&ch_url)
             .with_database(&ch_db);
@@ -154,11 +179,11 @@ pub async fn run(
     // next event (biased: shutdown first) so all forwarders stop at the same
     // point. The sink send is also raced against shutdown so a stalled sink
     // unblocks the fan-out chain instead of deadlocking.
-    let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::OrderbookEvent>> = Vec::new();
+    let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::PersistedRecord>> = Vec::new();
     let mut fanout_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(ptx) = parquet_tx {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
         let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
@@ -186,7 +211,7 @@ pub async fn run(
     }
 
     if let Some(ctx) = clickhouse_tx {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
         let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
@@ -263,6 +288,11 @@ pub async fn run(
     for handle in sink_handles {
         if tokio::time::timeout(timeout, handle).await.is_err() {
             tracing::warn!("sink did not shut down within timeout");
+        }
+    }
+    if let Some(handle) = checkpoint_handle {
+        if tokio::time::timeout(timeout, handle).await.is_err() {
+            tracing::warn!("checkpoint producer did not shut down within timeout");
         }
     }
 

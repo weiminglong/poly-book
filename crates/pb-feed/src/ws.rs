@@ -36,16 +36,36 @@ pub struct WsRawMessage {
     pub recv_timestamp_us: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsLifecycleKind {
+    ReconnectStart,
+    ReconnectSuccess,
+}
+
+#[derive(Debug, Clone)]
+pub struct WsLifecycleEvent {
+    pub kind: WsLifecycleKind,
+    pub recv_timestamp_us: u64,
+    pub session_id: String,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum FeedMessage {
+    Raw(WsRawMessage),
+    Lifecycle(WsLifecycleEvent),
+}
+
 pub struct WsClient {
     asset_ids: Vec<String>,
-    tx: mpsc::Sender<WsRawMessage>,
+    tx: mpsc::Sender<FeedMessage>,
     config: WsConfig,
     /// Reused across reconnections for TLS session caching.
     tls_connector: native_tls::TlsConnector,
 }
 
 impl WsClient {
-    pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<WsRawMessage>) -> Result<Self, FeedError> {
+    pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<FeedMessage>) -> Result<Self, FeedError> {
         let tls_connector = native_tls::TlsConnector::new()?;
         Ok(Self {
             asset_ids,
@@ -72,10 +92,13 @@ impl WsClient {
                 return Ok(());
             }
 
-            match self.connect_and_listen_with_token(&token).await {
+            let session_id = format!("ws-session-{}", attempt + 1);
+            match self
+                .connect_and_listen_with_token(&token, &session_id)
+                .await
+            {
                 Ok(()) => {
                     info!("ws connection closed gracefully");
-                    attempt = 0;
                 }
                 Err(FeedError::ChannelSend) => {
                     info!("receiver dropped, exiting ws client");
@@ -91,7 +114,14 @@ impl WsClient {
                 return Ok(());
             }
 
+            self.send_lifecycle(
+                WsLifecycleKind::ReconnectStart,
+                &session_id,
+                Some(format!("attempt={attempt}")),
+            )
+            .await?;
             pb_metrics::record_reconnection();
+
             let backoff = self.backoff_ms(attempt);
             info!(backoff_ms = backoff, attempt, "reconnecting");
             tokio::select! {
@@ -108,23 +138,22 @@ impl WsClient {
     async fn connect_and_listen_with_token(
         &self,
         token: &CancellationToken,
+        session_id: &str,
     ) -> Result<(), FeedError> {
         let connector = Connector::NativeTls(self.tls_connector.clone());
-        let (ws_stream, _) = connect_async_tls_with_config(
-            &self.config.ws_url,
-            None,
-            true, // TCP_NODELAY
-            Some(connector),
-        )
-        .await?;
+        let (ws_stream, _) =
+            connect_async_tls_with_config(&self.config.ws_url, None, true, Some(connector)).await?;
         let (mut sink, mut stream) = ws_stream.split();
-        info!(url = %self.config.ws_url, "ws connected");
+        info!(url = %self.config.ws_url, session_id, "ws connected");
+
+        self.send_lifecycle(WsLifecycleKind::ReconnectSuccess, session_id, None)
+            .await?;
 
         let sub = serde_json::json!({
             "assets_ids": &self.asset_ids,
             "type": "market",
         });
-        sink.send(Message::Text(sub.to_string())).await?;
+        sink.send(Message::Text(sub.to_string().into())).await?;
         debug!(assets = ?self.asset_ids, "subscribed");
 
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
@@ -139,21 +168,17 @@ impl WsClient {
                     return Ok(());
                 }
                 _ = ping_interval.tick() => {
-                    sink.send(Message::Ping(vec![])).await?;
+                    sink.send(Message::Ping(vec![].into())).await?;
                     debug!("sent ping");
                 }
                 msg = stream.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_micros() as u64;
                             let raw = WsRawMessage {
                                 text: text.to_string(),
-                                recv_timestamp_us: now,
+                                recv_timestamp_us: now_us(),
                             };
-                            if self.tx.send(raw).await.is_err() {
+                            if self.tx.send(FeedMessage::Raw(raw)).await.is_err() {
                                 error!("receiver dropped, stopping ws client");
                                 return Err(FeedError::ChannelSend);
                             }
@@ -178,6 +203,24 @@ impl WsClient {
         }
     }
 
+    async fn send_lifecycle(
+        &self,
+        kind: WsLifecycleKind,
+        session_id: &str,
+        details: Option<String>,
+    ) -> Result<(), FeedError> {
+        let event = WsLifecycleEvent {
+            kind,
+            recv_timestamp_us: now_us(),
+            session_id: session_id.to_string(),
+            details,
+        };
+        self.tx
+            .send(FeedMessage::Lifecycle(event))
+            .await
+            .map_err(|_| FeedError::ChannelSend)
+    }
+
     fn backoff_ms(&self, attempt: u32) -> u64 {
         let exp = self
             .config
@@ -187,6 +230,13 @@ impl WsClient {
         exp.saturating_add(jitter)
             .min(self.config.reconnect_max_delay_ms)
     }
+}
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
 }
 
 fn fastrand_jitter(max: u64) -> u64 {

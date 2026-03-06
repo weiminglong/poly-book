@@ -1,127 +1,142 @@
-//! Test writing events to Parquet and reading them back.
+//! Test writing split datasets to Parquet and reading them back.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use pb_replay::reader::{EventReader, ParquetReader};
 use pb_store::ParquetSink;
-use pb_types::event::{EventType, OrderbookEvent, Side};
-use pb_types::{AssetId, FixedPrice, FixedSize, Sequence};
+use pb_types::event::{
+    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, IngestEvent,
+    IngestEventKind, PersistedRecord, Side, TradeEvent, TradeFidelity,
+};
+use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence};
 
-fn make_test_events(asset_id: &str, count: usize, base_timestamp: u64) -> Vec<OrderbookEvent> {
-    let mut events = Vec::with_capacity(count);
-    for i in 0..count {
-        events.push(OrderbookEvent {
-            recv_timestamp_us: base_timestamp + i as u64 * 1000,
-            exchange_timestamp_us: base_timestamp + i as u64 * 1000 - 100,
-            asset_id: AssetId::new(asset_id),
-            event_type: if i == 0 {
-                EventType::Snapshot
-            } else {
-                EventType::Delta
+fn make_records(asset_id: &str, base_timestamp: u64) -> Vec<PersistedRecord> {
+    let asset_id = AssetId::new(asset_id);
+    let provenance = |recv: u64, exchange: u64, sequence: u64| EventProvenance {
+        recv_timestamp_us: recv,
+        exchange_timestamp_us: exchange,
+        source: DataSource::WebSocket,
+        source_event_id: None,
+        source_session_id: Some("session-1".to_string()),
+        sequence: Some(Sequence::new(sequence)),
+    };
+
+    vec![
+        PersistedRecord::Book(BookEvent {
+            asset_id: asset_id.clone(),
+            kind: BookEventKind::Snapshot,
+            side: Side::Bid,
+            price: FixedPrice::new(5000).unwrap(),
+            size: FixedSize::from_f64(100.0).unwrap(),
+            provenance: provenance(base_timestamp, base_timestamp, 0),
+        }),
+        PersistedRecord::Book(BookEvent {
+            asset_id: asset_id.clone(),
+            kind: BookEventKind::Snapshot,
+            side: Side::Ask,
+            price: FixedPrice::new(5500).unwrap(),
+            size: FixedSize::from_f64(110.0).unwrap(),
+            provenance: provenance(base_timestamp, base_timestamp, 1),
+        }),
+        PersistedRecord::Trade(TradeEvent {
+            asset_id: asset_id.clone(),
+            price: FixedPrice::new(5200).unwrap(),
+            size: Some(FixedSize::from_f64(5.0).unwrap()),
+            side: Some(Side::Bid),
+            trade_id: Some("trade-1".to_string()),
+            fidelity: TradeFidelity::Full,
+            provenance: provenance(base_timestamp + 1_000_000, base_timestamp + 1_000_000, 2),
+        }),
+        PersistedRecord::Ingest(IngestEvent {
+            asset_id: Some(asset_id.clone()),
+            kind: IngestEventKind::ReconnectSuccess,
+            provenance: EventProvenance {
+                recv_timestamp_us: base_timestamp + 2_000_000,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: Some("session-2".to_string()),
+                sequence: None,
             },
-            side: Some(if i % 2 == 0 { Side::Bid } else { Side::Ask }),
-            price: FixedPrice::new((5000 + (i as u32 % 50) * 10).min(10000)).unwrap(),
-            size: FixedSize::from_f64(100.0 + i as f64).unwrap(),
-            sequence: Sequence::new(i as u64),
-        });
-    }
-    events
+            expected_sequence: None,
+            observed_sequence: None,
+            details: Some("reconnected".to_string()),
+        }),
+        PersistedRecord::Checkpoint(BookCheckpoint {
+            asset_id,
+            checkpoint_timestamp_us: base_timestamp + 3_000_000,
+            recv_timestamp_us: base_timestamp + 3_000_100,
+            exchange_timestamp_us: base_timestamp + 3_000_000,
+            source: DataSource::RestSnapshot,
+            source_event_id: Some("checkpoint-1".to_string()),
+            source_session_id: None,
+            bids: vec![PriceLevel {
+                price: FixedPrice::new(5000).unwrap(),
+                size: FixedSize::from_f64(100.0).unwrap(),
+            }],
+            asks: vec![PriceLevel {
+                price: FixedPrice::new(5500).unwrap(),
+                size: FixedSize::from_f64(110.0).unwrap(),
+            }],
+        }),
+    ]
 }
 
 #[tokio::test]
-async fn test_parquet_write_and_read() {
+async fn parquet_sink_writes_split_dataset_paths_and_reader_roundtrips() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let base_path = tmp_dir.path().to_string_lossy().to_string();
+    let records = make_records("token-a", 1_700_000_000_000_000);
 
-    let events = make_test_events("test-token-abc", 50, 1_700_000_000_000_000);
-
-    // Write events via ParquetSink
-    let (tx, rx) = tokio::sync::mpsc::channel::<OrderbookEvent>(1000);
+    let (tx, rx) = tokio::sync::mpsc::channel::<PersistedRecord>(1000);
     let store: Arc<dyn object_store::ObjectStore> =
         Arc::new(object_store::local::LocalFileSystem::new());
     let sink = ParquetSink::new(rx, store, base_path.clone())
         .with_flush_interval(Duration::from_millis(50));
+    let sink_handle = tokio::spawn(async move { sink.run().await.unwrap() });
 
-    let sink_handle = tokio::spawn(async move {
-        sink.run().await.unwrap();
-    });
-
-    // Send events
-    for event in &events {
-        tx.send(event.clone()).await.unwrap();
+    for record in &records {
+        tx.send(record.clone()).await.unwrap();
     }
-
-    // Wait for flush, then close
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop(tx);
     sink_handle.await.unwrap();
 
-    // Verify parquet files were created
     let mut found_files = Vec::new();
     visit_dir_recursive(tmp_dir.path(), &mut found_files);
-    assert!(!found_files.is_empty(), "no parquet files written");
+    assert!(found_files.iter().any(|path| path.contains("book_events")));
+    assert!(found_files.iter().any(|path| path.contains("trade_events")));
+    assert!(found_files
+        .iter()
+        .any(|path| path.contains("ingest_events")));
+    assert!(found_files
+        .iter()
+        .any(|path| path.contains("book_checkpoints")));
 
-    // Read back and verify
-    for path in &found_files {
-        let file = tokio::fs::File::open(path).await.unwrap();
-        let builder = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(file)
-            .await
-            .unwrap();
-        let mut stream = builder.build().unwrap();
+    let reader = ParquetReader::new(&base_path);
+    let asset_id = AssetId::new("token-a");
+    let window = reader
+        .read_market_data(
+            &asset_id,
+            1_700_000_000_000_000,
+            1_700_000_000_000_000 + 5_000_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(window.book_events.len(), 2);
+    assert_eq!(window.trade_events.len(), 1);
+    assert_eq!(window.ingest_events.len(), 1);
 
-        use futures_util::StreamExt;
-        let mut total_rows = 0;
-        while let Some(batch) = stream.next().await {
-            let batch = batch.unwrap();
-            total_rows += batch.num_rows();
-
-            // Verify schema
-            let schema = batch.schema();
-            assert!(schema.field_with_name("recv_timestamp_us").is_ok());
-            assert!(schema.field_with_name("asset_id").is_ok());
-            assert!(schema.field_with_name("price").is_ok());
-            assert!(schema.field_with_name("size").is_ok());
-            assert!(schema.field_with_name("sequence").is_ok());
-        }
-        assert!(total_rows > 0, "parquet file was empty");
-    }
-}
-
-#[tokio::test]
-async fn test_parquet_groups_by_asset_id() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let base_path = tmp_dir.path().to_string_lossy().to_string();
-
-    // Create events for two different assets
-    let mut events = make_test_events("token-a", 10, 1_700_000_000_000_000);
-    events.extend(make_test_events("token-b", 10, 1_700_000_000_000_000));
-
-    let (tx, rx) = tokio::sync::mpsc::channel::<OrderbookEvent>(1000);
-    let store: Arc<dyn object_store::ObjectStore> =
-        Arc::new(object_store::local::LocalFileSystem::new());
-    let sink = ParquetSink::new(rx, store, base_path.clone())
-        .with_flush_interval(Duration::from_millis(50));
-
-    let sink_handle = tokio::spawn(async move {
-        sink.run().await.unwrap();
-    });
-
-    for event in &events {
-        tx.send(event.clone()).await.unwrap();
-    }
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    drop(tx);
-    sink_handle.await.unwrap();
-
-    // Should have files for both asset IDs
-    let mut found_files = Vec::new();
-    visit_dir_recursive(tmp_dir.path(), &mut found_files);
-
-    let has_token_a = found_files.iter().any(|p| p.contains("token-a"));
-    let has_token_b = found_files.iter().any(|p| p.contains("token-b"));
-    assert!(has_token_a, "no parquet file for token-a");
-    assert!(has_token_b, "no parquet file for token-b");
+    let checkpoints = reader
+        .read_checkpoints(
+            &asset_id,
+            1_700_000_000_000_000,
+            1_700_000_000_000_000 + 5_000_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(checkpoints.len(), 1);
 }
 
 fn visit_dir_recursive(dir: &std::path::Path, files: &mut Vec<String>) {

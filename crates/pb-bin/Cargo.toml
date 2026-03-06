@@ -25,3 +25,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 object_store = { workspace = true }
 clickhouse = { workspace = true }
+reqwest = { workspace = true }
