@@ -32,7 +32,7 @@ pb-metrics = { path = "crates/pb-metrics" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json"] }
