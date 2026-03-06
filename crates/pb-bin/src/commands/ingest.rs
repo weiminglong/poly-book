@@ -242,7 +242,7 @@ pub async fn run(
                     }
                 }
                 _ => unreachable!("at most 2 sinks"),
-            }
+            },
             None => {
                 tracing::info!("event channel closed, shutting down");
                 break;
