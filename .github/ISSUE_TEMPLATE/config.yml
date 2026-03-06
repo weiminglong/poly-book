@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contribution Guide
+    url: https://github.com/weiminglong/poly-book/blob/main/CONTRIBUTING.md
+    about: Read this before opening a non-trivial issue or pull request.
+  - name: Security Policy
+    url: https://github.com/weiminglong/poly-book/blob/main/SECURITY.md
+    about: Report security issues privately.
