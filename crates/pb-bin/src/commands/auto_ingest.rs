@@ -65,11 +65,13 @@ async fn discover_with_retry(
             }
         }
         pb_metrics::record_discovery_failure();
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
-            _ = shutdown.cancelled() => return DiscoverOutcome::Shutdown,
+        if attempt < 5 {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                _ = shutdown.cancelled() => return DiscoverOutcome::Shutdown,
+            }
+            delay_ms = (delay_ms * 2).min(8_000);
         }
-        delay_ms *= 2;
     }
     tracing::error!(slug, "discovery failed after 5 attempts, skipping window");
     DiscoverOutcome::Failed
@@ -111,7 +113,7 @@ pub async fn run(
     }
 
     // --- Persistent event channel ---
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
 
     // --- Storage sinks (persistent) ---
     let mut sink_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -137,9 +139,8 @@ pub async fn run(
             Arc::new(object_store::local::LocalFileSystem::new());
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
             .with_flush_interval(Duration::from_secs(flush_secs));
-        let sink_token = shutdown.child_token();
         sink_handles.push(tokio::spawn(async move {
-            if let Err(e) = sink.run_with_token(sink_token).await {
+            if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "parquet sink failed");
             }
         }));
@@ -164,9 +165,8 @@ pub async fn run(
         if let Err(e) = sink.ensure_table().await {
             tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
         }
-        let sink_token = shutdown.child_token();
         sink_handles.push(tokio::spawn(async move {
-            if let Err(e) = sink.run_with_token(sink_token).await {
+            if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "clickhouse sink failed");
             }
         }));
@@ -175,48 +175,63 @@ pub async fn run(
         None
     };
 
-    // --- Fan-out task (persistent, reads event_rx -> routes to sink channels) ---
-    let fanout_parquet = parquet_tx.clone();
-    let fanout_clickhouse = clickhouse_tx.clone();
-    let fanout_shutdown = shutdown.child_token();
-    let fanout_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = fanout_shutdown.cancelled() => {
-                    tracing::info!("fan-out task shutting down");
+    // --- Fan-out: per-sink forwarding tasks with bounded buffers absorb transient
+    // sink slowdowns. Sustained backpressure from any sink will eventually stall
+    // the event loop — this is intentional to preserve lossless delivery. ---
+    let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::OrderbookEvent>> = Vec::new();
+    let mut fanout_fwd_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    if let Some(ptx) = parquet_tx.clone() {
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+        fanout_txs.push(ftx);
+        fanout_fwd_handles.push(tokio::spawn(async move {
+            while let Some(event) = frx.recv().await {
+                if let Err(e) = ptx.send(event).await {
+                    tracing::warn!("parquet sink send failed: {e}");
                     break;
                 }
-                event = event_rx.recv() => {
-                    match event {
-                        Some(event) => match (fanout_parquet.as_ref(), fanout_clickhouse.as_ref()) {
-                            (Some(ptx), Some(ctx)) => {
-                                let parquet_event = event.clone();
-                                let (pr, cr) =
-                                    tokio::join!(ptx.send(parquet_event), ctx.send(event));
-                                if let Err(e) = pr {
-                                    tracing::warn!("parquet sink send failed: {e}");
-                                }
-                                if let Err(e) = cr {
-                                    tracing::warn!("clickhouse sink send failed: {e}");
-                                }
-                            }
-                            (Some(ptx), None) => {
-                                if let Err(e) = ptx.send(event).await {
-                                    tracing::warn!("parquet sink send failed: {e}");
-                                }
-                            }
-                            (None, Some(ctx)) => {
-                                if let Err(e) = ctx.send(event).await {
-                                    tracing::warn!("clickhouse sink send failed: {e}");
-                                }
-                            }
-                            (None, None) => {}
-                        },
-                        None => {
-                            tracing::info!("event channel closed, fan-out stopping");
-                            break;
+            }
+        }));
+    }
+
+    if let Some(ctx) = clickhouse_tx.clone() {
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+        fanout_txs.push(ftx);
+        fanout_fwd_handles.push(tokio::spawn(async move {
+            while let Some(event) = frx.recv().await {
+                if let Err(e) = ctx.send(event).await {
+                    tracing::warn!("clickhouse sink send failed: {e}");
+                    break;
+                }
+            }
+        }));
+    }
+
+    let fanout_handle = tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Some(event) => match fanout_txs.as_slice() {
+                    [] => {}
+                    [a] => {
+                        if let Err(e) = a.send(event).await {
+                            tracing::warn!("fan-out channel closed: {e}");
                         }
                     }
+                    [a, b] => {
+                        let ev_a = event.clone();
+                        let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
+                        if let Err(e) = ra {
+                            tracing::warn!("fan-out channel 0 closed: {e}");
+                        }
+                        if let Err(e) = rb {
+                            tracing::warn!("fan-out channel 1 closed: {e}");
+                        }
+                    }
+                    _ => unreachable!("at most 2 sinks"),
+                },
+                None => {
+                    tracing::info!("event channel closed, fan-out stopping");
+                    break;
                 }
             }
         }
@@ -326,11 +341,11 @@ pub async fn run(
         }
 
         // Spawn new front-half (WsClient + Dispatcher) with new token IDs
-        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(10_000);
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(2_048);
         let new_token = shutdown.child_token();
 
         let ws_client =
-            pb_feed::WsClient::new(token_ids.clone(), raw_tx).with_config(ws_config.clone());
+            pb_feed::WsClient::new(token_ids.clone(), raw_tx)?.with_config(ws_config.clone());
         let ws_cancel = new_token.child_token();
         tokio::spawn(async move {
             if let Err(e) = ws_client.run_with_token(ws_cancel).await {
@@ -366,13 +381,16 @@ pub async fn run(
     drop(parquet_tx);
     drop(clickhouse_tx);
 
-    // Wait for fan-out to finish
+    // Wait for fan-out dispatcher to finish, then forwarding tasks, then sinks
     let timeout = Duration::from_secs(10);
     if tokio::time::timeout(timeout, fanout_handle).await.is_err() {
         tracing::warn!("fan-out task did not shut down within timeout");
     }
-
-    // Wait for sinks to flush
+    for handle in fanout_fwd_handles {
+        if tokio::time::timeout(timeout, handle).await.is_err() {
+            tracing::warn!("fan-out forwarding task did not shut down within timeout");
+        }
+    }
     for handle in sink_handles {
         if tokio::time::timeout(timeout, handle).await.is_err() {
             tracing::warn!("sink did not shut down within timeout");

@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 /// Polymarket token ID (condition_id).
+/// Uses `Arc<str>` so `.clone()` is a cheap ref-count bump.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AssetId(pub String);
+pub struct AssetId(pub Arc<str>);
 
 impl AssetId {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
         Self(id.into())
     }
 
@@ -23,13 +25,13 @@ impl fmt::Display for AssetId {
 
 impl From<String> for AssetId {
     fn from(s: String) -> Self {
-        Self(s)
+        Self(Arc::from(s))
     }
 }
 
 impl From<&str> for AssetId {
     fn from(s: &str) -> Self {
-        Self(s.to_string())
+        Self(Arc::from(s))
     }
 }
 

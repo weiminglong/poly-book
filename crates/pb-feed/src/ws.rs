@@ -1,6 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message, Connector};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -40,15 +40,19 @@ pub struct WsClient {
     asset_ids: Vec<String>,
     tx: mpsc::Sender<WsRawMessage>,
     config: WsConfig,
+    /// Reused across reconnections for TLS session caching.
+    tls_connector: native_tls::TlsConnector,
 }
 
 impl WsClient {
-    pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<WsRawMessage>) -> Self {
-        Self {
+    pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<WsRawMessage>) -> Result<Self, FeedError> {
+        let tls_connector = native_tls::TlsConnector::new()?;
+        Ok(Self {
             asset_ids,
             tx,
             config: WsConfig::default(),
-        }
+            tls_connector,
+        })
     }
 
     pub fn with_config(mut self, config: WsConfig) -> Self {
@@ -105,7 +109,14 @@ impl WsClient {
         &self,
         token: &CancellationToken,
     ) -> Result<(), FeedError> {
-        let (ws_stream, _) = connect_async(&self.config.ws_url).await?;
+        let connector = Connector::NativeTls(self.tls_connector.clone());
+        let (ws_stream, _) = connect_async_tls_with_config(
+            &self.config.ws_url,
+            None,
+            true, // TCP_NODELAY
+            Some(connector),
+        )
+        .await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, "ws connected");
 

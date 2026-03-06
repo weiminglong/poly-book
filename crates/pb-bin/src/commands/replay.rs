@@ -5,7 +5,7 @@ use pb_types::AssetId;
 pub async fn run(settings: Config, token: String, at_us: u64, source: String) -> Result<()> {
     tracing::info!(token = %token, at_us, source = %source, "replaying orderbook state");
 
-    let asset_id = AssetId::new(&token);
+    let asset_id = AssetId::new(token);
 
     match source.as_str() {
         "parquet" => {
