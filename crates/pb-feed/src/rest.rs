@@ -68,6 +68,18 @@ impl RestClient {
         let events = resp.json().await?;
         Ok(events)
     }
+
+    /// Fetch a single event by exact slug.
+    pub async fn discover_by_slug(&self, slug: &str) -> Result<Vec<GammaEvent>, FeedError> {
+        self.rate_limiter.acquire().await;
+        pb_metrics::record_rest_request();
+        let url = format!("{}/events?slug={slug}", self.config.gamma_base_url);
+        debug!(url, "discovering by slug");
+        let resp = self.client.get(&url).send().await?;
+        let resp = classify_response(resp)?;
+        let events = resp.json().await?;
+        Ok(events)
+    }
 }
 
 /// Classify an HTTP status code into the appropriate FeedError.

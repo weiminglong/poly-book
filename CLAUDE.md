@@ -38,5 +38,11 @@ pb-feed (WS/REST) -> dispatcher -> pb-book (L2Book) -> pb-store (Parquet + Click
 ## Config
 `config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
 
+## Git Workflow
+- **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)
+- **Commit**: imperative sentence, PR number suffix (e.g. `Fix discover command ... (#6)`)
+- **PR**: squash-merge into `main`, auto-delete branch on merge is enabled
+- Always run `cargo test` before committing
+
 ## OpenSpec
 Spec-driven development artifacts in `openspec/changes/archive/`. Each change has: `proposal.md`, `design.md`, `specs/*/spec.md`, `tasks.md`.

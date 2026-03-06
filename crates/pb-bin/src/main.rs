@@ -31,6 +31,9 @@ enum Commands {
         /// Filter by keyword in market title
         #[arg(long)]
         filter: Option<String>,
+        /// Maximum number of events to scan (paginated in batches of 100)
+        #[arg(long, default_value_t = 500)]
+        limit: u64,
     },
     /// Start live orderbook ingestion
     Ingest {
@@ -114,8 +117,8 @@ async fn main() -> Result<()> {
     });
 
     match cli.command {
-        Commands::Discover { filter } => {
-            commands::discover::run(settings, filter).await?;
+        Commands::Discover { filter, limit } => {
+            commands::discover::run(settings, filter, limit).await?;
         }
         Commands::Ingest {
             tokens,
