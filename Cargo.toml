@@ -65,7 +65,7 @@ anyhow = "1"
 config = "0.14"
 
 # Testing
-testcontainers = "0.23"
+testcontainers = "0.24"
 testcontainers-modules = { version = "0.11", features = ["clickhouse"] }
 
 # Benchmarks
