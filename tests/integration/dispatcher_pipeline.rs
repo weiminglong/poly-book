@@ -70,10 +70,14 @@ async fn test_dispatch_price_change() {
 
     let delta_msg = serde_json::json!({
         "event_type": "price_change",
-        "asset_id": "token-456",
-        "side": "BUY",
-        "price": "0.65",
-        "size": "300"
+        "market": "0x1234",
+        "price_changes": [{
+            "asset_id": "token-456",
+            "side": "BUY",
+            "price": "0.65",
+            "size": "300"
+        }],
+        "timestamp": "1000000"
     });
 
     raw_tx
@@ -140,10 +144,13 @@ async fn test_dispatch_per_asset_sequences() {
     ] {
         let msg = serde_json::json!({
             "event_type": "price_change",
-            "asset_id": asset,
-            "side": "BUY",
-            "price": price,
-            "size": "100"
+            "market": "0x1234",
+            "price_changes": [{
+                "asset_id": asset,
+                "side": "BUY",
+                "price": price,
+                "size": "100"
+            }]
         });
         raw_tx
             .send(WsRawMessage {
@@ -180,10 +187,13 @@ async fn test_dispatch_snapshot_resets_sequence() {
     // Delta for asset-a (seq 0)
     let delta = serde_json::json!({
         "event_type": "price_change",
-        "asset_id": "asset-a",
-        "side": "BUY",
-        "price": "0.50",
-        "size": "100"
+        "market": "0x1234",
+        "price_changes": [{
+            "asset_id": "asset-a",
+            "side": "BUY",
+            "price": "0.50",
+            "size": "100"
+        }]
     });
     raw_tx
         .send(WsRawMessage {
@@ -221,10 +231,13 @@ async fn test_dispatch_snapshot_resets_sequence() {
     // Next delta continues from snapshot sequence
     let delta2 = serde_json::json!({
         "event_type": "price_change",
-        "asset_id": "asset-a",
-        "side": "SELL",
-        "price": "0.55",
-        "size": "50"
+        "market": "0x1234",
+        "price_changes": [{
+            "asset_id": "asset-a",
+            "side": "SELL",
+            "price": "0.55",
+            "size": "50"
+        }]
     });
     raw_tx
         .send(WsRawMessage {
@@ -252,10 +265,13 @@ async fn test_dispatch_unknown_side_skips_delta() {
     // Unknown side — should be skipped
     let bad_msg = serde_json::json!({
         "event_type": "price_change",
-        "asset_id": "token-x",
-        "side": "UNKNOWN",
-        "price": "0.50",
-        "size": "100"
+        "market": "0x1234",
+        "price_changes": [{
+            "asset_id": "token-x",
+            "side": "UNKNOWN",
+            "price": "0.50",
+            "size": "100"
+        }]
     });
     raw_tx
         .send(WsRawMessage {
@@ -268,10 +284,13 @@ async fn test_dispatch_unknown_side_skips_delta() {
     // Valid message after the bad one
     let good_msg = serde_json::json!({
         "event_type": "price_change",
-        "asset_id": "token-x",
-        "side": "BUY",
-        "price": "0.55",
-        "size": "200"
+        "market": "0x1234",
+        "price_changes": [{
+            "asset_id": "token-x",
+            "side": "BUY",
+            "price": "0.55",
+            "size": "200"
+        }]
     });
     raw_tx
         .send(WsRawMessage {

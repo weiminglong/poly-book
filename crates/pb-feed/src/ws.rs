@@ -109,15 +109,12 @@ impl WsClient {
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, "ws connected");
 
-        for asset_id in &self.asset_ids {
-            let sub = serde_json::json!({
-                "type": "subscribe",
-                "channel": "market",
-                "assets_id": asset_id,
-            });
-            sink.send(Message::Text(sub.to_string())).await?;
-            debug!(asset_id, "subscribed");
-        }
+        let sub = serde_json::json!({
+            "assets_ids": &self.asset_ids,
+            "type": "market",
+        });
+        sink.send(Message::Text(sub.to_string())).await?;
+        debug!(assets = ?self.asset_ids, "subscribed");
 
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
             self.config.ping_interval_secs,

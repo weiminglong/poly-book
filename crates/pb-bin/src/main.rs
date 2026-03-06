@@ -74,6 +74,18 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         duration_mins: u64,
     },
+    /// Continuously discover and ingest BTC 5-min markets, rotating automatically
+    AutoIngest {
+        /// Enable Parquet storage
+        #[arg(long, default_value_t = true)]
+        parquet: bool,
+        /// Enable ClickHouse storage
+        #[arg(long, default_value_t = false)]
+        clickhouse: bool,
+        /// Enable metrics server
+        #[arg(long, default_value_t = true)]
+        metrics: bool,
+    },
 }
 
 #[tokio::main]
@@ -138,6 +150,13 @@ async fn main() -> Result<()> {
         } => {
             commands::backfill::run(settings, tokens, interval_secs, duration_mins, shutdown)
                 .await?;
+        }
+        Commands::AutoIngest {
+            parquet,
+            clickhouse,
+            metrics,
+        } => {
+            commands::auto_ingest::run(settings, parquet, clickhouse, metrics, shutdown).await?;
         }
     }
 

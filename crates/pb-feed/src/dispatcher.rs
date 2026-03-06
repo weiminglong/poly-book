@@ -74,7 +74,14 @@ impl Dispatcher {
     }
 
     async fn dispatch(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
-        let msg: WsMessage<'_> = serde_json::from_str(&raw.text)?;
+        let msg: WsMessage<'_> = match serde_json::from_str(&raw.text) {
+            Ok(m) => m,
+            Err(e) => {
+                // Skip non-event messages (subscription acks, unknown event types)
+                debug!("skipping non-event message: {e}");
+                return Ok(());
+            }
+        };
 
         match msg {
             WsMessage::Book(book) => {
@@ -134,25 +141,28 @@ impl Dispatcher {
                 }
             }
             WsMessage::PriceChange(pc) => {
-                let side = match pc.side {
-                    "BUY" | "buy" | "Bid" | "bid" => Some(Side::Bid),
-                    "SELL" | "sell" | "Ask" | "ask" => Some(Side::Ask),
-                    other => {
-                        warn!(side = other, "unknown side string, skipping delta");
-                        return Ok(());
-                    }
-                };
+                let exchange_ts = parse_timestamp(pc.timestamp);
+                for entry in &pc.price_changes {
+                    let side = match entry.side {
+                        "BUY" | "buy" | "Bid" | "bid" => Some(Side::Bid),
+                        "SELL" | "sell" | "Ask" | "ask" => Some(Side::Ask),
+                        other => {
+                            warn!(side = other, "unknown side string, skipping delta");
+                            continue;
+                        }
+                    };
 
-                let event = self.make_event(
-                    raw.recv_timestamp_us,
-                    parse_timestamp(pc.timestamp),
-                    AssetId::new(pc.asset_id),
-                    EventType::Delta,
-                    side,
-                    pc.price,
-                    pc.size,
-                )?;
-                self.send(event).await?;
+                    let event = self.make_event(
+                        raw.recv_timestamp_us,
+                        exchange_ts,
+                        AssetId::new(entry.asset_id),
+                        EventType::Delta,
+                        side,
+                        entry.price,
+                        entry.size,
+                    )?;
+                    self.send(event).await?;
+                }
             }
             WsMessage::LastTradePrice(lt) => {
                 let event = self.make_event(
