@@ -24,6 +24,11 @@ pub fn register_metrics() {
         "Total storage flushes (parquet + clickhouse)"
     );
     describe_counter!("pb_rest_requests_total", "Total REST API requests made");
+    describe_counter!("pb_rotations_total", "Total market rotations performed");
+    describe_counter!(
+        "pb_discovery_failures_total",
+        "Total failed market discovery attempts"
+    );
 
     describe_histogram!(
         "pb_message_processing_duration_us",
@@ -89,4 +94,12 @@ pub fn record_flush_duration_ms(duration_ms: f64) {
 
 pub fn record_ws_latency_us(latency_us: f64) {
     histogram!("pb_ws_latency_us").record(latency_us);
+}
+
+pub fn record_rotation() {
+    counter!("pb_rotations_total").increment(1);
+}
+
+pub fn record_discovery_failure() {
+    counter!("pb_discovery_failures_total").increment(1);
 }

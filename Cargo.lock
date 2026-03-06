@@ -2591,6 +2591,7 @@ dependencies = [
  "pb-store",
  "pb-types",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

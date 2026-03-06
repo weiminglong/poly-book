@@ -27,19 +27,34 @@ pub struct BookMessage<'a> {
 #[derive(Debug, Deserialize)]
 pub struct PriceChangeMessage<'a> {
     #[serde(borrow)]
+    pub market: Option<&'a str>,
+    pub price_changes: Vec<PriceChangeEntry<'a>>,
+    pub timestamp: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PriceChangeEntry<'a> {
+    #[serde(borrow)]
     pub asset_id: &'a str,
-    pub side: &'a str,
     pub price: &'a str,
     pub size: &'a str,
-    pub timestamp: Option<&'a str>,
+    pub side: &'a str,
+    pub hash: Option<&'a str>,
+    pub best_bid: Option<&'a str>,
+    pub best_ask: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LastTradePriceMessage<'a> {
     #[serde(borrow)]
     pub asset_id: &'a str,
+    pub market: Option<&'a str>,
     pub price: &'a str,
+    pub size: Option<&'a str>,
+    pub side: Option<&'a str>,
+    pub fee_rate_bps: Option<&'a str>,
     pub timestamp: Option<&'a str>,
+    pub transaction_hash: Option<&'a str>,
 }
 
 /// A single [price, size] entry from the order book.
@@ -119,16 +134,26 @@ mod tests {
     fn test_price_change_deser() {
         let raw = r#"{
             "event_type": "price_change",
-            "asset_id": "token123",
-            "side": "BUY",
-            "price": "0.55",
-            "size": "50"
+            "market": "0x1234",
+            "price_changes": [
+                {
+                    "asset_id": "token123",
+                    "price": "0.55",
+                    "size": "50",
+                    "side": "BUY",
+                    "hash": "abc123",
+                    "best_bid": "0.55",
+                    "best_ask": "0.60"
+                }
+            ],
+            "timestamp": "1757908892351"
         }"#;
         let msg: WsMessage = serde_json::from_str(raw).unwrap();
         match msg {
             WsMessage::PriceChange(pc) => {
-                assert_eq!(pc.asset_id, "token123");
-                assert_eq!(pc.side, "BUY");
+                assert_eq!(pc.price_changes.len(), 1);
+                assert_eq!(pc.price_changes[0].asset_id, "token123");
+                assert_eq!(pc.price_changes[0].side, "BUY");
             }
             _ => panic!("expected PriceChange"),
         }

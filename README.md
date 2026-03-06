@@ -60,9 +60,21 @@ The `object_store` crate abstracts Parquet writes — switch from local filesyst
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (1.75+)
+- [just](https://github.com/casey/just) (optional, task runner — `brew install just`)
+- [DuckDB](https://duckdb.org/) (optional, for Parquet inspection — `brew install duckdb`)
 - ClickHouse (optional, for warm storage)
 
 ### Build and Test
+
+```bash
+just check       # type-check all crates
+just test        # run all tests
+just bench       # run Criterion benchmarks
+just clippy      # lint with warnings as errors
+just ci          # fmt-check + clippy + test (mirrors CI)
+```
+
+Or with cargo directly:
 
 ```bash
 cargo build
@@ -70,30 +82,53 @@ cargo test
 cargo bench
 ```
 
+Run `just --list` to see all available recipes.
+
 ### Usage
 
 #### Discover active BTC 5-minute markets
 
 ```bash
-cargo run -- discover --filter btc
+just discover
+# or: cargo run -- discover --filter btc
 ```
 
-#### Ingest live orderbook data
+#### Auto-discover and ingest (recommended)
 
 ```bash
-cargo run -- ingest --tokens <TOKEN_ID> --parquet --metrics
+just auto-ingest
+# or: cargo run -- auto-ingest
+```
+
+Continuously discovers live BTC 5-minute markets and rotates ingestion automatically.
+
+#### Ingest specific tokens
+
+```bash
+just ingest <TOKEN_ID>
+# or: cargo run -- ingest --tokens <TOKEN_ID> --parquet --metrics
 ```
 
 #### Replay book state at a historical timestamp
 
 ```bash
-cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --source parquet
+just replay <TOKEN_ID> <TIMESTAMP_US>
+# or: cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --source parquet
 ```
 
 #### Backfill historical snapshots via REST
 
 ```bash
-cargo run -- backfill --tokens <TOKEN_ID> --interval-secs 60
+just backfill <TOKEN_ID>
+# or: cargo run -- backfill --tokens <TOKEN_ID> --interval-secs 60
+```
+
+#### Inspect ingested Parquet data (requires DuckDB)
+
+```bash
+just parquet-stats    # row count, timestamp range, event type breakdown
+just parquet-peek     # first 20 rows
+just parquet-schema   # column names and types
 ```
 
 ### Configuration
@@ -125,7 +160,7 @@ listen_addr = "0.0.0.0:9090"
 | **pb-store** | `ParquetSink` (buffered 5-min flush, Zstd, `object_store` abstraction), `ClickHouseSink` (1s/10K-row batch inserts, `ReplacingMergeTree` DDL) |
 | **pb-replay** | `ParquetReader` + `ClickHouseReader` (unified `EventReader` trait), `ReplayEngine` (reconstruct book at timestamp T), `run_backfill` (periodic REST snapshots) |
 | **pb-metrics** | Prometheus counters/histograms (`messages_received`, `deltas_applied`, `gaps_detected`, latency), axum HTTP `/metrics` endpoint |
-| **pb-bin** | CLI with `discover`, `ingest`, `replay`, `backfill` subcommands. Layered config (TOML/env/CLI), structured logging via `tracing` |
+| **pb-bin** | CLI with `discover`, `ingest`, `auto-ingest`, `replay`, `backfill` subcommands. Layered config (TOML/env/CLI), structured logging via `tracing` |
 
 ## Polymarket API
 

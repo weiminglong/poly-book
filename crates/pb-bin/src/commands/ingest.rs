@@ -94,6 +94,14 @@ pub async fn run(
         let base_path = settings
             .get_string("storage.parquet_base_path")
             .unwrap_or_else(|_| "./data".to_string());
+        let base_path = std::path::Path::new(&base_path)
+            .canonicalize()
+            .or_else(|_| {
+                std::fs::create_dir_all(&base_path)?;
+                std::path::Path::new(&base_path).canonicalize()
+            })?
+            .to_string_lossy()
+            .to_string();
         let flush_secs = settings
             .get_int("storage.parquet_flush_interval_secs")
             .unwrap_or(300) as u64;
