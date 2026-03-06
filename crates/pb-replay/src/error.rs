@@ -20,6 +20,9 @@ pub enum ReplayError {
     #[error("Types error: {0}")]
     TypesError(#[from] pb_types::TypesError),
 
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("no snapshot found for asset {asset_id} before timestamp {timestamp_us}")]
     NoSnapshotFound { asset_id: String, timestamp_us: u64 },
 

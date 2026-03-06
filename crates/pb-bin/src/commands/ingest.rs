@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use config::Config;
-use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+use super::pipeline;
 
 pub async fn run(
     settings: Config,
@@ -23,54 +23,17 @@ pub async fn run(
 
     tracing::info!(tokens = ?token_ids, "starting ingestion pipeline");
 
-    // Start metrics server if enabled
     if enable_metrics {
-        let metrics_addr: SocketAddr = settings
-            .get_string("metrics.listen_addr")
-            .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
-            .parse()?;
-        let metrics_endpoint = settings
-            .get_string("metrics.endpoint")
-            .unwrap_or_else(|_| "/metrics".to_string());
-
-        // Install recorder BEFORE registering metrics
-        let handle = pb_metrics::install_recorder()
-            .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {e}"))?;
-        pb_metrics::register_metrics();
-
-        // Bind listener synchronously so bind failures propagate to caller
-        let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
-        tracing::info!(%metrics_addr, endpoint = metrics_endpoint.as_str(), "metrics server bound");
-
-        tokio::spawn(async move {
-            if let Err(e) =
-                pb_metrics::serve_metrics_on_listener(handle, listener, &metrics_endpoint).await
-            {
-                tracing::error!(error = %e, "metrics server failed");
-            }
-        });
+        pipeline::start_metrics_server(&settings).await?;
     }
 
-    // Build WS config from settings
-    let ws_config = pb_feed::WsConfig {
-        ws_url: settings
-            .get_string("feed.ws_url")
-            .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
-        ping_interval_secs: settings.get_int("feed.ping_interval_secs").unwrap_or(10) as u64,
-        reconnect_base_delay_ms: settings
-            .get_int("feed.reconnect_base_delay_ms")
-            .unwrap_or(100) as u64,
-        reconnect_max_delay_ms: settings
-            .get_int("feed.reconnect_max_delay_ms")
-            .unwrap_or(30000) as u64,
-    };
+    let ws_config = pipeline::ws_config_from_settings(&settings);
 
-    // Channels: WS raw -> dispatcher -> events
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(2_048);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<pb_feed::FeedMessage>(2_048);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
+    let (_active_assets_tx, active_assets_rx) = tokio::sync::watch::channel(token_ids.clone());
 
-    // Spawn WebSocket client
-    let ws_client = pb_feed::WsClient::new(token_ids.clone(), raw_tx)?.with_config(ws_config);
+    let ws_client = pb_feed::WsClient::new(token_ids, raw_tx)?.with_config(ws_config);
     let ws_token = shutdown.child_token();
     tokio::spawn(async move {
         if let Err(e) = ws_client.run_with_token(ws_token).await {
@@ -78,8 +41,7 @@ pub async fn run(
         }
     });
 
-    // Spawn dispatcher
-    let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx);
+    let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx.clone());
     let dispatcher_token = shutdown.child_token();
     tokio::spawn(async move {
         if let Err(e) = dispatcher.run_with_token(dispatcher_token).await {
@@ -87,78 +49,22 @@ pub async fn run(
         }
     });
 
-    // Start storage sinks
-    let mut sink_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let checkpoint_handle = pipeline::start_checkpoint_producer(
+        &settings,
+        active_assets_rx,
+        event_tx.clone(),
+        &shutdown,
+    );
 
-    let parquet_tx = if enable_parquet {
-        let base_path = settings
-            .get_string("storage.parquet_base_path")
-            .unwrap_or_else(|_| "./data".to_string());
-        let base_path = std::path::Path::new(&base_path)
-            .canonicalize()
-            .or_else(|_| {
-                std::fs::create_dir_all(&base_path)?;
-                std::path::Path::new(&base_path).canonicalize()
-            })?
-            .to_string_lossy()
-            .to_string();
-        let flush_secs = settings
-            .get_int("storage.parquet_flush_interval_secs")
-            .unwrap_or(300) as u64;
-
-        let (ptx, prx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
-        let store: Arc<dyn object_store::ObjectStore> =
-            Arc::new(object_store::local::LocalFileSystem::new());
-        let sink = pb_store::ParquetSink::new(prx, store, base_path)
-            .with_flush_interval(std::time::Duration::from_secs(flush_secs));
-        sink_handles.push(tokio::spawn(async move {
-            if let Err(e) = sink.run().await {
-                tracing::error!(error = %e, "parquet sink failed");
-            }
-        }));
-        Some(ptx)
-    } else {
-        None
-    };
-
-    let clickhouse_tx = if enable_clickhouse {
-        let ch_url = settings
-            .get_string("storage.clickhouse_url")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        let ch_db = settings
-            .get_string("storage.clickhouse_database")
-            .unwrap_or_else(|_| "poly_book".to_string());
-
-        let (ctx, crx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
-        let client = clickhouse::Client::default()
-            .with_url(&ch_url)
-            .with_database(&ch_db);
-        let sink = pb_store::ClickHouseSink::new(crx, client);
-        if let Err(e) = sink.ensure_table().await {
-            tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
-        }
-        sink_handles.push(tokio::spawn(async move {
-            if let Err(e) = sink.run().await {
-                tracing::error!(error = %e, "clickhouse sink failed");
-            }
-        }));
-        Some(ctx)
-    } else {
-        None
-    };
+    let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, enable_clickhouse).await?;
 
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
 
-    // Per-sink forwarding tasks with bounded buffers absorb transient sink
-    // slowdowns. Each forwarder checks its shutdown token before pulling the
-    // next event (biased: shutdown first) so all forwarders stop at the same
-    // point. The sink send is also raced against shutdown so a stalled sink
-    // unblocks the fan-out chain instead of deadlocking.
-    let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::OrderbookEvent>> = Vec::new();
+    let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::PersistedRecord>> = Vec::new();
     let mut fanout_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    if let Some(ptx) = parquet_tx {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+    if let Some(ptx) = sinks.parquet_tx {
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
         let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
@@ -185,8 +91,8 @@ pub async fn run(
         }));
     }
 
-    if let Some(ctx) = clickhouse_tx {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(2_048);
+    if let Some(ctx) = sinks.clickhouse_tx {
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
         let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
@@ -213,11 +119,6 @@ pub async fn run(
         }));
     }
 
-    // Fan-out loop: forward each event to all sink channels. Sends are
-    // unconditional — a stalled forwarder exits on shutdown and closes its
-    // receiver, making the corresponding send return Err immediately rather
-    // than blocking. The loop breaks on any send error so no further events
-    // are delivered to one sink but not the other.
     loop {
         match event_rx.recv().await {
             Some(event) => match fanout_txs.as_slice() {
@@ -250,20 +151,12 @@ pub async fn run(
         }
     }
 
-    // Drop fan-out senders so forwarding tasks drain and exit
     drop(fanout_txs);
 
-    // Wait for fan-out forwarding tasks to drain, then sinks
-    let timeout = std::time::Duration::from_secs(10);
-    for handle in fanout_handles {
-        if tokio::time::timeout(timeout, handle).await.is_err() {
-            tracing::warn!("fan-out task did not shut down within timeout");
-        }
-    }
-    for handle in sink_handles {
-        if tokio::time::timeout(timeout, handle).await.is_err() {
-            tracing::warn!("sink did not shut down within timeout");
-        }
+    pipeline::shutdown_handles(fanout_handles, "fan-out task").await;
+    pipeline::shutdown_handles(sinks.task_handles, "sink").await;
+    if let Some(handle) = checkpoint_handle {
+        pipeline::shutdown_handles(vec![handle], "checkpoint producer").await;
     }
 
     tracing::info!("graceful shutdown complete");

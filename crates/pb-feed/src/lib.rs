@@ -8,4 +8,4 @@ pub use dispatcher::Dispatcher;
 pub use error::FeedError;
 pub use rate_limiter::RateLimiter;
 pub use rest::{RestClient, RestConfig};
-pub use ws::{WsClient, WsConfig, WsRawMessage};
+pub use ws::{FeedMessage, WsClient, WsConfig, WsLifecycleEvent, WsLifecycleKind, WsRawMessage};

@@ -22,7 +22,7 @@ pub async fn run(
         .get_string("feed.rest_url")
         .unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
 
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
 
     // Start Parquet sink for backfilled data
     let base_path = settings

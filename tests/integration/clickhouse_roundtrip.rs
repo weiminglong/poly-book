@@ -2,122 +2,164 @@
 //! Run with: `cargo test -p pb-integration-tests --test clickhouse_roundtrip -- --ignored`
 //! Requires Docker.
 
-use std::time::Duration;
-
-use pb_replay::engine::ReplayEngine;
-use pb_replay::reader::EventReader;
-use pb_store::ClickHouseSink;
-use pb_types::event::{EventType, OrderbookEvent, Side};
-use pb_types::{AssetId, FixedPrice, FixedSize, Sequence};
+use pb_replay::{ClickHouseReader, EventReader};
+use pb_store::ClickHouseRecordWriter;
+use pb_types::event::{
+    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, ExecutionEvent,
+    ExecutionEventKind, IngestEvent, IngestEventKind, LatencyTrace, PersistedRecord, ReplayMode,
+    ReplayValidation, Side, TradeEvent, TradeFidelity,
+};
+use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence};
+use serde::Deserialize;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::clickhouse::ClickHouse;
 
-/// Create test events for write/read roundtrip.
-fn make_test_events(asset_id: &str, count: usize) -> Vec<OrderbookEvent> {
-    let aid = AssetId::new(asset_id);
-    (0..count)
-        .map(|i| {
-            let is_bid = i % 2 == 0;
-            OrderbookEvent {
-                recv_timestamp_us: 1_700_000_000_000_000 + (i as u64) * 1_000_000,
-                exchange_timestamp_us: 1_700_000_000_000_000 + (i as u64) * 1_000_000,
-                asset_id: aid.clone(),
-                event_type: if i < 5 {
-                    EventType::Snapshot
-                } else {
-                    EventType::Delta
-                },
-                side: Some(if is_bid { Side::Bid } else { Side::Ask }),
-                price: FixedPrice::new(5000 + (i as u32) * 100).unwrap(),
-                size: FixedSize::from_f64((i as f64 + 1.0) * 10.0).unwrap(),
-                sequence: Sequence::new(i as u64),
-            }
-        })
-        .collect()
+fn provenance(
+    recv_timestamp_us: u64,
+    exchange_timestamp_us: u64,
+    sequence: Option<u64>,
+) -> EventProvenance {
+    EventProvenance {
+        recv_timestamp_us,
+        exchange_timestamp_us,
+        source: DataSource::WebSocket,
+        source_event_id: None,
+        source_session_id: Some("session-1".to_string()),
+        sequence: sequence.map(Sequence::new),
+    }
 }
 
-/// Create replay events: 1 snapshot (3 bids + 2 asks) + 3 deltas.
-fn make_replay_events(asset_id: &str, base_ts: u64) -> Vec<OrderbookEvent> {
-    let aid = AssetId::new(asset_id);
-    let mut events = Vec::new();
-    let mut seq = 0u64;
-
-    for (price, size) in [(5000u32, 100.0), (4900, 200.0), (4800, 300.0)] {
-        events.push(OrderbookEvent {
-            recv_timestamp_us: base_ts,
-            exchange_timestamp_us: base_ts,
-            asset_id: aid.clone(),
-            event_type: EventType::Snapshot,
+fn market_data_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
+    let asset_id = AssetId::new(asset_id);
+    vec![
+        PersistedRecord::Book(BookEvent {
+            asset_id: asset_id.clone(),
+            kind: BookEventKind::Snapshot,
+            side: Side::Bid,
+            price: FixedPrice::new(5000).unwrap(),
+            size: FixedSize::from_f64(100.0).unwrap(),
+            provenance: provenance(base_ts, base_ts, Some(0)),
+        }),
+        PersistedRecord::Book(BookEvent {
+            asset_id: asset_id.clone(),
+            kind: BookEventKind::Delta,
+            side: Side::Ask,
+            price: FixedPrice::new(5100).unwrap(),
+            size: FixedSize::from_f64(25.0).unwrap(),
+            provenance: provenance(base_ts + 1_000, base_ts + 1_000, Some(1)),
+        }),
+        PersistedRecord::Trade(TradeEvent {
+            asset_id: asset_id.clone(),
+            price: FixedPrice::new(5050).unwrap(),
+            size: Some(FixedSize::from_f64(3.5).unwrap()),
             side: Some(Side::Bid),
-            price: FixedPrice::new(price).unwrap(),
-            size: FixedSize::from_f64(size).unwrap(),
-            sequence: Sequence::new(seq),
-        });
-        seq += 1;
-    }
-    for (price, size) in [(5500u32, 150.0), (5600, 250.0)] {
-        events.push(OrderbookEvent {
-            recv_timestamp_us: base_ts,
-            exchange_timestamp_us: base_ts,
-            asset_id: aid.clone(),
-            event_type: EventType::Snapshot,
-            side: Some(Side::Ask),
-            price: FixedPrice::new(price).unwrap(),
-            size: FixedSize::from_f64(size).unwrap(),
-            sequence: Sequence::new(seq),
-        });
-        seq += 1;
-    }
+            trade_id: Some("trade-1".to_string()),
+            fidelity: TradeFidelity::Full,
+            provenance: provenance(base_ts + 2_000, base_ts + 2_000, Some(2)),
+        }),
+        PersistedRecord::Ingest(IngestEvent {
+            asset_id: Some(asset_id),
+            kind: IngestEventKind::ReconnectSuccess,
+            provenance: provenance(base_ts + 3_000, base_ts + 3_000, None),
+            expected_sequence: None,
+            observed_sequence: None,
+            details: Some("reconnected".to_string()),
+        }),
+    ]
+}
 
-    // Delta 1: update best bid
-    events.push(OrderbookEvent {
-        recv_timestamp_us: base_ts + 1_000_000,
-        exchange_timestamp_us: base_ts + 1_000_000,
-        asset_id: aid.clone(),
-        event_type: EventType::Delta,
-        side: Some(Side::Bid),
-        price: FixedPrice::new(5000).unwrap(),
-        size: FixedSize::from_f64(500.0).unwrap(),
-        sequence: Sequence::new(seq),
-    });
-    seq += 1;
+fn checkpoint_and_validation_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
+    let asset_id = AssetId::new(asset_id);
+    vec![
+        PersistedRecord::Checkpoint(BookCheckpoint {
+            asset_id: asset_id.clone(),
+            checkpoint_timestamp_us: base_ts + 10_000,
+            provenance: EventProvenance {
+                recv_timestamp_us: base_ts + 10_500,
+                exchange_timestamp_us: base_ts + 10_000,
+                source: DataSource::RestSnapshot,
+                source_event_id: Some("checkpoint-1".to_string()),
+                source_session_id: None,
+                sequence: None,
+            },
+            bids: vec![PriceLevel {
+                price: FixedPrice::new(5000).unwrap(),
+                size: FixedSize::from_f64(100.0).unwrap(),
+            }],
+            asks: vec![PriceLevel {
+                price: FixedPrice::new(5100).unwrap(),
+                size: FixedSize::from_f64(25.0).unwrap(),
+            }],
+        }),
+        PersistedRecord::Validation(ReplayValidation {
+            asset_id,
+            mode: ReplayMode::RecvTime,
+            replay_timestamp_us: base_ts,
+            reference_timestamp_us: base_ts + 10_000,
+            matched: true,
+            mismatch_summary: None,
+            persisted_at_us: base_ts + 11_000,
+        }),
+    ]
+}
 
-    // Delta 2: add new ask level
-    events.push(OrderbookEvent {
-        recv_timestamp_us: base_ts + 2_000_000,
-        exchange_timestamp_us: base_ts + 2_000_000,
-        asset_id: aid.clone(),
-        event_type: EventType::Delta,
-        side: Some(Side::Ask),
-        price: FixedPrice::new(5200).unwrap(),
-        size: FixedSize::from_f64(75.0).unwrap(),
-        sequence: Sequence::new(seq),
-    });
-    seq += 1;
-
-    // Delta 3: remove a bid level
-    events.push(OrderbookEvent {
-        recv_timestamp_us: base_ts + 3_000_000,
-        exchange_timestamp_us: base_ts + 3_000_000,
-        asset_id: aid.clone(),
-        event_type: EventType::Delta,
-        side: Some(Side::Bid),
-        price: FixedPrice::new(4800).unwrap(),
-        size: FixedSize::ZERO,
-        sequence: Sequence::new(seq),
-    });
-
-    events
+fn execution_records(asset_id: &str, order_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
+    let asset_id = AssetId::new(asset_id);
+    vec![
+        PersistedRecord::Execution(ExecutionEvent {
+            event_timestamp_us: base_ts,
+            asset_id: Some(asset_id.clone()),
+            order_id: order_id.to_string(),
+            client_order_id: Some("client-1".to_string()),
+            venue_order_id: Some("venue-1".to_string()),
+            kind: ExecutionEventKind::SubmitIntent,
+            side: Some(Side::Bid),
+            price: Some(FixedPrice::new(5050).unwrap()),
+            size: Some(FixedSize::from_f64(7.25).unwrap()),
+            status: Some("open".to_string()),
+            reason: None,
+            latency: LatencyTrace::from_optional_timestamps(
+                Some(base_ts - 5),
+                Some(base_ts - 2),
+                Some(base_ts - 1),
+                Some(base_ts),
+                None,
+                None,
+            ),
+        }),
+        PersistedRecord::Execution(ExecutionEvent {
+            event_timestamp_us: base_ts + 500,
+            asset_id: Some(asset_id),
+            order_id: order_id.to_string(),
+            client_order_id: Some("client-1".to_string()),
+            venue_order_id: Some("venue-1".to_string()),
+            kind: ExecutionEventKind::Fill,
+            side: Some(Side::Bid),
+            price: Some(FixedPrice::new(5050).unwrap()),
+            size: Some(FixedSize::from_f64(7.25).unwrap()),
+            status: Some("filled".to_string()),
+            reason: None,
+            latency: LatencyTrace::from_optional_timestamps(
+                Some(base_ts - 5),
+                Some(base_ts - 2),
+                Some(base_ts - 1),
+                Some(base_ts),
+                Some(base_ts + 200),
+                Some(base_ts + 500),
+            ),
+        }),
+    ]
 }
 
 async fn setup_clickhouse() -> (
     testcontainers::ContainerAsync<ClickHouse>,
     clickhouse::Client,
     String,
+    String,
 ) {
     let container = ClickHouse::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(8123).await.unwrap();
-    let url = format!("http://127.0.0.1:{}", port);
+    let url = format!("http://127.0.0.1:{port}");
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -132,222 +174,100 @@ async fn setup_clickhouse() -> (
         .await
         .unwrap();
 
-    let client = client.with_database(&db_name);
-
-    (container, client, db_name)
+    (container, client.with_database(&db_name), url, db_name)
 }
 
-async fn write_events_via_sink(client: clickhouse::Client, events: &[OrderbookEvent]) {
-    let (tx, rx) = tokio::sync::mpsc::channel::<OrderbookEvent>(1000);
-    let sink = ClickHouseSink::new(rx, client);
-    sink.ensure_table().await.unwrap();
-
-    let handle = tokio::spawn(async move { sink.run().await.unwrap() });
-
-    for event in events {
-        tx.send(event.clone()).await.unwrap();
-    }
-
-    // Wait for batch interval to flush
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    drop(tx);
-    handle.await.unwrap();
+async fn write_records(client: clickhouse::Client, records: &[PersistedRecord]) {
+    let writer = ClickHouseRecordWriter::new(client);
+    writer.ensure_tables().await.unwrap();
+    writer.write_batch(records).await.unwrap();
 }
 
-#[tokio::test]
-#[ignore]
-async fn test_clickhouse_sink_write_and_read() {
-    let (_container, client, _db) = setup_clickhouse().await;
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct CountRow {
+    count: u64,
+}
 
-    let events = make_test_events("ch-test-1", 20);
-    write_events_via_sink(client.clone(), &events).await;
-
-    // Query count
-    let count: u64 = client
-        .query("SELECT count() FROM orderbook_events")
-        .fetch_one()
-        .await
-        .unwrap();
-    assert_eq!(count, 20);
-
-    // Verify field roundtrip for first event
-    #[derive(Debug, clickhouse::Row, serde::Deserialize)]
-    #[allow(dead_code)]
-    struct TestRow {
-        recv_timestamp_us: u64,
-        asset_id: String,
-        event_type: String,
-        price: u32,
-        size: u64,
-    }
-
-    let row: TestRow = client
-        .query(
-            "SELECT recv_timestamp_us, asset_id, event_type, price, size \
-             FROM orderbook_events ORDER BY recv_timestamp_us LIMIT 1",
-        )
-        .fetch_one()
-        .await
-        .unwrap();
-
-    assert_eq!(row.recv_timestamp_us, 1_700_000_000_000_000);
-    assert_eq!(row.asset_id, "ch-test-1");
-    assert_eq!(row.event_type, "Snapshot");
-    assert_eq!(row.price, events[0].price.raw());
-    assert_eq!(row.size, events[0].size.raw());
+async fn count_rows(client: &clickhouse::Client, table: &str) -> u64 {
+    let query = format!("SELECT count() AS count FROM {table}");
+    let row: CountRow = client.query(&query).fetch_one().await.unwrap();
+    row.count
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_clickhouse_reader_roundtrip() {
-    let (_container, client, _db) = setup_clickhouse().await;
+async fn clickhouse_market_data_roundtrip_split_tables() {
+    let (_container, client, url, db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_000_000_000;
+    let asset_id = AssetId::new("clickhouse-market-data");
+    let records = market_data_records(asset_id.as_str(), base_ts);
 
-    let events = make_test_events("ch-test-2", 20);
-    write_events_via_sink(client.clone(), &events).await;
+    write_records(client.clone(), &records).await;
 
-    let reader = ClickHouseReaderFromClient::new(client.clone());
+    assert_eq!(count_rows(&client, "book_events").await, 2);
+    assert_eq!(count_rows(&client, "trade_events").await, 1);
+    assert_eq!(count_rows(&client, "ingest_events").await, 1);
 
-    let asset_id = AssetId::new("ch-test-2");
-    let read_events = reader
-        .read_events(
-            &asset_id,
-            1_700_000_000_000_000,
-            1_700_000_000_000_000 + 20_000_000,
-        )
+    let reader = ClickHouseReader::new(&url, &db_name);
+    let window = reader
+        .read_market_data(&asset_id, base_ts, base_ts + 20_000)
         .await
         .unwrap();
-
-    assert_eq!(read_events.len(), 20);
-
-    // Verify ordering by (recv_timestamp_us, sequence)
-    for window in read_events.windows(2) {
-        assert!(
-            (window[0].recv_timestamp_us, window[0].sequence.raw())
-                <= (window[1].recv_timestamp_us, window[1].sequence.raw())
-        );
-    }
-
-    // Verify first event fields
-    assert_eq!(read_events[0].asset_id.as_str(), "ch-test-2");
-    assert_eq!(read_events[0].event_type, EventType::Snapshot);
-    assert_eq!(read_events[0].price.raw(), events[0].price.raw());
+    assert_eq!(window.book_events.len(), 2);
+    assert_eq!(window.trade_events.len(), 1);
+    assert_eq!(window.ingest_events.len(), 1);
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_clickhouse_replay_engine() {
-    let (_container, client, _db) = setup_clickhouse().await;
+async fn clickhouse_checkpoint_and_validation_roundtrip() {
+    let (_container, client, url, db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_100_000_000;
+    let asset_id = AssetId::new("clickhouse-checkpoint");
+    let records = checkpoint_and_validation_records(asset_id.as_str(), base_ts);
 
-    let base_ts: u64 = 1_700_000_000_000_000;
-    let events = make_replay_events("ch-replay", base_ts);
-    write_events_via_sink(client.clone(), &events).await;
+    write_records(client.clone(), &records).await;
 
-    let reader = ClickHouseReaderFromClient::new(client);
-    let engine = ReplayEngine::new(reader);
+    assert_eq!(count_rows(&client, "book_checkpoints").await, 1);
+    assert_eq!(count_rows(&client, "replay_validations").await, 1);
 
-    // Reconstruct at snapshot time
-    let book = engine
-        .reconstruct_at(&AssetId::new("ch-replay"), base_ts)
+    let reader = ClickHouseReader::new(&url, &db_name);
+    let checkpoints = reader
+        .read_checkpoints(&asset_id, base_ts, base_ts + 20_000)
         .await
         .unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0].asset_id, asset_id);
 
-    assert_eq!(book.bid_depth(), 3);
-    assert_eq!(book.ask_depth(), 2);
-    assert_eq!(book.best_bid().unwrap().0.raw(), 5000);
-    assert_eq!(book.best_ask().unwrap().0.raw(), 5500);
-
-    // Reconstruct after all deltas
-    let book = engine
-        .reconstruct_at(&AssetId::new("ch-replay"), base_ts + 3_000_000)
+    let validations = reader
+        .read_validations(&asset_id, base_ts, base_ts + 20_000)
         .await
         .unwrap();
-
-    // Delta 1: bid at 5000 updated to 500 size
-    assert_eq!(book.best_bid().unwrap().1.raw(), 500_000_000);
-    // Delta 2: new ask at 5200 (becomes best ask)
-    assert_eq!(book.best_ask().unwrap().0.raw(), 5200);
-    // Delta 3: bid at 4800 removed -> 2 bids remain
-    assert_eq!(book.bid_depth(), 2);
-    // 3 asks total: 5200, 5500, 5600
-    assert_eq!(book.ask_depth(), 3);
+    assert_eq!(validations.len(), 1);
+    assert!(validations[0].matched);
 }
 
-/// A ClickHouseReader that wraps an existing client (for testing).
-/// This avoids needing to expose the container's mapped port through the URL.
-struct ClickHouseReaderFromClient {
-    client: clickhouse::Client,
-}
+#[tokio::test]
+#[ignore]
+async fn clickhouse_execution_event_roundtrip() {
+    let (_container, client, url, db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_200_000_000;
+    let order_id = "order-clickhouse-1";
+    let records = execution_records("clickhouse-execution", order_id, base_ts);
 
-impl ClickHouseReaderFromClient {
-    fn new(client: clickhouse::Client) -> Self {
-        Self { client }
-    }
-}
+    write_records(client.clone(), &records).await;
 
-#[derive(Debug, clickhouse::Row, serde::Deserialize)]
-struct EventRow {
-    recv_timestamp_us: u64,
-    exchange_timestamp_us: u64,
-    asset_id: String,
-    event_type: String,
-    side: Option<String>,
-    price: u32,
-    size: u64,
-    sequence: u64,
-}
+    assert_eq!(count_rows(&client, "execution_events").await, 2);
 
-impl pb_replay::reader::EventReader for ClickHouseReaderFromClient {
-    async fn read_events(
-        &self,
-        asset_id: &AssetId,
-        start_us: u64,
-        end_us: u64,
-    ) -> Result<Vec<OrderbookEvent>, pb_replay::ReplayError> {
-        let rows: Vec<EventRow> = self
-            .client
-            .query(
-                "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, \
-                 event_type, side, price, size, sequence \
-                 FROM orderbook_events \
-                 WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? \
-                 ORDER BY recv_timestamp_us, sequence",
-            )
-            .bind(asset_id.as_str())
-            .bind(start_us)
-            .bind(end_us)
-            .fetch_all()
-            .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let event_type = match row.event_type.as_str() {
-                    "Snapshot" => EventType::Snapshot,
-                    "Delta" => EventType::Delta,
-                    "Trade" => EventType::Trade,
-                    other => {
-                        return Err(pb_replay::ReplayError::InvalidEventType(other.to_string()))
-                    }
-                };
-                let side = match row.side.as_deref() {
-                    Some("Bid") => Some(Side::Bid),
-                    Some("Ask") => Some(Side::Ask),
-                    None | Some("") => None,
-                    Some(other) => {
-                        return Err(pb_replay::ReplayError::InvalidSide(other.to_string()))
-                    }
-                };
-                let price = FixedPrice::new(row.price)?;
-                Ok(OrderbookEvent {
-                    recv_timestamp_us: row.recv_timestamp_us,
-                    exchange_timestamp_us: row.exchange_timestamp_us,
-                    asset_id: AssetId::new(row.asset_id),
-                    event_type,
-                    side,
-                    price,
-                    size: FixedSize::new(row.size),
-                    sequence: Sequence::new(row.sequence),
-                })
-            })
-            .collect()
-    }
+    let reader = ClickHouseReader::new(&url, &db_name);
+    let events = reader
+        .read_execution_events(Some(order_id), base_ts, base_ts + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, ExecutionEventKind::SubmitIntent);
+    assert_eq!(events[1].kind, ExecutionEventKind::Fill);
+    assert_eq!(events[0].latency.market_data_recv_us, Some(base_ts - 5));
+    assert_eq!(events[0].latency.exchange_fill_us, None);
+    assert_eq!(events[1].latency.exchange_fill_us, Some(base_ts + 500));
 }

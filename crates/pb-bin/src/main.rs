@@ -61,7 +61,30 @@ enum Commands {
         /// Data source: "parquet" or "clickhouse"
         #[arg(long, default_value = "parquet")]
         source: String,
+        /// Replay ordering mode: "recv_time" or "exchange_time"
+        #[arg(long)]
+        mode: String,
+        /// Validate against the next checkpoint and persist the validation result
+        #[arg(long, default_value_t = false)]
+        validate: bool,
     },
+    /// Replay stored execution history independently of market-data replay
+    ExecutionReplay {
+        /// Optional order ID filter
+        #[arg(long)]
+        order_id: Option<String>,
+        /// Start timestamp in microseconds since epoch
+        #[arg(long)]
+        start: u64,
+        /// End timestamp in microseconds since epoch
+        #[arg(long)]
+        end: u64,
+        /// Data source: "parquet" or "clickhouse"
+        #[arg(long, default_value = "parquet")]
+        source: String,
+    },
+    /// Append execution events to storage from flags or JSON input
+    ExecutionAppend(Box<commands::execution_append::ExecutionAppendArgs>),
     /// Backfill historical data via REST API snapshots
     Backfill {
         /// Comma-separated token IDs to backfill
@@ -140,8 +163,25 @@ async fn main() -> Result<()> {
         } => {
             commands::ingest::run(settings, tokens, parquet, clickhouse, metrics, shutdown).await?;
         }
-        Commands::Replay { token, at, source } => {
-            commands::replay::run(settings, token, at, source).await?;
+        Commands::Replay {
+            token,
+            at,
+            source,
+            mode,
+            validate,
+        } => {
+            commands::replay::run(settings, token, at, source, mode, validate).await?;
+        }
+        Commands::ExecutionReplay {
+            order_id,
+            start,
+            end,
+            source,
+        } => {
+            commands::execution_replay::run(settings, order_id, start, end, source).await?;
+        }
+        Commands::ExecutionAppend(args) => {
+            commands::execution_append::run(settings, *args).await?;
         }
         Commands::Backfill {
             tokens,

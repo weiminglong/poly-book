@@ -16,4 +16,10 @@ pub enum StoreError {
 
     #[error("Object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    Other(String),
 }
