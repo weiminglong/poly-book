@@ -36,14 +36,14 @@ struct ExecutionAppendInput {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ExecutionAppendPayload {
-    One(ExecutionAppendInput),
+    One(Box<ExecutionAppendInput>),
     Many(Vec<ExecutionAppendInput>),
 }
 
 impl ExecutionAppendPayload {
     fn into_records(self) -> Result<Vec<PersistedRecord>> {
         match self {
-            Self::One(event) => Ok(vec![PersistedRecord::Execution(event.try_into()?)]),
+            Self::One(event) => Ok(vec![PersistedRecord::Execution((*event).try_into()?)]),
             Self::Many(events) => events
                 .into_iter()
                 .map(|event| Ok(PersistedRecord::Execution(event.try_into()?)))
