@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -25,9 +26,11 @@ pub struct Dispatcher {
     /// Per-asset monotonic sequence counters.
     /// Snapshots reset the counter; deltas increment it.
     /// This makes `L2Book::check_sequence()` meaningful during replay.
-    asset_sequences: HashMap<String, u64>,
+    asset_sequences: HashMap<Arc<str>, u64>,
     /// Per-asset last snapshot exchange timestamp for staleness detection.
-    last_snapshot_ts: HashMap<String, u64>,
+    last_snapshot_ts: HashMap<Arc<str>, u64>,
+    /// Interned AssetIds to avoid heap allocation on every message.
+    asset_id_cache: HashMap<Arc<str>, AssetId>,
 }
 
 impl Dispatcher {
@@ -37,6 +40,7 @@ impl Dispatcher {
             tx,
             asset_sequences: HashMap::new(),
             last_snapshot_ts: HashMap::new(),
+            asset_id_cache: HashMap::new(),
         }
     }
 
@@ -85,7 +89,7 @@ impl Dispatcher {
 
         match msg {
             WsMessage::Book(book) => {
-                let asset_id = AssetId::new(book.asset_id);
+                let asset_id = self.intern_asset_id(book.asset_id);
                 let exchange_ts = parse_timestamp(book.timestamp);
 
                 // Staleness check: skip snapshots with exchange_ts <= last seen
@@ -103,7 +107,7 @@ impl Dispatcher {
                         }
                     }
                     self.last_snapshot_ts
-                        .insert(asset_id.as_str().to_owned(), exchange_ts);
+                        .insert(asset_id.0.clone(), exchange_ts);
                 }
                 pb_metrics::record_snapshot_reconciled();
 
@@ -111,7 +115,7 @@ impl Dispatcher {
                 if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
                     *seq = 0;
                 } else {
-                    self.asset_sequences.insert(asset_id.as_str().to_owned(), 0);
+                    self.asset_sequences.insert(asset_id.0.clone(), 0);
                 }
 
                 for entry in &book.bids {
@@ -152,10 +156,11 @@ impl Dispatcher {
                         }
                     };
 
+                    let asset_id = self.intern_asset_id(entry.asset_id);
                     let event = self.make_event(
                         raw.recv_timestamp_us,
                         exchange_ts,
-                        AssetId::new(entry.asset_id),
+                        asset_id,
                         EventType::Delta,
                         side,
                         entry.price,
@@ -165,10 +170,11 @@ impl Dispatcher {
                 }
             }
             WsMessage::LastTradePrice(lt) => {
+                let asset_id = self.intern_asset_id(lt.asset_id);
                 let event = self.make_event(
                     raw.recv_timestamp_us,
                     parse_timestamp(lt.timestamp),
-                    AssetId::new(lt.asset_id),
+                    asset_id,
                     EventType::Trade,
                     None,
                     lt.price,
@@ -209,6 +215,16 @@ impl Dispatcher {
         })
     }
 
+    fn intern_asset_id(&mut self, raw: &str) -> AssetId {
+        if let Some(cached) = self.asset_id_cache.get(raw) {
+            cached.clone()
+        } else {
+            let id = AssetId::new(raw);
+            self.asset_id_cache.insert(id.0.clone(), id.clone());
+            id
+        }
+    }
+
     fn next_sequence_for(&mut self, asset_id: &AssetId) -> Sequence {
         if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
             let current = *seq;
@@ -216,7 +232,7 @@ impl Dispatcher {
             Sequence::new(current)
         } else {
             // New asset starts at sequence 0, then advances to 1.
-            self.asset_sequences.insert(asset_id.as_str().to_owned(), 1);
+            self.asset_sequences.insert(asset_id.0.clone(), 1);
             Sequence::new(0)
         }
     }
@@ -266,7 +282,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
 
-        dispatcher.asset_sequences.insert("tok1".to_string(), 99);
+        dispatcher.asset_sequences.insert(Arc::from("tok1"), 99);
 
         let msg = serde_json::json!({
             "event_type": "book",

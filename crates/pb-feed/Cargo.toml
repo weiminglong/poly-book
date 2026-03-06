@@ -9,6 +9,7 @@ pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
+native-tls = "0.2"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
