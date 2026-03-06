@@ -16,6 +16,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
+authors = ["Weiming Long <longweiming665@gmail.com>"]
+repository = "https://github.com/weiminglong/poly-book"
+homepage = "https://github.com/weiminglong/poly-book"
+readme = "README.md"
 
 [workspace.dependencies]
 # Internal crates

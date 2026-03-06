@@ -2,6 +2,13 @@
 name = "pb-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Parquet and ClickHouse storage sinks for the poly-book workspace"
 
 [dependencies]
 pb-types = { workspace = true }

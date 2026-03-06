@@ -1,264 +1,218 @@
 # poly-book
 
-High-performance Polymarket BTC 5-minute market-data ingestion, checkpointing, execution journaling, and replay system built in Rust.
+[![CI](https://github.com/weiminglong/poly-book/actions/workflows/ci.yml/badge.svg)](https://github.com/weiminglong/poly-book/actions/workflows/ci.yml)
+[![Supply Chain](https://github.com/weiminglong/poly-book/actions/workflows/supply-chain.yml/badge.svg)](https://github.com/weiminglong/poly-book/actions/workflows/supply-chain.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Designed to demonstrate low-latency data engineering patterns relevant to quantitative trading infrastructure: fixed-point arithmetic, zero-copy deserialization, lock-free channel-based architecture, and tiered storage.
+`poly-book` is a Rust workspace for collecting Polymarket order book data, storing
+it in replay-friendly formats, and reconstructing market state later.
 
-## Architecture
+It is aimed at people building or studying low-latency market-data systems:
 
-```
-Polymarket WS ──> pb-feed (deser + lifecycle) ──> pb-store
-REST snapshots ──> pb-replay backfill ────────────────┘  ├─> Parquet split datasets
-Strategy/exchange hooks ────────────────────────────────┘  └─> ClickHouse split datasets
-                                                       v
-                                                  pb-metrics (Prometheus)
-```
+- live WebSocket and REST ingestion
+- split Parquet and ClickHouse storage
+- checkpoint-based historical replay
+- metrics and operational hooks
 
-- Single-threaded book updates — no locks on hot path
-- Bounded `tokio::mpsc` channels with backpressure between components
-- Message-passing only, no `Arc<Mutex<_>>`
-- Split persisted datasets: `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`, `replay_validations`, `execution_events`
+## Project Status
 
-## Project Structure
+This is an active personal project that is open to outside contributions.
 
-```
-poly-book/
-├── Cargo.toml                     # Workspace root
-├── config/default.toml            # Runtime configuration
-├── openspec/                      # Spec-driven development artifacts
-│   └── changes/archive/          # Completed change specs (proposal, design, tasks)
-├── crates/
-│   ├── pb-types/                  # Fixed-point decimals, wire formats, event types
-│   ├── pb-book/                   # In-memory L2 orderbook engine (BTreeMap-based)
-│   ├── pb-feed/                   # WebSocket + REST ingest, dispatcher, rate limiter
-│   ├── pb-store/                  # Parquet sink + ClickHouse sink
-│   ├── pb-replay/                 # Historical replay engine + backfill
-│   ├── pb-metrics/                # Prometheus metrics + HTTP endpoint
-│   └── pb-bin/                    # CLI binary (discover, ingest, replay, backfill)
-```
+Current expectations:
 
-## Key Design Decisions
+- the core ingestion and replay path is working and covered by tests
+- APIs and storage layout may still evolve
+- the repository is optimized for contributor readability, not long-term API stability
 
-### Fixed-Point Price (`FixedPrice(u32)` scaled by 10,000)
-Polymarket prices are 0.00–1.00. A `u32` scaled by 10,000 gives 4-decimal precision in 4 bytes with `Copy` and trivial `Ord` — vs `Decimal` at 16 bytes with complex comparisons. Quantities use `FixedSize(u64)` scaled by 1,000,000.
+If you want to contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### L2Book with `BTreeMap<Reverse<FixedPrice>, FixedSize>` for bids
-Sorted iteration yields best-to-worst without re-sorting. Cache-friendly for small books (<50 levels typical on Polymarket). Asks use `BTreeMap<FixedPrice, FixedSize>` for lowest-first ordering.
-
-### Zero-Copy Wire Deserialization
-`serde(borrow)` with `&'a str` on WebSocket message types borrows directly from the raw WS buffer — no heap allocation for string fields during deserialization.
-
-### Tiered Storage
-- **Cold**: Parquet files with Zstd compression, 64K row groups, time-partitioned at `data/<dataset>/{year}/{month}/{day}/{hour}/`
-- **Warm**: ClickHouse split tables keyed by dataset semantics instead of one overloaded `orderbook_events` table
-- **Replay**: `pb-replay` reconstructs from `book_events` plus `book_checkpoints`, and reads continuity from `ingest_events`
-
-### Cloud-Ready
-The `object_store` crate abstracts Parquet writes — switch from local filesystem to S3/GCS/Azure with a config change. ClickHouse URL is configurable via environment variable.
-
-## Getting Started
+## Quickstart
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (1.75+)
-- [just](https://github.com/casey/just) (optional, task runner — `brew install just`)
-- [DuckDB](https://duckdb.org/) (optional, for Parquet inspection — `brew install duckdb`)
-- ClickHouse (optional, for warm storage)
+- [Rust](https://rustup.rs/) 1.75+
+- Docker for the full integration suite
+- `just` is optional
+- `duckdb` is optional for Parquet inspection
+- ClickHouse is optional unless you want warm-storage testing
 
-### Build and Test
-
-```bash
-just check       # type-check all crates
-just test        # run all tests
-just bench       # run Criterion benchmarks
-just clippy      # lint with warnings as errors
-just ci          # fmt-check + clippy + test (mirrors CI)
-```
-
-Or with cargo directly:
+### Build
 
 ```bash
 cargo build
-cargo test
-cargo bench
 ```
 
-Run `just --list` to see all available recipes.
+### Fast Local Validation
 
-### Usage
+```bash
+cargo test --workspace --exclude pb-integration-tests
+```
 
-#### Discover active BTC 5-minute markets
+### Full Validation
+
+```bash
+just ci
+```
+
+This runs formatting, Clippy, and the full test suite. The integration package
+includes ClickHouse round-trip coverage through `testcontainers`, so Docker must
+be available.
+
+### Copy-Paste Demo
+
+```bash
+cargo run -- discover --filter btc --limit 5
+```
+
+Expected output shape:
+
+```text
+--- Live BTC 5-minute market ---
+Event: <event title>
+  Market: <market question>
+    Token IDs: <yes_token_id>,<no_token_id>
+    Active: true
+```
+
+The exact market title and token IDs change over time.
+
+## Common Workflows
+
+### Discover markets
 
 ```bash
 just discover
-# or: cargo run -- discover --filter btc
+# or
+cargo run -- discover --filter btc --limit 100
 ```
 
-#### Auto-discover and ingest (recommended)
+### Auto-discover and ingest
 
 ```bash
 just auto-ingest
-# or: cargo run -- auto-ingest
+# or
+cargo run -- auto-ingest
 ```
 
-Continuously discovers live BTC 5-minute markets and rotates ingestion automatically.
+Continuously rotates to the live BTC 5-minute market and ingests data.
 
-#### Ingest specific tokens
+### Ingest known token IDs
 
 ```bash
 just ingest <TOKEN_ID>
-# or: cargo run -- ingest --tokens <TOKEN_ID> --parquet --metrics
+# or
+cargo run -- ingest --tokens <TOKEN_ID> --parquet --metrics
 ```
 
-#### Replay book state at a historical timestamp
+### Replay historical state
 
 ```bash
 just replay <TOKEN_ID> <TIMESTAMP_US>
-# or: cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --source parquet --mode recv_time
+# or
+cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --source parquet --mode recv_time
 ```
 
-Replay now requires an explicit timeline mode:
+Replay modes:
+
 - `recv_time` reproduces local observation order
 - `exchange_time` reorders by venue timestamp, then receive time, then sequence
 
-Add `--validate` to compare against the next stored checkpoint and persist a validation record.
+Add `--validate` to compare replay output against the next checkpoint.
 
-#### Replay execution history independently of market data
+### Replay execution history
 
 ```bash
 cargo run -- execution-replay --start <START_US> --end <END_US> --source parquet
-# optional: add --order-id <ORDER_ID>
 ```
 
-#### Backfill historical checkpoints via REST
+### Backfill checkpoints
 
 ```bash
 just backfill <TOKEN_ID>
-# or: cargo run -- backfill --tokens <TOKEN_ID> --interval-secs 60
+# or
+cargo run -- backfill --tokens <TOKEN_ID> --interval-secs 60
 ```
 
-Backfill now persists periodic `book_checkpoints` rather than synthetic orderbook snapshot rows.
-
-#### Inspect ingested Parquet data (requires DuckDB)
+### Inspect local Parquet output
 
 ```bash
-just parquet-stats    # row count, timestamp range, event type breakdown
-just parquet-peek     # first 20 rows
-just parquet-schema   # column names and types
+just parquet-stats
+just parquet-peek
+just parquet-schema
 ```
 
-### Configuration
+## Why This Repo Exists
 
-Runtime config is layered: `config/default.toml` -> environment variables (`PB__` prefix) -> CLI args.
+The project demonstrates a specific style of trading-infrastructure design:
 
-```toml
-[feed]
-ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-ping_interval_secs = 10
-rate_limit_requests = 1500
+- fixed-point numeric types instead of heap-heavy decimal math
+- single-threaded book mutation on the hot path
+- bounded channels and backpressure between components
+- typed, split datasets instead of one overloaded event stream
+- replay and validation as first-class storage consumers
 
-[storage]
-parquet_base_path = "./data"
-parquet_flush_interval_secs = 300
-clickhouse_url = "http://localhost:8123"
+## Architecture
 
-[metrics]
-listen_addr = "0.0.0.0:9090"
+```text
+Polymarket WS -> pb-feed -> pb-store -> Parquet / ClickHouse
+REST snapshots -> pb-replay -------^
+                               |
+                               -> pb-metrics
 ```
 
-## Crate Details
+Workspace crates:
 
-| Crate | Description |
-|-------|-------------|
-| **pb-types** | Fixed-point types plus typed persisted records for books, trades, ingest lifecycle, checkpoints, validations, and execution events |
-| **pb-book** | `L2Book` with `apply_snapshot`, `apply_delta`, `best_bid/ask`, `mid_price`, `spread`, sequence gap detection |
-| **pb-feed** | `WsClient` (reconnect with exp backoff + jitter + lifecycle events), `RestClient`, `Dispatcher` (typed record normalization), `RateLimiter` |
-| **pb-store** | `ParquetSink` and `ClickHouseSink` for split datasets instead of one overloaded event stream |
-| **pb-replay** | Dataset-aware readers, explicit replay modes, checkpoint-based reconstruction, validation, checkpoint backfill, and execution replay |
-| **pb-metrics** | Prometheus counters/histograms (`messages_received`, `deltas_applied`, `gaps_detected`, latency), axum HTTP `/metrics` endpoint |
-| **pb-bin** | CLI with `discover`, `ingest`, `auto-ingest`, `replay`, `execution-replay`, and `backfill` subcommands |
+| Crate | Responsibility |
+|-------|----------------|
+| `pb-types` | Fixed-point types, wire formats, and persisted records |
+| `pb-book` | In-memory L2 order book engine |
+| `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
+| `pb-store` | Parquet and ClickHouse sinks |
+| `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
+| `pb-metrics` | Prometheus metrics endpoint |
+| `pb-bin` | CLI entrypoint |
 
-## Polymarket API
+## Configuration
 
-| Endpoint | Purpose |
-|----------|---------|
-| `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Real-time orderbook (no auth, ping every 10s) |
-| `https://clob.polymarket.com/book?token_id=<id>` | REST book snapshot (1,500 req/10s limit) |
-| `https://gamma-api.polymarket.com/events` | Market discovery |
+Runtime config is layered:
 
-Message types: `book` (snapshot), `price_change` (delta), `last_trade_price` (trade).
+1. `config/default.toml`
+2. environment variables prefixed with `PB__`
+3. CLI flags
+
+Example:
+
+```bash
+PB__LOGGING__LEVEL=debug cargo run -- auto-ingest
+```
+
+Operational details, deployment notes, infrastructure setup, and data layout live
+in [docs/operations.md](docs/operations.md).
+
+## Roadmap
+
+Near-term work that would make strong public contributions:
+
+- broader replay validation and determinism coverage
+- better local sample-data workflows for offline development
+- more explicit schema/versioning guarantees for persisted datasets
+- clearer operational docs for ClickHouse and cloud object storage
+- examples for strategy hooks and execution-event workflows
 
 ## Development Workflow
 
-This project uses [OpenSpec](https://github.com/Fission-AI/OpenSpec) for spec-driven development. Each feature phase has a proposal, design doc, requirement specs (Given/When/Then), and implementation tasks archived in `openspec/changes/archive/`.
+This repository uses [OpenSpec](https://github.com/Fission-AI/OpenSpec) for larger
+feature work. Archived proposals, designs, specs, and tasks live under
+`openspec/changes/archive/`.
 
-| Change | Scope |
-|--------|-------|
-| `pb-types-foundation` | Fixed-point types, wire formats, events |
-| `pb-book-engine` | L2Book with BTreeMap, snapshot/delta ops |
-| `live-data-feed` | WebSocket client, REST client, dispatcher |
-| `storage-pipeline` | Parquet sink, ClickHouse sink, Arrow schemas |
-| `replay-backfill` | Replay engine, readers, backfill CLI |
-| `observability` | Prometheus metrics, CLI, layered config |
+For contribution standards and PR expectations, see:
 
-## CI/CD
-
-### Continuous Integration
-
-Every push and PR to `main` runs four checks in parallel:
-
-| Check | Command | Purpose |
-|-------|---------|---------|
-| Check | `cargo check --all-targets` | Type-check all code |
-| Test | `cargo test` | Run all 29 unit tests |
-| Clippy | `cargo clippy --all-targets` | Lint for correctness and idioms |
-| Format | `cargo fmt --all -- --check` | Verify rustfmt formatting |
-
-### Continuous Deployment
-
-Merging to `main` triggers automated deployment to AWS ECS:
-
-```
-merge to main -> CI passes -> Docker build -> push to ECR -> update ECS service
-```
-
-- **OIDC auth** — no long-lived AWS keys; GitHub Actions assumes an IAM role scoped to `main`
-- **Fargate Spot** — ~$4-5/mo running, ~$0.08/mo stopped
-- **Rolling deploy** — new task definition registered, service updated, waits for stability
-
-### Infrastructure
-
-Terraform configs in `infra/` provision all AWS resources:
-
-```
-ECR (container registry) + ECS Fargate Spot (compute) + S3 (Parquet storage)
-VPC (2 public subnets, no NAT) + IAM (OIDC, task roles) + CloudWatch (logs)
-```
-
-#### Setup
-
-```bash
-cd infra
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars to set github_org
-terraform init && terraform apply
-# Copy github_actions_role_arn output -> GitHub secret AWS_DEPLOY_ROLE_ARN
-```
-
-#### Cost Control
-
-Set `desired_count = 0` in `terraform.tfvars` and `terraform apply` to stop all tasks (~$0.08/mo for idle resources). Set back to `1` to resume.
-
-## Future: Market Making Extension (v2)
-
-The single-threaded book architecture directly supports adding a market making strategy:
-
-```
-pb-feed -> pb-book (L2Book) -> pb-strategy (decision) -> pb-execution (order placement)
-```
-
-No architecture changes needed — the v1 hot path is already the correct shape for sub-microsecond book-update-to-order-decision latency.
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [SECURITY.md](SECURITY.md)
+- [CHANGELOG.md](CHANGELOG.md)
+- [docs/releasing.md](docs/releasing.md)
 
 ## License
 
-MIT
+[MIT](LICENSE)
