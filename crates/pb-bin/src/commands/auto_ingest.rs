@@ -111,8 +111,7 @@ pub async fn run(
     }
 
     // --- Persistent event channel ---
-    let (event_tx, mut event_rx) =
-        tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::OrderbookEvent>(10_000);
 
     // --- Storage sinks (persistent) ---
     let mut sink_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -277,7 +276,11 @@ pub async fn run(
             let sleep_until = (target_bucket + 300) - 10;
             let sleep_secs = sleep_until.saturating_sub(current_unix_secs());
             if sleep_secs > 0 {
-                tracing::debug!(sleep_secs, target_bucket, "already on target, waiting for next boundary");
+                tracing::debug!(
+                    sleep_secs,
+                    target_bucket,
+                    "already on target, waiting for next boundary"
+                );
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(sleep_secs)) => {}
                     _ = shutdown.cancelled() => break,
@@ -291,7 +294,11 @@ pub async fn run(
             let sleep_until = target_bucket - 10;
             let sleep_secs = sleep_until.saturating_sub(current_unix_secs());
             if sleep_secs > 0 {
-                tracing::debug!(sleep_secs, next_bucket = target_bucket, "sleeping until pre-rotation window");
+                tracing::debug!(
+                    sleep_secs,
+                    next_bucket = target_bucket,
+                    "sleeping until pre-rotation window"
+                );
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(sleep_secs)) => {}
                     _ = shutdown.cancelled() => break,

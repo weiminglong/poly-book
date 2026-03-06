@@ -24,10 +24,7 @@ pub fn register_metrics() {
         "Total storage flushes (parquet + clickhouse)"
     );
     describe_counter!("pb_rest_requests_total", "Total REST API requests made");
-    describe_counter!(
-        "pb_rotations_total",
-        "Total market rotations performed"
-    );
+    describe_counter!("pb_rotations_total", "Total market rotations performed");
     describe_counter!(
         "pb_discovery_failures_total",
         "Total failed market discovery attempts"
