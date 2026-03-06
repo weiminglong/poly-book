@@ -325,16 +325,18 @@ fn apply_snapshot_events(book: &mut L2Book, snapshot_events: &[&BookEvent], time
 }
 
 fn books_match_checkpoint(book: &L2Book, checkpoint: &BookCheckpoint) -> bool {
-    let checkpoint_bids = checkpoint
+    let mut checkpoint_bids: Vec<_> = checkpoint
         .bids
         .iter()
         .map(|level| (level.price, level.size))
-        .collect::<Vec<_>>();
-    let checkpoint_asks = checkpoint
+        .collect();
+    checkpoint_bids.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut checkpoint_asks: Vec<_> = checkpoint
         .asks
         .iter()
         .map(|level| (level.price, level.size))
-        .collect::<Vec<_>>();
+        .collect();
+    checkpoint_asks.sort_by_key(|&(price, _)| price);
     book.bids_sorted() == checkpoint_bids && book.asks_sorted() == checkpoint_asks
 }
 

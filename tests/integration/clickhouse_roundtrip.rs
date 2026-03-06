@@ -74,11 +74,14 @@ fn checkpoint_and_validation_records(asset_id: &str, base_ts: u64) -> Vec<Persis
         PersistedRecord::Checkpoint(BookCheckpoint {
             asset_id: asset_id.clone(),
             checkpoint_timestamp_us: base_ts + 10_000,
-            recv_timestamp_us: base_ts + 10_500,
-            exchange_timestamp_us: base_ts + 10_000,
-            source: DataSource::RestSnapshot,
-            source_event_id: Some("checkpoint-1".to_string()),
-            source_session_id: None,
+            provenance: EventProvenance {
+                recv_timestamp_us: base_ts + 10_500,
+                exchange_timestamp_us: base_ts + 10_000,
+                source: DataSource::RestSnapshot,
+                source_event_id: Some("checkpoint-1".to_string()),
+                source_session_id: None,
+                sequence: None,
+            },
             bids: vec![PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),
                 size: FixedSize::from_f64(100.0).unwrap(),

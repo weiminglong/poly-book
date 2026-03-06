@@ -152,11 +152,7 @@ pub struct PriceLevel {
 pub struct BookCheckpoint {
     pub asset_id: AssetId,
     pub checkpoint_timestamp_us: u64,
-    pub recv_timestamp_us: u64,
-    pub exchange_timestamp_us: u64,
-    pub source: DataSource,
-    pub source_event_id: Option<String>,
-    pub source_session_id: Option<String>,
+    pub provenance: EventProvenance,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
 }
@@ -344,14 +340,14 @@ impl PersistedRecord {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketDataWindow {
     pub book_events: Vec<BookEvent>,
     pub trade_events: Vec<TradeEvent>,
     pub ingest_events: Vec<IngestEvent>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionWindow {
     pub execution_events: Vec<ExecutionEvent>,
 }

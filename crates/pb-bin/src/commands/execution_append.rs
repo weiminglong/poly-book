@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use clap::Args;
 use config::Config;
 use serde::Deserialize;
 
@@ -10,6 +11,53 @@ use pb_types::{
     AssetId, ExecutionEvent, ExecutionEventKind, FixedPrice, FixedSize, LatencyTrace,
     PersistedRecord, Side,
 };
+
+#[derive(Args)]
+pub struct ExecutionAppendArgs {
+    /// Data sink: "parquet" or "clickhouse"
+    #[arg(long, default_value = "parquet")]
+    pub source: String,
+    /// Optional path to a JSON object or array payload
+    #[arg(long)]
+    pub json: Option<String>,
+    /// Required unless --json is used
+    #[arg(long)]
+    pub order_id: Option<String>,
+    /// Required unless --json is used
+    #[arg(long)]
+    pub event_kind: Option<String>,
+    /// Required unless --json is used
+    #[arg(long)]
+    pub event_timestamp_us: Option<u64>,
+    #[arg(long)]
+    pub asset_id: Option<String>,
+    #[arg(long)]
+    pub client_order_id: Option<String>,
+    #[arg(long)]
+    pub venue_order_id: Option<String>,
+    #[arg(long)]
+    pub side: Option<String>,
+    #[arg(long)]
+    pub price: Option<String>,
+    #[arg(long)]
+    pub size: Option<String>,
+    #[arg(long)]
+    pub status: Option<String>,
+    #[arg(long)]
+    pub reason: Option<String>,
+    #[arg(long)]
+    pub market_data_recv_us: Option<u64>,
+    #[arg(long)]
+    pub normalization_done_us: Option<u64>,
+    #[arg(long)]
+    pub strategy_decision_us: Option<u64>,
+    #[arg(long)]
+    pub order_submit_us: Option<u64>,
+    #[arg(long)]
+    pub exchange_ack_us: Option<u64>,
+    #[arg(long)]
+    pub exchange_fill_us: Option<u64>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,29 +143,29 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    settings: Config,
-    source: String,
-    json: Option<String>,
-    order_id: Option<String>,
-    event_kind: Option<String>,
-    event_timestamp_us: Option<u64>,
-    asset_id: Option<String>,
-    client_order_id: Option<String>,
-    venue_order_id: Option<String>,
-    side: Option<String>,
-    price: Option<String>,
-    size: Option<String>,
-    status: Option<String>,
-    reason: Option<String>,
-    market_data_recv_us: Option<u64>,
-    normalization_done_us: Option<u64>,
-    strategy_decision_us: Option<u64>,
-    order_submit_us: Option<u64>,
-    exchange_ack_us: Option<u64>,
-    exchange_fill_us: Option<u64>,
-) -> Result<()> {
+pub async fn run(settings: Config, args: ExecutionAppendArgs) -> Result<()> {
+    let ExecutionAppendArgs {
+        source,
+        json,
+        order_id,
+        event_kind,
+        event_timestamp_us,
+        asset_id,
+        client_order_id,
+        venue_order_id,
+        side,
+        price,
+        size,
+        status,
+        reason,
+        market_data_recv_us,
+        normalization_done_us,
+        strategy_decision_us,
+        order_submit_us,
+        exchange_ack_us,
+        exchange_fill_us,
+    } = args;
+
     let records = if let Some(path) = json {
         let payload = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read execution append JSON from {path}"))?;

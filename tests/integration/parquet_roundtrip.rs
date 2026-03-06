@@ -66,11 +66,14 @@ fn make_records(asset_id: &str, base_timestamp: u64) -> Vec<PersistedRecord> {
         PersistedRecord::Checkpoint(BookCheckpoint {
             asset_id,
             checkpoint_timestamp_us: base_timestamp + 3_000_000,
-            recv_timestamp_us: base_timestamp + 3_000_100,
-            exchange_timestamp_us: base_timestamp + 3_000_000,
-            source: DataSource::RestSnapshot,
-            source_event_id: Some("checkpoint-1".to_string()),
-            source_session_id: None,
+            provenance: EventProvenance {
+                recv_timestamp_us: base_timestamp + 3_000_100,
+                exchange_timestamp_us: base_timestamp + 3_000_000,
+                source: DataSource::RestSnapshot,
+                source_event_id: Some("checkpoint-1".to_string()),
+                source_session_id: None,
+                sequence: None,
+            },
             bids: vec![PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),
                 size: FixedSize::from_f64(100.0).unwrap(),
@@ -137,6 +140,40 @@ async fn parquet_sink_writes_split_dataset_paths_and_reader_roundtrips() {
         .await
         .unwrap();
     assert_eq!(checkpoints.len(), 1);
+}
+
+#[tokio::test]
+async fn parquet_reader_latest_checkpoint_does_not_impose_recent_time_cutoff() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let base_path = tmp_dir.path().to_string_lossy().to_string();
+    let base_ts = 1_700_000_000_000_000;
+    let records = make_records("token-b", base_ts);
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<PersistedRecord>(1000);
+    let store: Arc<dyn object_store::ObjectStore> =
+        Arc::new(object_store::local::LocalFileSystem::new());
+    let sink = ParquetSink::new(rx, store, base_path.clone())
+        .with_flush_interval(Duration::from_millis(50));
+    let sink_handle = tokio::spawn(async move { sink.run().await.unwrap() });
+
+    for record in &records {
+        tx.send(record.clone()).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(tx);
+    sink_handle.await.unwrap();
+
+    let reader = ParquetReader::new(&base_path);
+    let asset_id = AssetId::new("token-b");
+    let fourteen_days_us = 14 * 24 * 60 * 60 * 1_000_000u64;
+    let checkpoint = reader
+        .read_latest_checkpoint(&asset_id, base_ts + fourteen_days_us)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(checkpoint.asset_id, asset_id);
+    assert_eq!(checkpoint.checkpoint_timestamp_us, base_ts + 3_000_000);
 }
 
 fn visit_dir_recursive(dir: &std::path::Path, files: &mut Vec<String>) {

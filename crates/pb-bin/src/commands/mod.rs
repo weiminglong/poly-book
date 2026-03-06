@@ -5,4 +5,5 @@ pub mod discover;
 pub mod execution_append;
 pub mod execution_replay;
 pub mod ingest;
+pub mod pipeline;
 pub mod replay;

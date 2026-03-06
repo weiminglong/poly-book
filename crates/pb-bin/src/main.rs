@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -84,7 +84,7 @@ enum Commands {
         source: String,
     },
     /// Append execution events to storage from flags or JSON input
-    ExecutionAppend(Box<ExecutionAppendArgs>),
+    ExecutionAppend(Box<commands::execution_append::ExecutionAppendArgs>),
     /// Backfill historical data via REST API snapshots
     Backfill {
         /// Comma-separated token IDs to backfill
@@ -109,53 +109,6 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         metrics: bool,
     },
-}
-
-#[derive(Args)]
-struct ExecutionAppendArgs {
-    /// Data sink: "parquet" or "clickhouse"
-    #[arg(long, default_value = "parquet")]
-    source: String,
-    /// Optional path to a JSON object or array payload
-    #[arg(long)]
-    json: Option<String>,
-    /// Required unless --json is used
-    #[arg(long)]
-    order_id: Option<String>,
-    /// Required unless --json is used
-    #[arg(long)]
-    event_kind: Option<String>,
-    /// Required unless --json is used
-    #[arg(long)]
-    event_timestamp_us: Option<u64>,
-    #[arg(long)]
-    asset_id: Option<String>,
-    #[arg(long)]
-    client_order_id: Option<String>,
-    #[arg(long)]
-    venue_order_id: Option<String>,
-    #[arg(long)]
-    side: Option<String>,
-    #[arg(long)]
-    price: Option<String>,
-    #[arg(long)]
-    size: Option<String>,
-    #[arg(long)]
-    status: Option<String>,
-    #[arg(long)]
-    reason: Option<String>,
-    #[arg(long)]
-    market_data_recv_us: Option<u64>,
-    #[arg(long)]
-    normalization_done_us: Option<u64>,
-    #[arg(long)]
-    strategy_decision_us: Option<u64>,
-    #[arg(long)]
-    order_submit_us: Option<u64>,
-    #[arg(long)]
-    exchange_ack_us: Option<u64>,
-    #[arg(long)]
-    exchange_fill_us: Option<u64>,
 }
 
 #[tokio::main]
@@ -228,30 +181,7 @@ async fn main() -> Result<()> {
             commands::execution_replay::run(settings, order_id, start, end, source).await?;
         }
         Commands::ExecutionAppend(args) => {
-            let args = *args;
-            commands::execution_append::run(
-                settings,
-                args.source,
-                args.json,
-                args.order_id,
-                args.event_kind,
-                args.event_timestamp_us,
-                args.asset_id,
-                args.client_order_id,
-                args.venue_order_id,
-                args.side,
-                args.price,
-                args.size,
-                args.status,
-                args.reason,
-                args.market_data_recv_us,
-                args.normalization_done_us,
-                args.strategy_decision_us,
-                args.order_submit_us,
-                args.exchange_ack_us,
-                args.exchange_fill_us,
-            )
-            .await?;
+            commands::execution_append::run(settings, *args).await?;
         }
         Commands::Backfill {
             tokens,

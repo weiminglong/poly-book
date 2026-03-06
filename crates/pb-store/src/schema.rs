@@ -6,7 +6,7 @@ use arrow::record_batch::RecordBatch;
 
 use pb_types::event::{
     BookCheckpoint, BookEvent, BookEventKind, ExecutionEvent, IngestEvent, PersistedRecord,
-    ReplayValidation, Side, TradeEvent, TradeFidelity,
+    ReplayValidation, Side, TradeEvent,
 };
 
 use crate::error::StoreError;
@@ -475,13 +475,13 @@ pub fn checkpoint_refs_to_record_batch(
     let recv_ts: ArrayRef = Arc::new(UInt64Array::from(
         checkpoints
             .iter()
-            .map(|e| e.recv_timestamp_us)
+            .map(|e| e.provenance.recv_timestamp_us)
             .collect::<Vec<_>>(),
     ));
     let exchange_ts: ArrayRef = Arc::new(UInt64Array::from(
         checkpoints
             .iter()
-            .map(|e| e.exchange_timestamp_us)
+            .map(|e| e.provenance.exchange_timestamp_us)
             .collect::<Vec<_>>(),
     ));
     let asset_ids: ArrayRef = Arc::new(StringArray::from(
@@ -493,19 +493,19 @@ pub fn checkpoint_refs_to_record_batch(
     let sources: ArrayRef = Arc::new(StringArray::from(
         checkpoints
             .iter()
-            .map(|e| e.source.to_string())
+            .map(|e| e.provenance.source.to_string())
             .collect::<Vec<_>>(),
     ));
     let source_event_ids: ArrayRef = Arc::new(StringArray::from(
         checkpoints
             .iter()
-            .map(|e| e.source_event_id.as_deref())
+            .map(|e| e.provenance.source_event_id.as_deref())
             .collect::<Vec<_>>(),
     ));
     let source_session_ids: ArrayRef = Arc::new(StringArray::from(
         checkpoints
             .iter()
-            .map(|e| e.source_session_id.as_deref())
+            .map(|e| e.provenance.source_session_id.as_deref())
             .collect::<Vec<_>>(),
     ));
     let bids_json: ArrayRef = Arc::new(StringArray::from(
@@ -692,14 +692,4 @@ pub fn execution_event_refs_to_record_batch(
         ],
     )
     .map_err(StoreError::from)
-}
-
-pub fn trade_fidelity_from_str(value: &str) -> Result<TradeFidelity, StoreError> {
-    match value {
-        "partial" => Ok(TradeFidelity::Partial),
-        "full" => Ok(TradeFidelity::Full),
-        other => Err(StoreError::Other(format!(
-            "invalid trade fidelity: {other}"
-        ))),
-    }
 }

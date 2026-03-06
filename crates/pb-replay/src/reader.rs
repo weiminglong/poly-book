@@ -344,39 +344,51 @@ fn extract_trade_events(
 ) -> Result<Vec<TradeEvent>, ReplayError> {
     let recv_ts_col = batch
         .column_by_name("recv_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing recv_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
     let exchange_ts_col = batch
         .column_by_name("exchange_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing exchange_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
-    let asset_id_col = batch.column_by_name("asset_id").unwrap().as_string::<i32>();
+    let asset_id_col = batch
+        .column_by_name("asset_id")
+        .ok_or_else(|| ReplayError::Other("missing asset_id column".into()))?
+        .as_string::<i32>();
     let price_col = batch
         .column_by_name("price")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing price column".into()))?
         .as_primitive::<UInt32Type>();
     let size_col = batch
         .column_by_name("size")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing size column".into()))?
         .as_primitive::<UInt64Type>();
     let side_col = batch
         .column_by_name("side")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing side column".into()))?
         .as_primitive::<arrow::datatypes::UInt8Type>();
-    let trade_id_col = batch.column_by_name("trade_id").unwrap().as_string::<i32>();
-    let fidelity_col = batch.column_by_name("fidelity").unwrap().as_string::<i32>();
+    let trade_id_col = batch
+        .column_by_name("trade_id")
+        .ok_or_else(|| ReplayError::Other("missing trade_id column".into()))?
+        .as_string::<i32>();
+    let fidelity_col = batch
+        .column_by_name("fidelity")
+        .ok_or_else(|| ReplayError::Other("missing fidelity column".into()))?
+        .as_string::<i32>();
     let sequence_col = batch
         .column_by_name("sequence")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing sequence column".into()))?
         .as_primitive::<UInt64Type>();
-    let source_col = batch.column_by_name("source").unwrap().as_string::<i32>();
+    let source_col = batch
+        .column_by_name("source")
+        .ok_or_else(|| ReplayError::Other("missing source column".into()))?
+        .as_string::<i32>();
     let source_event_id_col = batch
         .column_by_name("source_event_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_event_id column".into()))?
         .as_string::<i32>();
     let source_session_id_col = batch
         .column_by_name("source_session_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
 
     let mut rows = Vec::new();
@@ -441,38 +453,47 @@ fn extract_ingest_events(
 ) -> Result<Vec<IngestEvent>, ReplayError> {
     let recv_ts_col = batch
         .column_by_name("recv_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing recv_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
     let exchange_ts_col = batch
         .column_by_name("exchange_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing exchange_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
-    let asset_id_col = batch.column_by_name("asset_id").unwrap().as_string::<i32>();
+    let asset_id_col = batch
+        .column_by_name("asset_id")
+        .ok_or_else(|| ReplayError::Other("missing asset_id column".into()))?
+        .as_string::<i32>();
     let kind_col = batch
         .column_by_name("event_kind")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing event_kind column".into()))?
         .as_string::<i32>();
     let sequence_col = batch
         .column_by_name("sequence")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing sequence column".into()))?
         .as_primitive::<UInt64Type>();
     let expected_col = batch
         .column_by_name("expected_sequence")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing expected_sequence column".into()))?
         .as_primitive::<UInt64Type>();
     let observed_col = batch
         .column_by_name("observed_sequence")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing observed_sequence column".into()))?
         .as_primitive::<UInt64Type>();
-    let details_col = batch.column_by_name("details").unwrap().as_string::<i32>();
-    let source_col = batch.column_by_name("source").unwrap().as_string::<i32>();
+    let details_col = batch
+        .column_by_name("details")
+        .ok_or_else(|| ReplayError::Other("missing details column".into()))?
+        .as_string::<i32>();
+    let source_col = batch
+        .column_by_name("source")
+        .ok_or_else(|| ReplayError::Other("missing source column".into()))?
+        .as_string::<i32>();
     let source_event_id_col = batch
         .column_by_name("source_event_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_event_id column".into()))?
         .as_string::<i32>();
     let source_session_id_col = batch
         .column_by_name("source_session_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
 
     let mut rows = Vec::new();
@@ -542,33 +563,39 @@ fn extract_checkpoints(
 ) -> Result<Vec<BookCheckpoint>, ReplayError> {
     let checkpoint_ts_col = batch
         .column_by_name("checkpoint_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing checkpoint_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
     let recv_ts_col = batch
         .column_by_name("recv_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing recv_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
     let exchange_ts_col = batch
         .column_by_name("exchange_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing exchange_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
-    let asset_id_col = batch.column_by_name("asset_id").unwrap().as_string::<i32>();
-    let source_col = batch.column_by_name("source").unwrap().as_string::<i32>();
+    let asset_id_col = batch
+        .column_by_name("asset_id")
+        .ok_or_else(|| ReplayError::Other("missing asset_id column".into()))?
+        .as_string::<i32>();
+    let source_col = batch
+        .column_by_name("source")
+        .ok_or_else(|| ReplayError::Other("missing source column".into()))?
+        .as_string::<i32>();
     let source_event_id_col = batch
         .column_by_name("source_event_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_event_id column".into()))?
         .as_string::<i32>();
     let source_session_id_col = batch
         .column_by_name("source_session_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
     let bids_col = batch
         .column_by_name("bids_json")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing bids_json column".into()))?
         .as_string::<i32>();
     let asks_col = batch
         .column_by_name("asks_json")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing asks_json column".into()))?
         .as_string::<i32>();
 
     let mut rows = Vec::new();
@@ -583,18 +610,21 @@ fn extract_checkpoints(
         rows.push(BookCheckpoint {
             asset_id: AssetId::new(asset_id_col.value(i)),
             checkpoint_timestamp_us: checkpoint_ts,
-            recv_timestamp_us: recv_ts_col.value(i),
-            exchange_timestamp_us: exchange_ts_col.value(i),
-            source: parse_source(source_col.value(i))?,
-            source_event_id: if source_event_id_col.is_null(i) {
-                None
-            } else {
-                Some(source_event_id_col.value(i).to_string())
-            },
-            source_session_id: if source_session_id_col.is_null(i) {
-                None
-            } else {
-                Some(source_session_id_col.value(i).to_string())
+            provenance: EventProvenance {
+                recv_timestamp_us: recv_ts_col.value(i),
+                exchange_timestamp_us: exchange_ts_col.value(i),
+                source: parse_source(source_col.value(i))?,
+                source_event_id: if source_event_id_col.is_null(i) {
+                    None
+                } else {
+                    Some(source_event_id_col.value(i).to_string())
+                },
+                source_session_id: if source_session_id_col.is_null(i) {
+                    None
+                } else {
+                    Some(source_session_id_col.value(i).to_string())
+                },
+                sequence: None,
             },
             bids: serde_json::from_str::<Vec<PriceLevel>>(bids_col.value(i))?,
             asks: serde_json::from_str::<Vec<PriceLevel>>(asks_col.value(i))?,
@@ -609,24 +639,33 @@ fn extract_validations(
     start_us: u64,
     end_us: u64,
 ) -> Result<Vec<ReplayValidation>, ReplayError> {
-    let asset_id_col = batch.column_by_name("asset_id").unwrap().as_string::<i32>();
-    let mode_col = batch.column_by_name("mode").unwrap().as_string::<i32>();
+    let asset_id_col = batch
+        .column_by_name("asset_id")
+        .ok_or_else(|| ReplayError::Other("missing asset_id column".into()))?
+        .as_string::<i32>();
+    let mode_col = batch
+        .column_by_name("mode")
+        .ok_or_else(|| ReplayError::Other("missing mode column".into()))?
+        .as_string::<i32>();
     let replay_ts_col = batch
         .column_by_name("replay_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing replay_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
     let reference_ts_col = batch
         .column_by_name("reference_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing reference_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
-    let matched_col = batch.column_by_name("matched").unwrap().as_boolean();
+    let matched_col = batch
+        .column_by_name("matched")
+        .ok_or_else(|| ReplayError::Other("missing matched column".into()))?
+        .as_boolean();
     let mismatch_col = batch
         .column_by_name("mismatch_summary")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing mismatch_summary column".into()))?
         .as_string::<i32>();
     let persisted_col = batch
         .column_by_name("persisted_at_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing persisted_at_us column".into()))?
         .as_primitive::<UInt64Type>();
 
     let mut rows = Vec::new();
@@ -663,39 +702,51 @@ fn extract_execution_events(
 ) -> Result<Vec<ExecutionEvent>, ReplayError> {
     let event_ts_col = batch
         .column_by_name("event_timestamp_us")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing event_timestamp_us column".into()))?
         .as_primitive::<UInt64Type>();
-    let asset_id_col = batch.column_by_name("asset_id").unwrap().as_string::<i32>();
-    let order_id_col = batch.column_by_name("order_id").unwrap().as_string::<i32>();
+    let asset_id_col = batch
+        .column_by_name("asset_id")
+        .ok_or_else(|| ReplayError::Other("missing asset_id column".into()))?
+        .as_string::<i32>();
+    let order_id_col = batch
+        .column_by_name("order_id")
+        .ok_or_else(|| ReplayError::Other("missing order_id column".into()))?
+        .as_string::<i32>();
     let client_order_id_col = batch
         .column_by_name("client_order_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing client_order_id column".into()))?
         .as_string::<i32>();
     let venue_order_id_col = batch
         .column_by_name("venue_order_id")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing venue_order_id column".into()))?
         .as_string::<i32>();
     let kind_col = batch
         .column_by_name("event_kind")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing event_kind column".into()))?
         .as_string::<i32>();
     let side_col = batch
         .column_by_name("side")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing side column".into()))?
         .as_primitive::<arrow::datatypes::UInt8Type>();
     let price_col = batch
         .column_by_name("price")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing price column".into()))?
         .as_primitive::<UInt32Type>();
     let size_col = batch
         .column_by_name("size")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing size column".into()))?
         .as_primitive::<UInt64Type>();
-    let status_col = batch.column_by_name("status").unwrap().as_string::<i32>();
-    let reason_col = batch.column_by_name("reason").unwrap().as_string::<i32>();
+    let status_col = batch
+        .column_by_name("status")
+        .ok_or_else(|| ReplayError::Other("missing status column".into()))?
+        .as_string::<i32>();
+    let reason_col = batch
+        .column_by_name("reason")
+        .ok_or_else(|| ReplayError::Other("missing reason column".into()))?
+        .as_string::<i32>();
     let latency_col = batch
         .column_by_name("latency_json")
-        .unwrap()
+        .ok_or_else(|| ReplayError::Other("missing latency_json column".into()))?
         .as_string::<i32>();
 
     let mut rows = Vec::new();
@@ -1121,11 +1172,14 @@ impl EventReader for ClickHouseReader {
                 Ok(BookCheckpoint {
                     asset_id: AssetId::new(row.asset_id),
                     checkpoint_timestamp_us: row.checkpoint_timestamp_us,
-                    recv_timestamp_us: row.recv_timestamp_us,
-                    exchange_timestamp_us: row.exchange_timestamp_us,
-                    source: parse_source(&row.source)?,
-                    source_event_id: row.source_event_id,
-                    source_session_id: row.source_session_id,
+                    provenance: EventProvenance {
+                        recv_timestamp_us: row.recv_timestamp_us,
+                        exchange_timestamp_us: row.exchange_timestamp_us,
+                        source: parse_source(&row.source)?,
+                        source_event_id: row.source_event_id,
+                        source_session_id: row.source_session_id,
+                        sequence: None,
+                    },
                     bids: serde_json::from_str(&row.bids_json)?,
                     asks: serde_json::from_str(&row.asks_json)?,
                 })
@@ -1150,11 +1204,14 @@ impl EventReader for ClickHouseReader {
             Ok(BookCheckpoint {
                 asset_id: AssetId::new(row.asset_id),
                 checkpoint_timestamp_us: row.checkpoint_timestamp_us,
-                recv_timestamp_us: row.recv_timestamp_us,
-                exchange_timestamp_us: row.exchange_timestamp_us,
-                source: parse_source(&row.source)?,
-                source_event_id: row.source_event_id,
-                source_session_id: row.source_session_id,
+                provenance: EventProvenance {
+                    recv_timestamp_us: row.recv_timestamp_us,
+                    exchange_timestamp_us: row.exchange_timestamp_us,
+                    source: parse_source(&row.source)?,
+                    source_event_id: row.source_event_id,
+                    source_session_id: row.source_session_id,
+                    sequence: None,
+                },
                 bids: serde_json::from_str(&row.bids_json)?,
                 asks: serde_json::from_str(&row.asks_json)?,
             })

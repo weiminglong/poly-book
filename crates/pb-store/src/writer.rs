@@ -413,12 +413,12 @@ impl ClickHouseRecordWriter {
                 PersistedRecord::Checkpoint(event) => {
                     let row = CheckpointRow {
                         checkpoint_timestamp_us: event.checkpoint_timestamp_us,
-                        recv_timestamp_us: event.recv_timestamp_us,
-                        exchange_timestamp_us: event.exchange_timestamp_us,
+                        recv_timestamp_us: event.provenance.recv_timestamp_us,
+                        exchange_timestamp_us: event.provenance.exchange_timestamp_us,
                         asset_id: event.asset_id.as_str().to_string(),
-                        source: event.source.to_string(),
-                        source_event_id: event.source_event_id.clone(),
-                        source_session_id: event.source_session_id.clone(),
+                        source: event.provenance.source.to_string(),
+                        source_event_id: event.provenance.source_event_id.clone(),
+                        source_session_id: event.provenance.source_session_id.clone(),
                         bids_json: serde_json::to_string(&event.bids)?,
                         asks_json: serde_json::to_string(&event.asks)?,
                     };

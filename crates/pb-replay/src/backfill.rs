@@ -6,7 +6,8 @@ use tracing::{debug, error, info};
 
 use pb_types::wire::RestBookResponse;
 use pb_types::{
-    AssetId, BookCheckpoint, DataSource, FixedPrice, FixedSize, PersistedRecord, PriceLevel,
+    AssetId, BookCheckpoint, DataSource, EventProvenance, FixedPrice, FixedSize, PersistedRecord,
+    PriceLevel,
 };
 
 use crate::error::ReplayError;
@@ -127,11 +128,14 @@ pub fn checkpoint_from_rest(book: &RestBookResponse) -> Result<BookCheckpoint, R
     Ok(BookCheckpoint {
         asset_id: AssetId::new(book.asset_id.clone()),
         checkpoint_timestamp_us: exchange_ts,
-        recv_timestamp_us: now_us,
-        exchange_timestamp_us: exchange_ts,
-        source: DataSource::RestSnapshot,
-        source_event_id: book.hash.clone(),
-        source_session_id: None,
+        provenance: EventProvenance {
+            recv_timestamp_us: now_us,
+            exchange_timestamp_us: exchange_ts,
+            source: DataSource::RestSnapshot,
+            source_event_id: book.hash.clone(),
+            source_session_id: None,
+            sequence: None,
+        },
         bids,
         asks,
     })
