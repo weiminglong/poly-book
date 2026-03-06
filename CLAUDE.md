@@ -41,7 +41,7 @@ pb-feed (WS/REST) -> dispatcher -> pb-book (L2Book) -> pb-store (Parquet + Click
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)
 - **Commit**: imperative sentence, PR number suffix (e.g. `Fix discover command ... (#6)`)
-- **PR**: squash-merge into `main`
+- **PR**: squash-merge into `main`, auto-delete branch on merge is enabled
 - Always run `cargo test` before committing
 
 ## OpenSpec
