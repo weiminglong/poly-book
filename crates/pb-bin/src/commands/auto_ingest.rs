@@ -3,9 +3,7 @@ use config::Config;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::market_discovery::{
-    current_unix_secs, discover_with_retry, DiscoverOutcome,
-};
+use super::market_discovery::{current_unix_secs, discover_with_retry, DiscoverOutcome};
 use super::pipeline;
 
 async fn fanout_event(

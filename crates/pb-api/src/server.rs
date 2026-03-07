@@ -45,7 +45,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/feed/status", get(feed_status))
         .route("/api/v1/assets/active", get(active_assets))
-        .route("/api/v1/orderbooks/{asset_id}/snapshot", get(orderbook_snapshot))
+        .route(
+            "/api/v1/orderbooks/{asset_id}/snapshot",
+            get(orderbook_snapshot),
+        )
         .route("/api/v1/replay/reconstruct", get(replay_reconstruct))
         .with_state(state)
 }
@@ -67,7 +70,12 @@ async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> 
 }
 
 async fn active_assets(State(state): State<AppState>) -> Json<Vec<crate::dto::ActiveAssetSummary>> {
-    Json(state.live.active_assets(state.config.stale_after_secs).await)
+    Json(
+        state
+            .live
+            .active_assets(state.config.stale_after_secs)
+            .await,
+    )
 }
 
 async fn orderbook_snapshot(
@@ -130,8 +138,18 @@ async fn replay_reconstruct(
         spread: book.spread(),
         bid_depth: book.bid_depth(),
         ask_depth: book.ask_depth(),
-        bids: book.bids_sorted().into_iter().take(depth).map(level_view).collect(),
-        asks: book.asks_sorted().into_iter().take(depth).map(level_view).collect(),
+        bids: book
+            .bids_sorted()
+            .into_iter()
+            .take(depth)
+            .map(level_view)
+            .collect(),
+        asks: book
+            .asks_sorted()
+            .into_iter()
+            .take(depth)
+            .map(level_view)
+            .collect(),
         continuity_events: replay
             .continuity_events
             .into_iter()
@@ -166,7 +184,10 @@ fn parse_replay_mode(raw: &str) -> Result<ReplayMode, ApiError> {
 
 fn map_replay_error(error: ReplayError) -> ApiError {
     match error {
-        ReplayError::NoSnapshotFound { asset_id, timestamp_us } => ApiError::NotFound(format!(
+        ReplayError::NoSnapshotFound {
+            asset_id,
+            timestamp_us,
+        } => ApiError::NotFound(format!(
             "no snapshot found for asset {asset_id} before timestamp {timestamp_us}"
         )),
         other => ApiError::Internal(other.to_string()),
@@ -182,7 +203,9 @@ fn continuity_warning(event: IngestEvent) -> ContinuityWarning {
     }
 }
 
-fn level_view((price, size): (pb_types::FixedPrice, pb_types::FixedSize)) -> crate::dto::PriceLevelView {
+fn level_view(
+    (price, size): (pb_types::FixedPrice, pb_types::FixedSize),
+) -> crate::dto::PriceLevelView {
     crate::dto::PriceLevelView { price, size }
 }
 
@@ -194,7 +217,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use object_store::ObjectStore;
     use pb_store::ParquetRecordWriter;
-    use pb_types::event::{BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side};
+    use pb_types::event::{
+        BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side,
+    };
     use pb_types::{FixedPrice, FixedSize, Sequence};
     use tower::ServiceExt;
 
@@ -212,7 +237,9 @@ mod tests {
         }
     }
 
-    async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+    async fn response_json<T: serde::de::DeserializeOwned>(
+        response: axum::response::Response,
+    ) -> T {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }

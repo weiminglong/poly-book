@@ -33,7 +33,10 @@ pub async fn run(
         .parse()?;
     let default_depth = settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
-    let stale_after_secs = settings.get_int("api.stale_after_secs").unwrap_or(15).max(1) as u64;
+    let stale_after_secs = settings
+        .get_int("api.stale_after_secs")
+        .unwrap_or(15)
+        .max(1) as u64;
     let parquet_base_path = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());
@@ -225,14 +228,13 @@ fn spawn_auto_rotate_runtime(
             let (raw_tx, raw_rx) = mpsc::channel::<pb_feed::FeedMessage>(2_048);
             let new_token = shutdown.child_token();
 
-            let ws_client =
-                match pb_feed::WsClient::new(token_ids.clone(), raw_tx) {
-                    Ok(client) => client.with_config(ws_config.clone()),
-                    Err(error) => {
-                        tracing::error!(error = %error, "failed to create websocket client");
-                        continue;
-                    }
-                };
+            let ws_client = match pb_feed::WsClient::new(token_ids.clone(), raw_tx) {
+                Ok(client) => client.with_config(ws_config.clone()),
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to create websocket client");
+                    continue;
+                }
+            };
             let ws_cancel = new_token.child_token();
             child_handles.push(tokio::spawn(async move {
                 if let Err(error) = ws_client.run_with_token(ws_cancel).await {

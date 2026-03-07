@@ -93,8 +93,11 @@ impl LiveState {
             retained.insert(asset_id.clone(), state);
         }
         self.assets = retained;
-        self.pending_snapshots
-            .retain(|asset_id, _| self.active_assets.iter().any(|candidate| candidate == asset_id));
+        self.pending_snapshots.retain(|asset_id, _| {
+            self.active_assets
+                .iter()
+                .any(|candidate| candidate == asset_id)
+        });
     }
 
     fn materialize_all_pending(&mut self) {
@@ -335,7 +338,11 @@ impl LiveReadModel {
         let now_us = now_us();
         let mut state = self.inner.write().await;
         state.materialize_all_pending();
-        if !state.active_assets.iter().any(|candidate| candidate == asset_id) {
+        if !state
+            .active_assets
+            .iter()
+            .any(|candidate| candidate == asset_id)
+        {
             return Err(SnapshotLookupError::AssetNotActive);
         }
         let Some(asset_state) = state.assets.get(asset_id) else {
@@ -429,8 +436,12 @@ mod tests {
     async fn snapshot_group_materializes_before_non_snapshot_record() {
         let model = LiveReadModel::new(FeedMode::FixedTokens);
         model.set_active_assets(vec!["tok1".to_string()]).await;
-        model.apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0)).await;
-        model.apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1)).await;
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
         model
             .apply_record(PersistedRecord::Ingest(IngestEvent {
                 asset_id: None,
