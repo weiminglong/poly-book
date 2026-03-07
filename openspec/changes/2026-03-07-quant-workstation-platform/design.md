@@ -185,6 +185,15 @@ Current backend constraints:
 - replay reads are Parquet-only today
 - the runtime is read-only and does not persist live data
 
+Current shipped frontend boundary:
+
+- separate TypeScript SPA
+- Live Feed and Replay Lab routes only
+- adaptive HTTP polling for live views until streaming lands
+- lazy-loaded route bundles for current shipped surfaces
+- seeded demo mode for offline review and screenshots
+- no shipped Integrity, Latency, Execution Timeline, or Query Workbench UI yet
+
 The following planned surfaces remain deferred:
 
 - `GET /api/v1/integrity/summary`

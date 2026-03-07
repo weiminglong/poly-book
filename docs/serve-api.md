@@ -101,6 +101,26 @@ The current implementation exposes:
 
 See [docs/api.md](api.md) for route details.
 
+## Current Browser Client
+
+The separate Phase 4 SPA talks only to these HTTP routes. The currently shipped
+web surfaces are:
+
+- `Live Feed`
+- `Replay Lab`
+
+Current browser transport behavior:
+
+- adaptive HTTP polling for live views
+- foreground polling faster than background polling
+- stale browser requests are cancelled before the next refresh cycle
+
+This remains an interim client strategy until the deferred workstation streaming
+route exists.
+
+The SPA is developed and served separately from `serve-api` today. Packaging the
+Rust API and static frontend assets together remains later work.
+
 ## Deferred From This Phase
 
 The following are intentionally not part of the current `serve-api` slice:

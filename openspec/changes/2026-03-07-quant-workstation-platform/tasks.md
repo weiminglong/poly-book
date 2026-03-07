@@ -30,10 +30,19 @@
 
 ## Phase 4: Web Application Implementation
 
-- [ ] Add a separate TypeScript SPA for workstation views
-- [ ] Implement Live Feed, Replay Lab, Integrity, Latency, Execution Timeline, and Query Workbench routes
-- [ ] Add seeded sample data so the UI can be reviewed without live infrastructure
-- [ ] Add web unit tests and end-to-end smoke flows for the core routes
+- [x] Add a separate TypeScript SPA for workstation views
+- [x] Implement Live Feed and Replay Lab routes against the current `pb-api` contracts
+- [ ] Implement Integrity, Latency, Execution Timeline, and Query Workbench routes
+- [x] Add seeded sample data so the UI can be reviewed without live infrastructure
+- [x] Add web unit tests and smoke coverage for Live Feed and Replay Lab
+
+## Phase 4.5: Trader-Grade Performance Hardening
+
+- [x] Add adaptive foreground/background polling with stale request cancellation
+- [x] Split the shipped routes into lazy-loaded bundles
+- [ ] Replace HTTP polling with WebSocket order book streaming once the backend route exists
+- [ ] Add virtualization and render throttling for deeper books and future streams
+- [ ] Add frontend performance budgets and production profiling hooks
 
 ## Phase 5: CI, Docs, And Packaging
 

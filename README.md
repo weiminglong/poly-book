@@ -132,6 +132,21 @@ This starts the read-only API layer for the quant workstation backend. The
 first release serves live feed status, active assets, live book snapshots, and
 Parquet-backed replay reconstruction.
 
+### Run the workstation SPA
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+By default the Vite dev server runs on `:4173` and proxies `/api` requests to
+`http://127.0.0.1:3000`, so you can run it alongside `cargo run -- serve-api
+--auto-rotate`. The shipped SPA currently includes only `Live Feed` and
+`Replay Lab`; the other planned workstation surfaces remain deferred. Append
+`?source=demo` to the URL or use the in-app toggle to review seeded sample data
+without a running backend.
+
 ### Replay execution history
 
 ```bash
@@ -257,15 +272,15 @@ Current workstation API routes and runtime notes live in:
 
 - [docs/api.md](docs/api.md)
 - [docs/serve-api.md](docs/serve-api.md)
+- [web/README.md](web/README.md)
 
 ## Roadmap
 
 Near-term work that would make strong public contributions:
 
 - broader replay validation and determinism coverage
-- workstation integrity, execution, and query API expansion beyond the current
-  read-only Phase 3 slice
-- better local sample-data workflows for offline development
+- workstation integrity, latency, execution, and query expansion beyond the
+  current Live Feed + Replay Lab SPA slice
 - more explicit schema/versioning guarantees for persisted datasets
 - clearer operational docs for ClickHouse and cloud object storage
 - examples for strategy hooks and execution-event workflows

@@ -9,6 +9,16 @@ The current API is intentionally narrow. It is meant to support the first
 backend slice of the workstation and may evolve as later phases add integrity,
 execution, query, and frontend capabilities.
 
+The current SPA consumes only these routes for `Live Feed` and `Replay Lab`.
+
+## Encoding Notes
+
+- prices and sizes serialize as fixed-point strings, not floating-point JSON
+  numbers
+- timestamp fields are microseconds since Unix epoch
+- replay `mode` is always explicit and must be one of `recv_time` or
+  `exchange_time`
+
 ## Endpoints
 
 ### `GET /api/v1/feed/status`
