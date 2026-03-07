@@ -23,6 +23,12 @@ clickhouse_batch_size = 10000
 listen_addr = "0.0.0.0:9090"
 endpoint = "/metrics"
 
+[api]
+listen_addr = "0.0.0.0:3000"
+default_depth = 20
+max_depth = 200
+stale_after_secs = 15
+
 [logging]
 level = "info"
 format = "pretty"

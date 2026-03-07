@@ -5,5 +5,7 @@ pub mod discover;
 pub mod execution_append;
 pub mod execution_replay;
 pub mod ingest;
+pub mod market_discovery;
 pub mod pipeline;
 pub mod replay;
+pub mod serve_api;

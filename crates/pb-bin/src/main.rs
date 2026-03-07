@@ -109,6 +109,18 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         metrics: bool,
     },
+    /// Start the read-only API server with a live feed and replay access
+    ServeApi {
+        /// Comma-separated token IDs to subscribe to
+        #[arg(long)]
+        tokens: Option<String>,
+        /// Automatically rotate to the live BTC 5-minute market
+        #[arg(long, default_value_t = false)]
+        auto_rotate: bool,
+        /// Enable metrics server
+        #[arg(long, default_value_t = true)]
+        metrics: bool,
+    },
 }
 
 #[tokio::main]
@@ -197,6 +209,13 @@ async fn main() -> Result<()> {
             metrics,
         } => {
             commands::auto_ingest::run(settings, parquet, clickhouse, metrics, shutdown).await?;
+        }
+        Commands::ServeApi {
+            tokens,
+            auto_rotate,
+            metrics,
+        } => {
+            commands::serve_api::run(settings, tokens, auto_rotate, metrics, shutdown).await?;
         }
     }
 

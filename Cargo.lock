@@ -2576,6 +2576,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
+name = "pb-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "object_store",
+ "pb-book",
+ "pb-replay",
+ "pb-store",
+ "pb-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "pb-bin"
 version = "0.1.0"
 dependencies = [
@@ -2584,6 +2604,7 @@ dependencies = [
  "clickhouse",
  "config",
  "object_store",
+ "pb-api",
  "pb-book",
  "pb-feed",
  "pb-metrics",
