@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: cargo test --workspace --exclude pb-integration-tests
 
   clippy:
     name: Clippy
@@ -50,3 +50,28 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  miri:
+    name: Miri (undefined behavior)
+    runs-on: ubuntu-latest
+    env:
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri pb-types (unit tests only)
+        run: cargo +nightly miri test -p pb-types -- --test-threads=1 --skip proptests
+      - name: Miri pb-book (unit tests only)
+        run: cargo +nightly miri test -p pb-book -- --test-threads=1 --skip proptests

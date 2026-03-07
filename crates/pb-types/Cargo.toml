@@ -17,7 +17,12 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "fixed_point"
+harness = false
+
+[[bench]]
+name = "wire_deser"
 harness = false

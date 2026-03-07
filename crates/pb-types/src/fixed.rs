@@ -19,7 +19,7 @@ impl FixedPrice {
 
     pub fn new(raw: u32) -> Result<Self, TypesError> {
         if raw > PRICE_SCALE {
-            return Err(TypesError::InvalidPrice(raw));
+            return Err(TypesError::InvalidPrice { raw });
         }
         Ok(Self(raw))
     }
@@ -27,7 +27,9 @@ impl FixedPrice {
     /// Create from a float (e.g., 0.5 -> FixedPrice(5000))
     pub fn from_f64(v: f64) -> Result<Self, TypesError> {
         if v.is_nan() || v.is_infinite() || v < 0.0 {
-            return Err(TypesError::InvalidPrice(0));
+            return Err(TypesError::InvalidPriceValue {
+                value: v.to_string(),
+            });
         }
         let raw = (v * PRICE_SCALE as f64).round() as u32;
         Self::new(raw)
@@ -56,9 +58,9 @@ impl TryFrom<&str> for FixedPrice {
     type Error = TypesError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let v: f64 = s
-            .parse()
-            .map_err(|_| TypesError::PriceParse(s.to_string()))?;
+        let v: f64 = s.parse().map_err(|_| TypesError::PriceParse {
+            input: s.to_string(),
+        })?;
         Self::from_f64(v)
     }
 }
@@ -91,7 +93,9 @@ impl FixedSize {
 
     pub fn from_f64(v: f64) -> Result<Self, TypesError> {
         if v.is_nan() || v.is_infinite() || v < 0.0 {
-            return Err(TypesError::SizeParse(v.to_string()));
+            return Err(TypesError::SizeParse {
+                input: v.to_string(),
+            });
         }
         Ok(Self((v * SIZE_SCALE as f64).round() as u64))
     }
@@ -119,9 +123,9 @@ impl TryFrom<&str> for FixedSize {
     type Error = TypesError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let v: f64 = s
-            .parse()
-            .map_err(|_| TypesError::SizeParse(s.to_string()))?;
+        let v: f64 = s.parse().map_err(|_| TypesError::SizeParse {
+            input: s.to_string(),
+        })?;
         Self::from_f64(v)
     }
 }
@@ -238,5 +242,74 @@ mod tests {
     fn test_fixed_size_rejects_infinity() {
         assert!(FixedSize::from_f64(f64::INFINITY).is_err());
         assert!(FixedSize::from_f64(f64::NEG_INFINITY).is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn fixed_price_raw_roundtrip(raw in 0u32..=PRICE_SCALE) {
+            let p = FixedPrice::new(raw).unwrap();
+            prop_assert_eq!(p.raw(), raw);
+        }
+
+        #[test]
+        fn fixed_price_f64_roundtrip(raw in 0u32..=PRICE_SCALE) {
+            let p = FixedPrice::new(raw).unwrap();
+            let f = p.as_f64();
+            let p2 = FixedPrice::from_f64(f).unwrap();
+            prop_assert_eq!(p, p2);
+        }
+
+        #[test]
+        fn fixed_price_ordering_preserved(a_raw in 0u32..=PRICE_SCALE, b_raw in 0u32..=PRICE_SCALE) {
+            let a = FixedPrice::new(a_raw).unwrap();
+            let b = FixedPrice::new(b_raw).unwrap();
+            prop_assert_eq!(a.cmp(&b), a_raw.cmp(&b_raw));
+        }
+
+        #[test]
+        fn fixed_price_rejects_out_of_range(raw in (PRICE_SCALE + 1)..=u32::MAX) {
+            prop_assert!(FixedPrice::new(raw).is_err());
+        }
+
+        #[test]
+        fn fixed_price_serde_roundtrip(raw in 0u32..=PRICE_SCALE) {
+            let p = FixedPrice::new(raw).unwrap();
+            let json = serde_json::to_string(&p).unwrap();
+            let p2: FixedPrice = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(p, p2);
+        }
+
+        #[test]
+        fn fixed_size_raw_roundtrip(raw in 0u64..=10_000_000_000u64) {
+            let s = FixedSize::new(raw);
+            prop_assert_eq!(s.raw(), raw);
+        }
+
+        #[test]
+        fn fixed_size_f64_roundtrip(raw in 0u64..=10_000_000u64) {
+            let s = FixedSize::new(raw);
+            let f = s.as_f64();
+            let s2 = FixedSize::from_f64(f).unwrap();
+            prop_assert_eq!(s, s2);
+        }
+
+        #[test]
+        fn fixed_size_ordering_preserved(a_raw in 0u64..=u64::MAX, b_raw in 0u64..=u64::MAX) {
+            let a = FixedSize::new(a_raw);
+            let b = FixedSize::new(b_raw);
+            prop_assert_eq!(a.cmp(&b), a_raw.cmp(&b_raw));
+        }
+
+        #[test]
+        fn fixed_size_zero_detection(raw in 0u64..=10_000_000_000u64) {
+            let s = FixedSize::new(raw);
+            prop_assert_eq!(s.is_zero(), raw == 0);
+        }
     }
 }

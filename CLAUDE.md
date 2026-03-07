@@ -6,10 +6,11 @@ and a read-only workstation API. Cargo workspace with crates under `crates/`.
 
 ## Build
 ```bash
-cargo check          # type-check all crates
-cargo test           # run workspace tests
-cargo bench          # run Criterion benchmarks (pb-types, pb-book)
-cargo run -- --help  # CLI binary
+cargo check                                          # type-check all crates
+cargo test --workspace --exclude pb-integration-tests # unit + property tests
+cargo bench                                          # Criterion benchmarks (pb-types, pb-book)
+cargo +nightly fuzz run fuzz_book_delta               # fuzz targets (requires nightly)
+cargo run -- --help                                  # CLI binary
 ```
 
 ## Architecture
@@ -25,8 +26,8 @@ pb-feed (WS/REST) -> dispatcher -> pb-store (Parquet + ClickHouse)
 ## Crates
 - **pb-api**: Read-only HTTP API and live read model for workstation clients. Current routes: feed status, active assets, live snapshots, Parquet-backed replay reconstruction.
 - **pb-types**: Foundation types. `FixedPrice(u32)` scaled by 10,000, `FixedSize(u64)` scaled by 1,000,000. Persisted record model includes split datasets such as `BookEvent`, `TradeEvent`, `IngestEvent`, `BookCheckpoint`, `ReplayValidation`, and `ExecutionEvent`.
-- **pb-book**: `L2Book` using `BTreeMap<Reverse<FixedPrice>, FixedSize>` for bids (best-first iteration). Methods: `apply_snapshot`, `apply_delta`, `best_bid/ask`, `mid_price`, `spread`.
-- **pb-feed**: `WsClient` (reconnect with exp backoff + jitter), `RestClient` (with `RateLimiter` via governor), `Dispatcher` (deser + normalize to split `PersistedRecord` events).
+- **pb-book**: `L2Book` using `BTreeMap<Reverse<FixedPrice>, FixedSize>` for bids (best-first iteration). Methods: `apply_snapshot`, `apply_delta`, `best_bid/ask`, `mid_price`, `spread`, `weighted_mid_price`, `total_bid_size/total_ask_size`, `top_bids/top_asks`, `check_integrity`, `check_sequence`.
+- **pb-feed**: `WsClient` (reconnect with exp backoff + jitter), `RestClient` (with `RateLimiter` via governor), `Dispatcher` (deser + normalize to split `PersistedRecord` events). Dispatcher uses `FxHashMap` for hot-path lookups.
 - **pb-store**: `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ClickHouseSink` (1s batch, `ReplacingMergeTree`).
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
@@ -39,6 +40,11 @@ pb-feed (WS/REST) -> dispatcher -> pb-store (Parquet + ClickHouse)
 - `tracing` for structured logging (not `log` or `println!`)
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization
 - Storage uses `object_store` trait for filesystem abstraction (local FS / S3 / GCS)
+- `mimalloc` as global allocator in pb-bin for lower p99 latency
+- `FxHashMap` (rustc-hash) for internal hot-path lookups in trusted-data contexts
+- `proptest` for property-based invariant testing in pb-types and pb-book
+- Error variants use structured fields with operational context (asset_id, expected/got, url)
+- ADRs in `docs/adr/` document key architectural decisions
 
 ## Config
 `config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[api]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).

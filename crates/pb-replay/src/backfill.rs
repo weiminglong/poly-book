@@ -151,20 +151,22 @@ pub async fn fetch_snapshot(
         .get(&url)
         .send()
         .await
-        .map_err(|e| ReplayError::Http(e.to_string()))?;
+        .map_err(|e| ReplayError::Http {
+            url: url.clone(),
+            reason: e.to_string(),
+        })?;
 
     if !resp.status().is_success() {
-        return Err(ReplayError::Http(format!(
-            "HTTP {} for token_id={}",
-            resp.status(),
-            token_id
-        )));
+        return Err(ReplayError::Http {
+            url: url.clone(),
+            reason: format!("HTTP {} for token_id={}", resp.status(), token_id),
+        });
     }
 
-    let book: RestBookResponse = resp
-        .json()
-        .await
-        .map_err(|e| ReplayError::Http(e.to_string()))?;
+    let book: RestBookResponse = resp.json().await.map_err(|e| ReplayError::Http {
+        url,
+        reason: e.to_string(),
+    })?;
 
     Ok(book)
 }

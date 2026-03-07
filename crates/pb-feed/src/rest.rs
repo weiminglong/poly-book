@@ -91,7 +91,9 @@ pub(crate) fn classify_status(status: StatusCode) -> Result<(), FeedError> {
     if status == StatusCode::TOO_MANY_REQUESTS {
         return Err(FeedError::RateLimited);
     }
-    Err(FeedError::HttpStatus(status.as_u16()))
+    Err(FeedError::HttpStatus {
+        status: status.as_u16(),
+    })
 }
 
 /// Classify HTTP response status codes into appropriate errors.
@@ -122,18 +124,18 @@ mod tests {
     #[test]
     fn test_classify_status_server_error() {
         let err = classify_status(StatusCode::INTERNAL_SERVER_ERROR).unwrap_err();
-        assert!(matches!(err, FeedError::HttpStatus(500)));
+        assert!(matches!(err, FeedError::HttpStatus { status: 500 }));
     }
 
     #[test]
     fn test_classify_status_client_error() {
         let err = classify_status(StatusCode::NOT_FOUND).unwrap_err();
-        assert!(matches!(err, FeedError::HttpStatus(404)));
+        assert!(matches!(err, FeedError::HttpStatus { status: 404 }));
     }
 
     #[test]
     fn test_classify_status_bad_gateway() {
         let err = classify_status(StatusCode::BAD_GATEWAY).unwrap_err();
-        assert!(matches!(err, FeedError::HttpStatus(502)));
+        assert!(matches!(err, FeedError::HttpStatus { status: 502 }));
     }
 }

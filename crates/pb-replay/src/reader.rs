@@ -175,7 +175,9 @@ fn parse_book_kind(value: u8) -> Result<BookEventKind, ReplayError> {
     match value {
         1 => Ok(BookEventKind::Snapshot),
         2 => Ok(BookEventKind::Delta),
-        other => Err(ReplayError::InvalidEventType(other.to_string())),
+        other => Err(ReplayError::InvalidEventType {
+            raw: other.to_string(),
+        }),
     }
 }
 
@@ -183,7 +185,9 @@ fn parse_side_value(value: u8) -> Result<Side, ReplayError> {
     match value {
         1 => Ok(Side::Bid),
         2 => Ok(Side::Ask),
-        other => Err(ReplayError::InvalidSide(other.to_string())),
+        other => Err(ReplayError::InvalidSide {
+            raw: other.to_string(),
+        }),
     }
 }
 
@@ -193,7 +197,9 @@ fn parse_optional_side(value: Option<&str>) -> Result<Option<Side>, ReplayError>
         Some("Ask") => Ok(Some(Side::Ask)),
         Some("bid") => Ok(Some(Side::Bid)),
         Some("ask") => Ok(Some(Side::Ask)),
-        Some(other) => Err(ReplayError::InvalidSide(other.to_string())),
+        Some(other) => Err(ReplayError::InvalidSide {
+            raw: other.to_string(),
+        }),
         None => Ok(None),
     }
 }
@@ -1083,7 +1089,11 @@ impl EventReader for ClickHouseReader {
                     kind: match row.event_kind.as_str() {
                         "Snapshot" => BookEventKind::Snapshot,
                         "Delta" => BookEventKind::Delta,
-                        other => return Err(ReplayError::InvalidEventType(other.to_string())),
+                        other => {
+                            return Err(ReplayError::InvalidEventType {
+                                raw: other.to_string(),
+                            })
+                        }
                     },
                     side: parse_optional_side(Some(row.side.as_str()))?.unwrap(),
                     price: FixedPrice::new(row.price)?,

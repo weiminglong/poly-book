@@ -3,6 +3,9 @@ use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, EnvFilter};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod commands;
 
 #[derive(Parser)]

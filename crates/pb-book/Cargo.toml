@@ -17,7 +17,12 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "book_ops"
+harness = false
+
+[[bench]]
+name = "book_depth"
 harness = false

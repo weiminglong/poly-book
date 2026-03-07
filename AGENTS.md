@@ -85,11 +85,28 @@ All standard commands are in `CLAUDE.md` and `README.md`. Key shortcuts:
 
 - `cargo fmt --all -- --check` — formatting
 - `cargo clippy --workspace -- -D warnings` — lints
-- `cargo test --workspace --exclude pb-integration-tests` — unit tests (no Docker)
+- `cargo test --workspace --exclude pb-integration-tests` — unit + property tests (no Docker)
 - `cargo build` — dev build
+- `cargo bench -p pb-types` — fixed-point and wire deserialization benchmarks
+- `cargo bench -p pb-book` — book operations, depth iteration, analytics benchmarks
 
 Integration tests (`pb-integration-tests`) require Docker and ClickHouse via
 `testcontainers`; skip them in Cloud environments without Docker.
+
+Fuzz targets (`fuzz/`) require `cargo-fuzz` and a nightly toolchain; skip in
+Cloud unless specifically requested.
+
+### Property-based testing
+
+`pb-types` and `pb-book` include `proptest` suites. These run as part of
+`cargo test` and verify invariants like ordering, roundtrip consistency,
+spread non-negativity, and sequence gap detection across randomized inputs.
+
+### Architectural decisions
+
+Design decisions are recorded as ADRs in `docs/adr/`. Read `docs/latency.md`
+for pipeline latency characteristics. Key choices: fixed-point arithmetic,
+BTreeMap book, channel message passing, zero-copy deser, mimalloc, FxHashMap.
 
 ### Configuration
 

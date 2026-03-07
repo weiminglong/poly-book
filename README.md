@@ -154,6 +154,52 @@ just parquet-peek
 just parquet-schema
 ```
 
+## Performance & Correctness
+
+### Benchmarks
+
+```bash
+cargo bench                 # all benchmarks
+cargo bench -p pb-types     # fixed-point ops + wire deserialization throughput
+cargo bench -p pb-book      # book operations, depth iteration, mixed workloads
+```
+
+### Property-Based Testing
+
+The `pb-types` and `pb-book` crates include `proptest` suites that verify
+invariants across randomized inputs:
+
+- fixed-point roundtrip, ordering, and serde consistency
+- bid/ask ordering preserved after arbitrary snapshots and deltas
+- spread never negative for non-crossed books
+- mid price and weighted mid price bounded by best bid/ask
+- sequence monotonicity and gap detection soundness
+- snapshot idempotency
+- crossed-book detection via `check_integrity()`
+- total size consistency across all levels
+
+### Fuzzing
+
+Fuzz targets under `fuzz/` cover deserialization and book mutation:
+
+```bash
+cargo +nightly fuzz run fuzz_ws_deser       # wire protocol parsing
+cargo +nightly fuzz run fuzz_fixed_price     # FixedPrice/FixedSize parsing
+cargo +nightly fuzz run fuzz_book_delta      # book delta application invariants
+```
+
+### Latency Design
+
+Key design choices documented in [docs/latency.md](docs/latency.md) and
+[docs/adr/](docs/adr/):
+
+- Fixed-point arithmetic eliminates FPU stalls and NaN guards (ADR-0001)
+- BTreeMap gives O(1) best bid/ask via sorted iteration (ADR-0002)
+- Channel-based message passing avoids locks on the hot path (ADR-0003)
+- Zero-copy wire deserialization reduces allocations (ADR-0004)
+- mimalloc global allocator for lower p99 latency (ADR-0005)
+- FxHashMap in Dispatcher for faster internal lookups (ADR-0006)
+
 ## Why This Repo Exists
 
 The project demonstrates a specific style of trading-infrastructure design:
@@ -183,7 +229,7 @@ Workspace crates:
 |-------|----------------|
 | `pb-api` | Read-only HTTP API and live read model for workstation clients |
 | `pb-types` | Fixed-point types, wire formats, and persisted records |
-| `pb-book` | In-memory L2 order book engine |
+| `pb-book` | In-memory L2 order book engine with analytics (weighted mid, top-N, integrity checks) |
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
 | `pb-store` | Parquet and ClickHouse sinks |
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
