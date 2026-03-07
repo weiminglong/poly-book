@@ -98,25 +98,31 @@ The current implementation exposes:
 - `GET /api/v1/assets/active`
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
+- `GET /api/v1/integrity/summary`
+- `GET /api/v1/execution/orders`
+- `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
 
 ## Current Browser Client
 
-The separate Phase 4 SPA talks only to these HTTP routes. The currently shipped
+The separate SPA talks to these HTTP and WebSocket routes. The currently shipped
 web surfaces are:
 
 - `Live Feed`
 - `Replay Lab`
+- `Integrity`
+- `Execution Timeline`
 
 Current browser transport behavior:
 
-- adaptive HTTP polling for live views
+- WebSocket order book streaming for live book views, with automatic fallback to
+  adaptive HTTP polling
+- adaptive HTTP polling for feed status and active assets
 - foreground polling faster than background polling
 - stale browser requests are cancelled before the next refresh cycle
-
-This remains an interim client strategy until the deferred workstation streaming
-route exists.
+- virtualized order book table for deep book views
+- render-throttled WebSocket updates (one re-render per animation frame)
 
 The SPA is developed and served separately from `serve-api` today. Packaging the
 Rust API and static frontend assets together remains later work.
@@ -125,8 +131,6 @@ Rust API and static frontend assets together remains later work.
 
 The following are intentionally not part of the current `serve-api` slice:
 
-- `integrity/summary`
-- execution timeline routes
 - SQL workbench routes
-- WebSocket order book streaming
 - ClickHouse-backed API reads
+- latency summary routes

@@ -191,29 +191,49 @@ workstation API is not yet part of that production deployment flow.
 
 ## Workstation Web App
 
-The Phase 4 SPA currently ships only:
+The SPA currently ships:
 
 - `Live Feed`
 - `Replay Lab`
+- `Integrity`
+- `Execution Timeline`
 
-Local workflow:
+### Running API and Web App Together
 
 ```bash
-# terminal 1
+# terminal 1 — start the Rust API
 cargo run -- serve-api --auto-rotate
 
-# terminal 2
+# terminal 2 — start the web dev server
 cd web
 npm install
 npm run dev
 ```
 
-Defaults:
+Open `http://127.0.0.1:4173` in the browser. The Vite dev server proxies
+`/api` requests to the Rust API at `127.0.0.1:3000`.
 
-- Web app: `http://127.0.0.1:4173`
-- API proxy target in dev: `http://127.0.0.1:3000`
+### Demo Mode (No Backend Required)
 
-Override the dev proxy target with:
+```bash
+cd web
+npm install
+npm run dev
+# open http://127.0.0.1:4173/?source=demo
+```
+
+The SPA ships seeded fixtures for all routes. Use the in-app source toggle or
+the `?source=demo` query parameter.
+
+### Port Defaults
+
+| Service | Port |
+|---------|------|
+| API     | 3000 |
+| Metrics | 9090 |
+| Web     | 4173 |
+
+### Overriding the Dev Proxy Target
 
 ```bash
 cd web
@@ -227,22 +247,15 @@ cd web
 VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 ```
 
-The SPA also supports a seeded demo mode for offline review. Use the in-app
-source toggle or open `http://127.0.0.1:4173/?source=demo`.
+### Web Transport Behavior
 
-Current web transport behavior:
+- `Live Feed` uses WebSocket order book streaming when the backend supports it,
+  with automatic fallback to adaptive HTTP polling.
+- Feed status and active assets use adaptive HTTP polling (1s foreground, 5s
+  background).
+- Stale in-flight browser requests are aborted before the next poll.
 
-- `Live Feed` uses adaptive HTTP polling
-- foreground cadence: `1s`
-- background cadence: `5s`
-- stale in-flight browser requests are aborted before the next poll
+### Deferred from the Current SPA Pass
 
-This is a Phase 4.5 hardening step only. Trader-grade streaming still depends on
-the deferred WebSocket order-book route.
-
-Deferred from the current SPA pass:
-
-- Integrity
-- Latency
-- Execution Timeline
-- Query Workbench
+- Latency (reserved for metrics-backed summaries)
+- Query Workbench (backend route pending)
