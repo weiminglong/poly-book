@@ -585,4 +585,362 @@ mod tests {
         assert_eq!(replay.bids.len(), 1);
         assert_eq!(replay.asks.len(), 1);
     }
+
+    fn parquet_writer(base_path: &str) -> ParquetRecordWriter {
+        ParquetRecordWriter::new(
+            Arc::new(object_store::local::LocalFileSystem::new()) as Arc<dyn ObjectStore>,
+            base_path.to_string(),
+        )
+    }
+
+    fn test_provenance(ts: u64, seq: u64) -> EventProvenance {
+        EventProvenance {
+            recv_timestamp_us: ts,
+            exchange_timestamp_us: ts,
+            source: DataSource::WebSocket,
+            source_event_id: None,
+            source_session_id: Some("ws-session-1".to_string()),
+            sequence: Some(Sequence::new(seq)),
+        }
+    }
+
+    #[tokio::test]
+    async fn integrity_summary_returns_counts_from_parquet() {
+        use pb_types::event::IngestEventKind;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        writer
+            .write_batch(&[
+                PersistedRecord::Book(BookEvent {
+                    asset_id: AssetId::new("tok1"),
+                    kind: BookEventKind::Snapshot,
+                    side: Side::Bid,
+                    price: FixedPrice::new(5000).unwrap(),
+                    size: FixedSize::from_f64(100.0).unwrap(),
+                    provenance: test_provenance(base_ts, 0),
+                }),
+                PersistedRecord::Ingest(pb_types::IngestEvent {
+                    asset_id: Some(AssetId::new("tok1")),
+                    kind: IngestEventKind::SequenceGap,
+                    provenance: test_provenance(base_ts + 100, 0),
+                    expected_sequence: Some(1),
+                    observed_sequence: Some(3),
+                    details: Some("gap".to_string()),
+                }),
+                PersistedRecord::Ingest(pb_types::IngestEvent {
+                    asset_id: None,
+                    kind: IngestEventKind::ReconnectStart,
+                    provenance: test_provenance(base_ts + 200, 0),
+                    expected_sequence: None,
+                    observed_sequence: None,
+                    details: None,
+                }),
+            ])
+            .await
+            .unwrap();
+
+        let app = router(test_state(base_path));
+        let end_ts = base_ts + 1_000_000;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/integrity/summary?asset_id=tok1&start_us={base_ts}&end_us={end_ts}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let summary: crate::dto::IntegritySummaryResponse = response_json(response).await;
+        assert_eq!(summary.asset_id, "tok1");
+        assert_eq!(summary.total_book_events, 1);
+        assert!(summary.total_ingest_events >= 1);
+        assert!(summary.gap_count >= 1);
+        assert_eq!(summary.completeness, crate::dto::CompletenessLabel::BestEffort);
+    }
+
+    #[tokio::test]
+    async fn integrity_summary_returns_400_for_invalid_range() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/integrity/summary?asset_id=tok1&start_us=200&end_us=100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn execution_orders_returns_timeline_from_parquet() {
+        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        writer
+            .write_batch(&[
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: "order-1".to_string(),
+                    client_order_id: Some("client-1".to_string()),
+                    venue_order_id: None,
+                    kind: ExecutionEventKind::SubmitIntent,
+                    side: Some(Side::Bid),
+                    price: Some(FixedPrice::new(5000).unwrap()),
+                    size: Some(FixedSize::from_f64(10.0).unwrap()),
+                    status: None,
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                }),
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts + 100,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: "order-1".to_string(),
+                    client_order_id: Some("client-1".to_string()),
+                    venue_order_id: Some("venue-1".to_string()),
+                    kind: ExecutionEventKind::ExchangeAck,
+                    side: Some(Side::Bid),
+                    price: Some(FixedPrice::new(5000).unwrap()),
+                    size: Some(FixedSize::from_f64(10.0).unwrap()),
+                    status: Some("accepted".to_string()),
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                }),
+            ])
+            .await
+            .unwrap();
+
+        let app = router(test_state(base_path));
+        let end_ts = base_ts + 1_000_000;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let timeline: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(timeline.total_count, 2);
+        assert_eq!(timeline.events.len(), 2);
+        assert_eq!(timeline.events[0].order_id, "order-1");
+        assert_eq!(timeline.events[0].kind, "submit_intent");
+        assert_eq!(timeline.events[1].kind, "exchange_ack");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_filters_by_order_id() {
+        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        writer
+            .write_batch(&[
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: "order-A".to_string(),
+                    client_order_id: None,
+                    venue_order_id: None,
+                    kind: ExecutionEventKind::SubmitIntent,
+                    side: Some(Side::Bid),
+                    price: None,
+                    size: None,
+                    status: None,
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                }),
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts + 50,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: "order-B".to_string(),
+                    client_order_id: None,
+                    venue_order_id: None,
+                    kind: ExecutionEventKind::SubmitIntent,
+                    side: Some(Side::Ask),
+                    price: None,
+                    size: None,
+                    status: None,
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                }),
+            ])
+            .await
+            .unwrap();
+
+        let app = router(test_state(base_path));
+        let end_ts = base_ts + 1_000_000;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?order_id=order-A&start_us={base_ts}&end_us={end_ts}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let timeline: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(timeline.total_count, 1);
+        assert_eq!(timeline.events[0].order_id, "order-A");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_returns_400_for_invalid_limit() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/execution/orders?start_us=100&end_us=200&limit=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ws_orderbook_returns_404_for_inactive_asset() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        state.broadcast = Some(crate::streaming::BookBroadcast::new());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let server_handle = tokio::spawn(async move {
+            crate::serve(listener, state, shutdown_clone).await.unwrap();
+        });
+
+        let url = format!(
+            "ws://127.0.0.1:{}/api/v1/streams/orderbook?asset_id=nope",
+            addr.port()
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err() || {
+            let (_, response) = result.unwrap();
+            response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS
+        });
+
+        shutdown.cancel();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn ws_orderbook_receives_initial_snapshot() {
+        use futures_util::StreamExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let broadcast = crate::streaming::BookBroadcast::new();
+        state.broadcast = Some(broadcast.clone());
+
+        state
+            .live
+            .set_active_assets(vec!["tok1".to_string()])
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Bid,
+                price: FixedPrice::from_f64(0.50).unwrap(),
+                size: FixedSize::from_f64(10.0).unwrap(),
+                provenance: test_provenance(100, 0),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Ask,
+                price: FixedPrice::from_f64(0.60).unwrap(),
+                size: FixedSize::from_f64(20.0).unwrap(),
+                provenance: test_provenance(100, 1),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Ingest(pb_types::IngestEvent {
+                asset_id: None,
+                kind: pb_types::IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 200,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let server_handle = tokio::spawn(async move {
+            crate::serve(listener, state, shutdown_clone).await.unwrap();
+        });
+
+        let url = format!(
+            "ws://127.0.0.1:{}/api/v1/streams/orderbook?asset_id=tok1",
+            addr.port()
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timed out waiting for ws message")
+            .expect("stream ended")
+            .expect("ws error");
+
+        let text = msg.into_text().unwrap();
+        let update: crate::dto::BookUpdateMessage = serde_json::from_str(&text).unwrap();
+        assert_eq!(update.asset_id, "tok1");
+        assert!(!update.bids.is_empty());
+        assert!(!update.asks.is_empty());
+
+        let _ = ws.close(None).await;
+        shutdown.cancel();
+        let _ = server_handle.await;
+    }
 }

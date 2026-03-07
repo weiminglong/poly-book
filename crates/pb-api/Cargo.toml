@@ -27,3 +27,6 @@ pb-store = { workspace = true }
 object_store = { workspace = true }
 tempfile = "3"
 tower = "0.5"
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+hyper = "1"
