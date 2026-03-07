@@ -88,6 +88,110 @@ export interface RequestOptions {
   signal?: AbortSignal
 }
 
+// --- Integrity types ---
+
+export type CompletenessLabel = 'complete' | 'best_effort'
+
+export interface IntegritySummaryResponse {
+  asset_id: string
+  start_us: number
+  end_us: number
+  total_book_events: number
+  total_ingest_events: number
+  reconnect_count: number
+  gap_count: number
+  stale_snapshot_skip_count: number
+  validation_count: number
+  validations_matched: number
+  validations_mismatched: number
+  completeness: CompletenessLabel
+  continuity_events: ContinuityWarning[]
+}
+
+// --- Latency types ---
+
+export interface LatencySummaryResponse {
+  window_start_us: number
+  window_end_us: number
+  sample_count: number
+  ws_latency_p50_us: number | null
+  ws_latency_p99_us: number | null
+  processing_p50_us: number | null
+  processing_p99_us: number | null
+  storage_flush_p50_us: number | null
+  storage_flush_p99_us: number | null
+}
+
+// --- Execution timeline types ---
+
+export interface LatencyTraceView {
+  market_data_recv_us: number | null
+  normalization_done_us: number | null
+  strategy_decision_us: number | null
+  order_submit_us: number | null
+  exchange_ack_us: number | null
+  exchange_fill_us: number | null
+}
+
+export interface ExecutionEventView {
+  event_timestamp_us: number
+  asset_id: string | null
+  order_id: string
+  client_order_id: string | null
+  venue_order_id: string | null
+  kind: string
+  side: string | null
+  price: string | null
+  size: string | null
+  status: string | null
+  reason: string | null
+  latency: LatencyTraceView
+}
+
+export interface ExecutionTimelineResponse {
+  events: ExecutionEventView[]
+  total_count: number
+}
+
+// --- Query workbench types ---
+
+export interface QueryColumn {
+  name: string
+  data_type: string
+}
+
+export interface QueryResultResponse {
+  columns: QueryColumn[]
+  rows: unknown[][]
+  row_count: number
+  truncated: boolean
+  execution_time_ms: number
+}
+
+export interface DatasetInfo {
+  name: string
+  description: string
+  columns: QueryColumn[]
+}
+
+export interface DatasetSchemaResponse {
+  datasets: DatasetInfo[]
+}
+
+export interface IntegrityRequest {
+  assetId: string
+  startUs: number
+  endUs: number
+}
+
+export interface ExecutionRequest {
+  orderId?: string
+  assetId?: string
+  startUs: number
+  endUs: number
+  limit?: number
+}
+
 export interface WorkstationClient {
   getFeedStatus(options?: RequestOptions): Promise<FeedStatusResponse>
   getActiveAssets(options?: RequestOptions): Promise<ActiveAssetSummary[]>
@@ -100,4 +204,12 @@ export interface WorkstationClient {
     request: ReplayRequest,
     options?: RequestOptions,
   ): Promise<ReplayReconstructionResponse>
+  getIntegritySummary(
+    request: IntegrityRequest,
+    options?: RequestOptions,
+  ): Promise<IntegritySummaryResponse>
+  getExecutionTimeline(
+    request: ExecutionRequest,
+    options?: RequestOptions,
+  ): Promise<ExecutionTimelineResponse>
 }

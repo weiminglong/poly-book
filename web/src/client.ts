@@ -2,6 +2,8 @@ import {
   demoActiveAssets,
   demoFeedStatus,
   demoReplayDefaults,
+  getDemoExecutionTimeline,
+  getDemoIntegrity,
   getDemoReplay,
   getDemoSnapshot,
 } from './demoData'
@@ -10,7 +12,9 @@ import type {
   ActiveAssetSummary,
   ApiErrorResponse,
   DataSourceMode,
+  ExecutionTimelineResponse,
   FeedStatusResponse,
+  IntegritySummaryResponse,
   LiveOrderBookSnapshot,
   RequestOptions,
   ReplayReconstructionResponse,
@@ -31,6 +35,8 @@ export function createWorkstationClient(
       getOrderBookSnapshot: async (assetId, depth) => getDemoSnapshot(assetId, depth),
       getReplayReconstruction: async ({ assetId, mode, depth }) =>
         getDemoReplay(assetId, mode, depth),
+      getIntegritySummary: async () => getDemoIntegrity(),
+      getExecutionTimeline: async () => getDemoExecutionTimeline(),
     }
   }
 
@@ -57,6 +63,28 @@ export function createWorkstationClient(
         }),
         options,
       ),
+    getIntegritySummary: ({ assetId, startUs, endUs }, options) =>
+      fetchJson<IntegritySummaryResponse>(
+        buildUrl(apiBaseUrl, '/api/v1/integrity/summary', {
+          asset_id: assetId,
+          start_us: String(startUs),
+          end_us: String(endUs),
+        }),
+        options,
+      ),
+    getExecutionTimeline: ({ orderId, assetId, startUs, endUs, limit }, options) => {
+      const params: Record<string, string> = {
+        start_us: String(startUs),
+        end_us: String(endUs),
+      }
+      if (orderId) params.order_id = orderId
+      if (assetId) params.asset_id = assetId
+      if (limit !== undefined) params.limit = String(limit)
+      return fetchJson<ExecutionTimelineResponse>(
+        buildUrl(apiBaseUrl, '/api/v1/execution/orders', params),
+        options,
+      )
+    },
   }
 }
 

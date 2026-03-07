@@ -124,12 +124,68 @@ Returned for:
 - replay failures other than missing-snapshot lookup
 - unexpected internal route failures
 
+### `GET /api/v1/integrity/summary`
+
+Query params:
+
+- `asset_id`
+- `start_us`
+- `end_us`
+  - `start_us` must be less than `end_us`
+
+Returns:
+
+- asset ID, time window
+- book and ingest event counts
+- reconnect, gap, and stale snapshot skip counts
+- validation match/mismatch counts
+- completeness label: `complete` or `best_effort`
+- continuity events within the window
+
+### `GET /api/v1/execution/orders`
+
+Query params:
+
+- `start_us`
+- `end_us`
+  - `start_us` must be less than `end_us`
+- `order_id`
+  - optional; filters to a single order
+- `asset_id`
+  - optional; filters to a single asset
+- `limit`
+  - optional
+  - defaults to `100`
+  - must be between `1` and `1000`
+
+Returns:
+
+- execution events ordered by timestamp
+- each event includes kind, side, price, size, status, reason, and latency
+  trace fields
+- total count (before limit truncation)
+
+### `WS /api/v1/streams/orderbook`
+
+Query params:
+
+- `asset_id`
+  - required; must be an active asset
+
+Behavior:
+
+- upgrades to WebSocket
+- sends an initial full snapshot message on connect
+- sends incremental book update messages as JSON text frames
+- filters updates to the requested asset
+- handles ping/pong and graceful close
+- slow consumers that fall behind the broadcast buffer receive a fresh full
+  snapshot to re-sync
+
 ## Deferred Endpoints
 
 The current API does not yet implement:
 
-- integrity summary routes
-- execution timeline routes
 - SQL workbench routes
-- WebSocket order book streaming
 - ClickHouse-backed API reads
+- latency summary routes

@@ -8,6 +8,17 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    build: {
+      chunkSizeWarningLimit: 150,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-router': ['react-router-dom'],
+            'vendor-virtual': ['@tanstack/react-virtual'],
+          },
+        },
+      },
+    },
     server: {
       host: '0.0.0.0',
       port: 4173,

@@ -15,9 +15,13 @@ interface AppContentProps {
 
 const loadLiveFeedPage = () => import('./LiveFeedPage')
 const loadReplayLabPage = () => import('./ReplayLabPage')
+const loadIntegrityPage = () => import('./IntegrityPage')
+const loadExecutionTimelinePage = () => import('./ExecutionTimelinePage')
 
 const LiveFeedPage = lazy(loadLiveFeedPage)
 const ReplayLabPage = lazy(loadReplayLabPage)
+const IntegrityPage = lazy(loadIntegrityPage)
+const ExecutionTimelinePage = lazy(loadExecutionTimelinePage)
 
 function WorkstationApp() {
   const [sourceMode, setSourceMode] = useState<DataSourceMode>(() => getInitialSourceMode())
@@ -58,10 +62,10 @@ function AppContent({
       <header className="topbar">
         <div>
           <p className="eyebrow">Poly-book quant workstation</p>
-          <h1>Live Feed + Replay Lab</h1>
+          <h1>Quant Workstation</h1>
           <p className="lede">
-            Read-only workstation views backed by the current `pb-api` routes, now with adaptive
-            polling and lazy route loading as the first Phase 4.5 hardening slice.
+            Read-only workstation views backed by the pb-api routes: live feed, replay,
+            integrity, and execution timeline.
           </p>
         </div>
         <div className="topbar-actions">
@@ -106,6 +110,22 @@ function AppContent({
         >
           Replay Lab
         </NavLink>
+        <NavLink
+          className={({ isActive }) => (isActive ? 'nav-link is-active' : 'nav-link')}
+          onFocus={preloadIntegrityPage}
+          onMouseEnter={preloadIntegrityPage}
+          to="/integrity"
+        >
+          Integrity
+        </NavLink>
+        <NavLink
+          className={({ isActive }) => (isActive ? 'nav-link is-active' : 'nav-link')}
+          onFocus={preloadExecutionTimelinePage}
+          onMouseEnter={preloadExecutionTimelinePage}
+          to="/execution-timeline"
+        >
+          Execution
+        </NavLink>
       </nav>
 
       <main className="content-grid">
@@ -117,6 +137,14 @@ function AppContent({
               <Route
                 path="/replay-lab"
                 element={<ReplayLabPage client={client} sourceMode={sourceMode} />}
+              />
+              <Route
+                path="/integrity"
+                element={<IntegrityPage client={client} sourceMode={sourceMode} />}
+              />
+              <Route
+                path="/execution-timeline"
+                element={<ExecutionTimelinePage client={client} sourceMode={sourceMode} />}
               />
             </Routes>
           </Suspense>
@@ -131,20 +159,15 @@ function AppContent({
               </li>
               <li>
                 <strong>Replay Lab</strong>
-                <span>Point-in-time replay across `recv_time` and `exchange_time`.</span>
-              </li>
-            </ul>
-          </SectionCard>
-
-          <SectionCard title="Phase 4.5 hardening now">
-            <ul className="deferred-list">
-              <li>
-                <strong>Adaptive transport</strong>
-                <span>1s foreground polling, 5s background polling, and stale request cancellation.</span>
+                <span>Point-in-time replay across recv_time and exchange_time.</span>
               </li>
               <li>
-                <strong>Lean route loading</strong>
-                <span>Live Feed and Replay Lab now split into lazily loaded route bundles.</span>
+                <strong>Integrity</strong>
+                <span>Dataset continuity, gap counts, and validation outcomes.</span>
+              </li>
+              <li>
+                <strong>Execution Timeline</strong>
+                <span>Read-only order lifecycle inspection with latency traces.</span>
               </li>
             </ul>
           </SectionCard>
@@ -152,20 +175,16 @@ function AppContent({
           <SectionCard title="Deferred from this pass">
             <ul className="deferred-list">
               <li>
-                <strong>Integrity</strong>
-                <span>Not yet wired because the backend integrity routes remain deferred.</span>
-              </li>
-              <li>
                 <strong>Latency</strong>
                 <span>Reserved for later metrics-backed summaries.</span>
               </li>
               <li>
-                <strong>Execution Timeline</strong>
-                <span>Read-only execution inspection stays future scope.</span>
+                <strong>Query Workbench</strong>
+                <span>Read-only SQL over split datasets; backend route pending.</span>
               </li>
               <li>
                 <strong>Streaming transport</strong>
-                <span>True trader-grade updates still depend on backend WebSocket order-book streams.</span>
+                <span>WebSocket order-book streaming is now available on the backend.</span>
               </li>
             </ul>
           </SectionCard>
@@ -206,6 +225,14 @@ function preloadLiveFeedPage() {
 
 function preloadReplayLabPage() {
   void loadReplayLabPage()
+}
+
+function preloadIntegrityPage() {
+  void loadIntegrityPage()
+}
+
+function preloadExecutionTimelinePage() {
+  void loadExecutionTimelinePage()
 }
 
 export default WorkstationApp

@@ -1,6 +1,8 @@
 import type {
   ActiveAssetSummary,
+  ExecutionTimelineResponse,
   FeedStatusResponse,
+  IntegritySummaryResponse,
   LiveOrderBookSnapshot,
   ReplayFormValues,
   ReplayMode,
@@ -216,4 +218,116 @@ export function getDemoReplay(assetId: string, mode: ReplayMode, depth: number):
     bids: replay.bids.slice(0, depth),
     asks: replay.asks.slice(0, depth),
   }
+}
+
+export const demoIntegritySummary: IntegritySummaryResponse = {
+  asset_id: 'btc-5m-yes',
+  start_us: DEMO_TIMESTAMP_US - 300_000_000,
+  end_us: DEMO_TIMESTAMP_US,
+  total_book_events: 24_817,
+  total_ingest_events: 4,
+  reconnect_count: 1,
+  gap_count: 1,
+  stale_snapshot_skip_count: 0,
+  validation_count: 3,
+  validations_matched: 2,
+  validations_mismatched: 1,
+  completeness: 'best_effort',
+  continuity_events: [
+    {
+      kind: 'reconnect_start',
+      recv_timestamp_us: DEMO_TIMESTAMP_US - 120_000_000,
+      exchange_timestamp_us: 0,
+      details: 'WebSocket connection dropped.',
+    },
+    {
+      kind: 'reconnect_success',
+      recv_timestamp_us: DEMO_TIMESTAMP_US - 119_500_000,
+      exchange_timestamp_us: 0,
+      details: 'Reconnected after 500ms.',
+    },
+    {
+      kind: 'sequence_gap',
+      recv_timestamp_us: DEMO_TIMESTAMP_US - 60_000_000,
+      exchange_timestamp_us: DEMO_TIMESTAMP_US - 60_200_000,
+      details: 'Expected sequence 12043, observed 12046.',
+    },
+  ],
+}
+
+export function getDemoIntegrity(): IntegritySummaryResponse {
+  return demoIntegritySummary
+}
+
+export const demoExecutionTimeline: ExecutionTimelineResponse = {
+  events: [
+    {
+      event_timestamp_us: DEMO_TIMESTAMP_US - 180_000_000,
+      asset_id: 'btc-5m-yes',
+      order_id: 'demo-order-1',
+      client_order_id: 'client-001',
+      venue_order_id: null,
+      kind: 'submit_intent',
+      side: 'Bid',
+      price: '0.5300',
+      size: '50.000000',
+      status: null,
+      reason: null,
+      latency: {
+        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
+        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
+        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
+        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
+        exchange_ack_us: null,
+        exchange_fill_us: null,
+      },
+    },
+    {
+      event_timestamp_us: DEMO_TIMESTAMP_US - 179_800_000,
+      asset_id: 'btc-5m-yes',
+      order_id: 'demo-order-1',
+      client_order_id: 'client-001',
+      venue_order_id: 'venue-abc-123',
+      kind: 'exchange_ack',
+      side: 'Bid',
+      price: '0.5300',
+      size: '50.000000',
+      status: 'accepted',
+      reason: null,
+      latency: {
+        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
+        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
+        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
+        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
+        exchange_ack_us: DEMO_TIMESTAMP_US - 179_800_000,
+        exchange_fill_us: null,
+      },
+    },
+    {
+      event_timestamp_us: DEMO_TIMESTAMP_US - 178_000_000,
+      asset_id: 'btc-5m-yes',
+      order_id: 'demo-order-1',
+      client_order_id: 'client-001',
+      venue_order_id: 'venue-abc-123',
+      kind: 'fill',
+      side: 'Bid',
+      price: '0.5300',
+      size: '50.000000',
+      status: 'filled',
+      reason: null,
+      latency: {
+        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
+        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
+        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
+        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
+        exchange_ack_us: DEMO_TIMESTAMP_US - 179_800_000,
+        exchange_fill_us: DEMO_TIMESTAMP_US - 178_000_000,
+      },
+    },
+  ],
+  total_count: 3,
+}
+
+export function getDemoExecutionTimeline(): ExecutionTimelineResponse {
+  return demoExecutionTimeline
 }

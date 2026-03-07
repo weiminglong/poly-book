@@ -47,7 +47,14 @@ pub async fn run(
     };
     let live = pb_api::LiveReadModel::new(feed_mode);
     let (event_tx, event_rx) = mpsc::channel::<pb_types::PersistedRecord>(2_048);
-    let consumer_handle = live.spawn_consumer(event_rx, shutdown.child_token());
+    let broadcast = pb_api::BookBroadcast::new();
+    let consumer_handle = live.spawn_consumer_with_broadcast(
+        event_rx,
+        broadcast.clone(),
+        default_depth,
+        stale_after_secs,
+        shutdown.child_token(),
+    );
 
     let runtime_handle = match mode {
         LiveMode::Fixed(token_ids) => spawn_fixed_runtime(
@@ -73,6 +80,7 @@ pub async fn run(
             max_depth,
             stale_after_secs,
         },
+        broadcast: Some(broadcast.clone()),
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "api server bound");
