@@ -265,6 +265,51 @@ impl LiveReadModel {
         })
     }
 
+    pub fn spawn_consumer_with_broadcast(
+        &self,
+        mut rx: mpsc::Receiver<PersistedRecord>,
+        broadcast: crate::streaming::BookBroadcast,
+        default_depth: usize,
+        stale_after_secs: u64,
+        token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let model = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        break;
+                    }
+                    record = rx.recv() => {
+                        match record {
+                            Some(record) => {
+                                let asset_id = match &record {
+                                    PersistedRecord::Book(e) => Some(e.asset_id.to_string()),
+                                    _ => None,
+                                };
+                                model.apply_record(record).await;
+                                if let Some(asset_id) = asset_id {
+                                    if let Ok(snap) = model.snapshot(&asset_id, default_depth, stale_after_secs).await {
+                                        broadcast.send(crate::dto::BookUpdateMessage {
+                                            asset_id: snap.asset_id,
+                                            sequence: snap.sequence,
+                                            last_update_us: snap.last_update_us,
+                                            bids: snap.bids,
+                                            asks: snap.asks,
+                                            mid_price: snap.mid_price,
+                                            spread: snap.spread,
+                                        });
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     pub async fn apply_record(&self, record: PersistedRecord) {
         let mut state = self.inner.write().await;
         state.materialize_pending_before_record(&record);
@@ -327,6 +372,14 @@ impl LiveReadModel {
                 }
             })
             .collect()
+    }
+
+    pub async fn is_asset_active(&self, asset_id: &str) -> bool {
+        let state = self.inner.read().await;
+        state
+            .active_assets
+            .iter()
+            .any(|candidate| candidate == asset_id)
     }
 
     pub async fn snapshot(

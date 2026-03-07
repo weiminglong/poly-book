@@ -27,6 +27,7 @@ pub struct ApiConfig {
 pub struct AppState {
     pub live: LiveReadModel,
     pub config: ApiConfig,
+    pub broadcast: Option<crate::streaming::BookBroadcast>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +61,8 @@ struct ExecutionQuery {
 }
 
 pub fn router(state: AppState) -> Router {
+    use axum::routing::any;
+
     Router::new()
         .route("/api/v1/feed/status", get(feed_status))
         .route("/api/v1/assets/active", get(active_assets))
@@ -70,6 +73,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/replay/reconstruct", get(replay_reconstruct))
         .route("/api/v1/integrity/summary", get(integrity_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
+        .route(
+            "/api/v1/streams/orderbook",
+            any(crate::streaming::ws_orderbook),
+        )
         .with_state(state)
 }
 
@@ -396,6 +403,7 @@ mod tests {
                 max_depth: 200,
                 stale_after_secs: 60,
             },
+            broadcast: None,
         }
     }
 
