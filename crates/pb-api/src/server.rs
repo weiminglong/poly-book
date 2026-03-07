@@ -1,14 +1,16 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use pb_replay::{ParquetReader, ReplayEngine, ReplayError};
-use pb_types::{AssetId, IngestEvent, ReplayMode};
+use pb_replay::{EventReader, ParquetReader, ReplayEngine, ReplayError};
+use pb_types::{AssetId, IngestEvent, IngestEventKind, ReplayMode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    ContinuityWarning, FeedStatusResponse, LiveOrderBookSnapshot, ReplayReconstructionResponse,
+    CompletenessLabel, ContinuityWarning, ExecutionEventView, ExecutionTimelineResponse,
+    FeedStatusResponse, IntegritySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot,
+    ReplayReconstructionResponse,
 };
 use crate::error::ApiError;
 use crate::live_state::{LiveReadModel, SnapshotLookupError};
@@ -41,6 +43,22 @@ struct ReplayQuery {
     depth: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct IntegrityQuery {
+    asset_id: String,
+    start_us: u64,
+    end_us: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecutionQuery {
+    order_id: Option<String>,
+    asset_id: Option<String>,
+    start_us: u64,
+    end_us: u64,
+    limit: Option<usize>,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/feed/status", get(feed_status))
@@ -50,6 +68,8 @@ pub fn router(state: AppState) -> Router {
             get(orderbook_snapshot),
         )
         .route("/api/v1/replay/reconstruct", get(replay_reconstruct))
+        .route("/api/v1/integrity/summary", get(integrity_summary))
+        .route("/api/v1/execution/orders", get(execution_orders))
         .with_state(state)
 }
 
@@ -156,6 +176,148 @@ async fn replay_reconstruct(
             .map(continuity_warning)
             .collect(),
     }))
+}
+
+const EXECUTION_DEFAULT_LIMIT: usize = 100;
+const EXECUTION_MAX_LIMIT: usize = 1000;
+
+async fn integrity_summary(
+    State(state): State<AppState>,
+    Query(query): Query<IntegrityQuery>,
+) -> Result<Json<IntegritySummaryResponse>, ApiError> {
+    if query.start_us >= query.end_us {
+        return Err(ApiError::BadRequest(
+            "start_us must be less than end_us".to_string(),
+        ));
+    }
+    let reader = ParquetReader::new(state.config.parquet_base_path.clone());
+    let asset_id = AssetId::new(query.asset_id.clone());
+
+    let window = reader
+        .read_market_data(&asset_id, query.start_us, query.end_us)
+        .await
+        .map_err(map_replay_error)?;
+    let validations = reader
+        .read_validations(&asset_id, query.start_us, query.end_us)
+        .await
+        .map_err(map_replay_error)?;
+
+    let total_book_events = window.book_events.len() as u64;
+    let total_ingest_events = window.ingest_events.len() as u64;
+
+    let mut reconnect_count = 0u32;
+    let mut gap_count = 0u32;
+    let mut stale_snapshot_skip_count = 0u32;
+
+    for event in &window.ingest_events {
+        match event.kind {
+            IngestEventKind::ReconnectStart | IngestEventKind::ReconnectSuccess => {
+                reconnect_count += 1;
+            }
+            IngestEventKind::SequenceGap => gap_count += 1,
+            IngestEventKind::StaleSnapshotSkip => stale_snapshot_skip_count += 1,
+            IngestEventKind::SourceReset => gap_count += 1,
+        }
+    }
+
+    let validation_count = validations.len() as u32;
+    let validations_matched = validations.iter().filter(|v| v.matched).count() as u32;
+    let validations_mismatched = validation_count - validations_matched;
+
+    let has_continuity_boundaries = reconnect_count > 0 || gap_count > 0;
+    let completeness = if has_continuity_boundaries {
+        CompletenessLabel::BestEffort
+    } else {
+        CompletenessLabel::Complete
+    };
+
+    let continuity_events = window
+        .ingest_events
+        .into_iter()
+        .map(continuity_warning)
+        .collect();
+
+    Ok(Json(IntegritySummaryResponse {
+        asset_id: query.asset_id,
+        start_us: query.start_us,
+        end_us: query.end_us,
+        total_book_events,
+        total_ingest_events,
+        reconnect_count,
+        gap_count,
+        stale_snapshot_skip_count,
+        validation_count,
+        validations_matched,
+        validations_mismatched,
+        completeness,
+        continuity_events,
+    }))
+}
+
+async fn execution_orders(
+    State(state): State<AppState>,
+    Query(query): Query<ExecutionQuery>,
+) -> Result<Json<ExecutionTimelineResponse>, ApiError> {
+    if query.start_us >= query.end_us {
+        return Err(ApiError::BadRequest(
+            "start_us must be less than end_us".to_string(),
+        ));
+    }
+    let limit = query.limit.unwrap_or(EXECUTION_DEFAULT_LIMIT);
+    if limit == 0 || limit > EXECUTION_MAX_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "limit must be between 1 and {EXECUTION_MAX_LIMIT}"
+        )));
+    }
+
+    let reader = ParquetReader::new(state.config.parquet_base_path.clone());
+    let mut events = reader
+        .read_execution_events(query.order_id.as_deref(), query.start_us, query.end_us)
+        .await
+        .map_err(map_replay_error)?;
+
+    if let Some(asset_filter) = &query.asset_id {
+        events.retain(|e| {
+            e.asset_id
+                .as_ref()
+                .map(|id| id.as_str() == asset_filter)
+                .unwrap_or(false)
+        });
+    }
+
+    let total_count = events.len() as u64;
+    events.truncate(limit);
+
+    let views: Vec<ExecutionEventView> = events.into_iter().map(execution_event_view).collect();
+
+    Ok(Json(ExecutionTimelineResponse {
+        events: views,
+        total_count,
+    }))
+}
+
+fn execution_event_view(event: pb_types::ExecutionEvent) -> ExecutionEventView {
+    ExecutionEventView {
+        event_timestamp_us: event.event_timestamp_us,
+        asset_id: event.asset_id.map(|id| id.to_string()),
+        order_id: event.order_id,
+        client_order_id: event.client_order_id,
+        venue_order_id: event.venue_order_id,
+        kind: event.kind.to_string(),
+        side: event.side.map(|s| s.to_string()),
+        price: event.price,
+        size: event.size,
+        status: event.status,
+        reason: event.reason,
+        latency: LatencyTraceView {
+            market_data_recv_us: event.latency.market_data_recv_us,
+            normalization_done_us: event.latency.normalization_done_us,
+            strategy_decision_us: event.latency.strategy_decision_us,
+            order_submit_us: event.latency.order_submit_us,
+            exchange_ack_us: event.latency.exchange_ack_us,
+            exchange_fill_us: event.latency.exchange_fill_us,
+        },
+    }
 }
 
 fn validate_depth(depth: usize, max_depth: usize) -> Result<usize, ApiError> {
