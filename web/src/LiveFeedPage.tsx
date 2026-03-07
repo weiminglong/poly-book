@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { liveHiddenPollIntervalMs, liveVisiblePollIntervalMs } from './constants'
 import { isAbortError } from './client'
 import {
@@ -17,6 +17,7 @@ import type {
   WorkstationClient,
 } from './types'
 import { useAdaptivePolling } from './useAdaptivePolling'
+import { useOrderBookStream } from './useOrderBookStream'
 import { ErrorBanner, MetricCard, OrderBookTable, SectionCard, WarningPanel } from './ui'
 
 interface LoadState<T> {
@@ -108,15 +109,47 @@ export default function LiveFeedPage({
     [client, depth, selectedAssetId],
   )
 
+  const wsAssetId = sourceMode === 'api' ? selectedAssetId || null : null
+  const { snapshot: wsSnapshot, status: wsStatus } = useOrderBookStream(wsAssetId)
+  const useWs = sourceMode === 'api' && wsStatus !== 'fallback' && wsStatus !== 'closed'
+
   const snapshotPolling = useAdaptivePolling({
-    enabled: Boolean(selectedAssetId),
+    enabled: Boolean(selectedAssetId) && !useWs,
     visibleIntervalMs: liveVisiblePollIntervalMs,
     hiddenIntervalMs: liveHiddenPollIntervalMs,
     runTask: refreshSnapshot,
   })
 
-  const liveSnapshot =
-    snapshotState.data?.asset_id === selectedAssetId ? snapshotState.data : null
+  const wsAsLiveSnapshot: LiveOrderBookSnapshot | null = useMemo(() => {
+    if (!wsSnapshot || wsSnapshot.asset_id !== selectedAssetId) return null
+    return {
+      asset_id: wsSnapshot.asset_id,
+      sequence: wsSnapshot.sequence,
+      last_update_us: wsSnapshot.last_update_us,
+      best_bid: wsSnapshot.bids[0] ?? null,
+      best_ask: wsSnapshot.asks[0] ?? null,
+      mid_price: wsSnapshot.mid_price,
+      spread: wsSnapshot.spread,
+      bid_depth: wsSnapshot.bids.length,
+      ask_depth: wsSnapshot.asks.length,
+      bids: wsSnapshot.bids,
+      asks: wsSnapshot.asks,
+      stale: false,
+      latest_warning: null,
+    }
+  }, [wsSnapshot, selectedAssetId])
+
+  const liveSnapshot = useWs
+    ? wsAsLiveSnapshot
+    : snapshotState.data?.asset_id === selectedAssetId
+      ? snapshotState.data
+      : null
+
+  const transportLabel = useWs
+    ? `WebSocket (${wsStatus})`
+    : sourceMode === 'api'
+      ? 'Adaptive HTTP polling'
+      : 'Demo fixtures'
 
   return (
     <div className="page-stack">
@@ -151,7 +184,7 @@ export default function LiveFeedPage({
           label="Active assets"
           value={String(feedState.data?.active_asset_count ?? assetsState.data?.length ?? 0)}
         />
-        <MetricCard label="Transport" value={sourceMode === 'api' ? 'Adaptive HTTP polling' : 'Demo fixtures'} />
+        <MetricCard label="Transport" value={transportLabel} />
         <MetricCard
           label="Cadence"
           value={`${formatIntervalMs(liveVisiblePollIntervalMs)} fg / ${formatIntervalMs(liveHiddenPollIntervalMs)} bg`}
