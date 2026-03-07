@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useThrottledState } from './useThrottledState'
 
 export interface BookUpdateMessage {
   asset_id: string
@@ -28,7 +29,7 @@ function wsUrl(assetId: string): string {
 }
 
 export function useOrderBookStream(assetId: string | null) {
-  const [snapshot, setSnapshot] = useState<BookUpdateMessage | null>(null)
+  const [snapshot, setSnapshot] = useThrottledState<BookUpdateMessage | null>(null)
   const [status, setStatus] = useState<StreamStatus>('closed')
   const [error, setError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -114,7 +115,7 @@ export function useOrderBookStream(assetId: string | null) {
       if (reconnectTimer) clearTimeout(reconnectTimer)
       close()
     }
-  }, [assetId, close])
+  }, [assetId, close, setSnapshot])
 
   return { snapshot, status, error }
 }

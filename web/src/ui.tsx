@@ -1,7 +1,12 @@
-import { memo } from 'react'
+import { memo, useRef } from 'react'
 import type { ReactNode } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { formatPrice, formatSize, formatTimestamp, titleCase } from './formatters'
 import type { ContinuityWarning, LiveOrderBookSnapshot, ReplayReconstructionResponse } from './types'
+
+const VIRTUAL_ROW_HEIGHT = 32
+const VIRTUAL_OVERSCAN = 8
+const VIRTUALIZE_THRESHOLD = 30
 
 export function SectionCard({
   title,
@@ -96,25 +101,73 @@ export const OrderBookTable = memo(function OrderBookTable({
 })
 
 function OrderBookSide({ levels, side }: { levels: BookLevels; side: 'Bids' | 'Asks' }) {
+  const parentRef = useRef<HTMLDivElement>(null)
+  const shouldVirtualize = levels.length > VIRTUALIZE_THRESHOLD
+
+  const virtualizer = useVirtualizer({
+    count: levels.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => VIRTUAL_ROW_HEIGHT,
+    overscan: VIRTUAL_OVERSCAN,
+    enabled: shouldVirtualize,
+  })
+
+  if (!shouldVirtualize) {
+    return (
+      <div>
+        <h4>{side}</h4>
+        <table>
+          <thead>
+            <tr>
+              <th>Price</th>
+              <th>Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {levels.map((level) => (
+              <tr key={`${side}-${level.price}-${level.size}`}>
+                <td>{formatPrice(level.price)}</td>
+                <td>{formatSize(level.size)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
   return (
     <div>
-      <h4>{side}</h4>
-      <table>
-        <thead>
-          <tr>
-            <th>Price</th>
-            <th>Size</th>
-          </tr>
-        </thead>
-        <tbody>
-          {levels.map((level) => (
-            <tr key={`${side}-${level.price}-${level.size}`}>
-              <td>{formatPrice(level.price)}</td>
-              <td>{formatSize(level.size)}</td>
+      <h4>{side} ({levels.length} levels)</h4>
+      <div ref={parentRef} style={{ maxHeight: 400, overflow: 'auto' }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Price</th>
+              <th>Size</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+            {virtualizer.getVirtualItems().map((virtualRow) => {
+              const level = levels[virtualRow.index]
+              return (
+                <tr
+                  key={virtualRow.key}
+                  style={{
+                    position: 'absolute',
+                    top: virtualRow.start,
+                    height: virtualRow.size,
+                    width: '100%',
+                  }}
+                >
+                  <td>{formatPrice(level.price)}</td>
+                  <td>{formatSize(level.size)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
