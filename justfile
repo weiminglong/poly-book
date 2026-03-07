@@ -101,6 +101,23 @@ metrics-grep pattern:
 clean:
     cargo clean
 
+# Clean only debug build output
+clean-debug:
+    rm -rf target/debug
+
+# Clean only incremental compiler caches
+clean-incremental:
+    rm -rf target/debug/incremental target/release/incremental
+
+# Clean Criterion benchmark artifacts
+clean-bench:
+    rm -rf target/criterion
+
+# Show build artifact sizes under target/
+target-size:
+    @du -sh target 2>/dev/null || echo "No target directory found"
+    @du -sh target/* 2>/dev/null | sort -hr || true
+
 # Remove data directory (with confirmation)
 clean-data:
     @echo "This will delete {{data_dir}} and all Parquet files."

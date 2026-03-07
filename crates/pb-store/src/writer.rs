@@ -4,6 +4,7 @@ use std::sync::Arc;
 use clickhouse::Client;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use object_store::PutPayload;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -184,7 +185,7 @@ impl ParquetRecordWriter {
             let schema = Arc::new(schema_for_record(records[0]));
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(Default::default()))
-                .set_max_row_group_size(ROW_GROUP_SIZE)
+                .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
                 .build();
 
             let mut buf = Vec::new();
@@ -346,12 +347,18 @@ impl ClickHouseRecordWriter {
         }
 
         let flush_start = std::time::Instant::now();
-        let mut book_insert = self.client.insert("book_events")?;
-        let mut trade_insert = self.client.insert("trade_events")?;
-        let mut ingest_insert = self.client.insert("ingest_events")?;
-        let mut checkpoint_insert = self.client.insert("book_checkpoints")?;
-        let mut validation_insert = self.client.insert("replay_validations")?;
-        let mut execution_insert = self.client.insert("execution_events")?;
+        let mut book_insert: clickhouse::insert::Insert<BookEventRow> =
+            self.client.insert("book_events").await?;
+        let mut trade_insert: clickhouse::insert::Insert<TradeEventRow> =
+            self.client.insert("trade_events").await?;
+        let mut ingest_insert: clickhouse::insert::Insert<IngestEventRow> =
+            self.client.insert("ingest_events").await?;
+        let mut checkpoint_insert: clickhouse::insert::Insert<CheckpointRow> =
+            self.client.insert("book_checkpoints").await?;
+        let mut validation_insert: clickhouse::insert::Insert<ReplayValidationRow> =
+            self.client.insert("replay_validations").await?;
+        let mut execution_insert: clickhouse::insert::Insert<ExecutionEventRow> =
+            self.client.insert("execution_events").await?;
 
         for record in records {
             match record {

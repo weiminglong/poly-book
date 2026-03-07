@@ -5,7 +5,7 @@ Thanks for contributing. This repository is a Rust workspace for Polymarket mark
 ## Before You Start
 
 - Read the [README](README.md) for project scope and the fastest local workflow.
-- Use the current stable Rust toolchain or Rust 1.75+.
+- Use the pinned Rust toolchain or Rust 1.94+.
 - Install Docker if you want to run the full integration suite. The ClickHouse integration tests use `testcontainers`.
 - Install `just` if you want the shortcut commands. Cargo commands work directly too.
 

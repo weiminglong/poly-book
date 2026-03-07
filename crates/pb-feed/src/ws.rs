@@ -153,7 +153,7 @@ impl WsClient {
             "assets_ids": &self.asset_ids,
             "type": "market",
         });
-        sink.send(Message::Text(sub.to_string())).await?;
+        sink.send(Message::Text(sub.to_string().into())).await?;
         debug!(assets = ?self.asset_ids, "subscribed");
 
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
@@ -168,7 +168,7 @@ impl WsClient {
                     return Ok(());
                 }
                 _ = ping_interval.tick() => {
-                    sink.send(Message::Ping(vec![])).await?;
+                    sink.send(Message::Ping(vec![].into())).await?;
                     debug!("sent ping");
                 }
                 msg = stream.next() => {
