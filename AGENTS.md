@@ -63,3 +63,35 @@ Use the smallest command that validates your change:
 cargo check
 cargo test --workspace --exclude pb-integration-tests
 ```
+
+## Cursor Cloud specific instructions
+
+### System dependency
+
+`libssl-dev` and `pkg-config` are required for `openssl-sys` (pulled in by
+`reqwest`/`tokio-tungstenite`). The update script installs them automatically.
+
+### Running the application
+
+- `cargo run -- discover --filter btc --limit 5` — quick smoke test that hits the
+  live Polymarket Gamma API. Requires internet access.
+- `cargo run -- serve-api --auto-rotate` — starts the read-only workstation API on
+  `:3000` and a Prometheus metrics server on `:9090`. Use `--tokens <ID>` instead
+  of `--auto-rotate` if you already know a token ID.
+
+### Lint / test / build
+
+All standard commands are in `CLAUDE.md` and `README.md`. Key shortcuts:
+
+- `cargo fmt --all -- --check` — formatting
+- `cargo clippy --workspace -- -D warnings` — lints
+- `cargo test --workspace --exclude pb-integration-tests` — unit tests (no Docker)
+- `cargo build` — dev build
+
+Integration tests (`pb-integration-tests`) require Docker and ClickHouse via
+`testcontainers`; skip them in Cloud environments without Docker.
+
+### Configuration
+
+Default config is at `config/default.toml`. Override with `PB__` env vars
+(double-underscore separator). See `docs/operations.md` for details.
