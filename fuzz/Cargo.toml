@@ -1,0 +1,31 @@
+[package]
+name = "pb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pb-types = { path = "../crates/pb-types" }
+pb-book = { path = "../crates/pb-book" }
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "fuzz_ws_deser"
+path = "fuzz_targets/fuzz_ws_deser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fixed_price"
+path = "fuzz_targets/fuzz_fixed_price.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_book_delta"
+path = "fuzz_targets/fuzz_book_delta.rs"
+doc = false
+
+[workspace]
