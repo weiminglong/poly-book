@@ -47,7 +47,7 @@ serde_json = "1"
 arrow = { version = "53", features = ["prettyprint"] }
 parquet = { version = "53", features = ["async", "zstd"] }
 object_store = { version = "0.11", features = ["aws"] }
-clickhouse = { version = "0.13", features = ["inserter"] }
+clickhouse = { version = "0.14", features = ["inserter"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
