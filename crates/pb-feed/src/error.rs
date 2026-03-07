@@ -5,28 +5,28 @@ pub enum FeedError {
     #[error("websocket error: {0}")]
     Ws(Box<tokio_tungstenite::tungstenite::Error>),
 
-    #[error("rest error: {0}")]
+    #[error("rest API error: {0}")]
     Rest(#[from] reqwest::Error),
 
-    #[error("deserialization error: {0}")]
+    #[error("feed deserialization error: {0}")]
     Deserialize(#[from] serde_json::Error),
 
-    #[error("type conversion error: {0}")]
+    #[error("feed type conversion error: {0}")]
     Types(#[from] pb_types::TypesError),
 
-    #[error("rate limited")]
+    #[error("rate limited — back-off before retrying")]
     RateLimited,
 
-    #[error("HTTP status error: {0}")]
-    HttpStatus(u16),
+    #[error("HTTP {status}: unexpected status from upstream API")]
+    HttpStatus { status: u16 },
 
-    #[error("channel send error")]
+    #[error("output channel closed — downstream consumer stopped")]
     ChannelSend,
 
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 
-    #[error("TLS error: {0}")]
+    #[error("TLS handshake error: {0}")]
     Tls(#[from] native_tls::Error),
 }
 

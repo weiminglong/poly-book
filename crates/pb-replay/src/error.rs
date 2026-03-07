@@ -14,26 +14,26 @@ pub enum ReplayError {
     #[error("ClickHouse error: {0}")]
     ClickHouse(#[from] clickhouse::error::Error),
 
-    #[error("Book error: {0}")]
+    #[error("book reconstruction error: {0}")]
     BookError(#[from] pb_book::BookError),
 
-    #[error("Types error: {0}")]
+    #[error("type conversion error: {0}")]
     TypesError(#[from] pb_types::TypesError),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("no snapshot found for asset {asset_id} before timestamp {timestamp_us}")]
+    #[error("replay {asset_id}: no snapshot found before {timestamp_us}us — lookback window may be too narrow")]
     NoSnapshotFound { asset_id: String, timestamp_us: u64 },
 
-    #[error("invalid event type in stored data: {0}")]
-    InvalidEventType(String),
+    #[error("replay: stored event has invalid type '{raw}' (expected book/trade/ingest)")]
+    InvalidEventType { raw: String },
 
-    #[error("invalid side in stored data: {0}")]
-    InvalidSide(String),
+    #[error("replay: stored event has invalid side '{raw}' (expected Bid/Ask)")]
+    InvalidSide { raw: String },
 
-    #[error("HTTP error: {0}")]
-    Http(String),
+    #[error("replay: HTTP fetch failed — {url}: {reason}")]
+    Http { url: String, reason: String },
 
     #[error("{0}")]
     Other(String),
