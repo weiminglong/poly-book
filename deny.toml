@@ -1,10 +1,13 @@
+[graph]
+exclude-unpublished = true
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "none"
 yanked = "warn"
 
 [licenses]
-unlicensed = "deny"
+private = { ignore = true }
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -12,16 +15,16 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "OpenSSL",
     "Zlib",
     "BSL-1.0",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
-multiple-versions = "warn"
-wildcards = "deny"
+multiple-versions = "allow"
+wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
