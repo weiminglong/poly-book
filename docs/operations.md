@@ -103,7 +103,7 @@ Merges to `main` trigger the deploy workflow after CI passes.
 
 Deployment flow:
 
-1. Build the Docker image
+1. Build the Docker image (multi-stage: Node for SPA, Rust for binary)
 2. Push the image to Amazon ECR
 3. Register a new ECS task definition
 4. Update the ECS service
@@ -111,6 +111,25 @@ Deployment flow:
 
 The workflow uses GitHub OIDC and an AWS IAM role stored in the
 `AWS_DEPLOY_ROLE_ARN` repository secret.
+
+## Deployment Packaging
+
+The `Dockerfile` uses a multi-stage build:
+
+1. **web-builder** — runs `npm ci && npx vite build` in `web/` to produce the
+   static SPA assets in `dist/`.
+2. **builder** — runs `cargo build --release --bin poly-book` to produce the
+   Rust binary.
+3. **runtime** — copies the binary, the SPA assets (to `/var/lib/poly-book/web`),
+   and the default config into a minimal Debian image.
+
+The recommended initial packaging bundles both the API binary and static SPA
+assets into a single container. The `serve-api` command serves the API on `:3000`
+and a separate static file server or reverse proxy can serve the SPA from the
+bundled assets.
+
+A later migration to separate containers (Rust API + Nginx/Caddy for static
+assets) is straightforward when traffic or team structure warrants it.
 
 ## Infrastructure
 

@@ -54,10 +54,7 @@ pub async fn ws_orderbook(
 ) -> Result<Response, ApiError> {
     let asset_id = query.asset_id.clone();
 
-    let is_active = state
-        .live
-        .is_asset_active(&asset_id)
-        .await;
+    let is_active = state.live.is_asset_active(&asset_id).await;
     if !is_active {
         return Err(ApiError::NotFound(format!("asset not active: {asset_id}")));
     }
@@ -72,7 +69,14 @@ pub async fn ws_orderbook(
     let default_depth = state.config.default_depth;
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_ws_session(socket, broadcast, live, asset_id, default_depth, stale_after_secs)
+        handle_ws_session(
+            socket,
+            broadcast,
+            live,
+            asset_id,
+            default_depth,
+            stale_after_secs,
+        )
     }))
 }
 
@@ -159,7 +163,10 @@ async fn handle_ws_session(
 
 async fn send_json(socket: &mut WebSocket, msg: &BookUpdateMessage) -> Result<(), ()> {
     match serde_json::to_string(msg) {
-        Ok(text) => socket.send(Message::Text(text.into())).await.map_err(|_| ()),
+        Ok(text) => socket
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(|_| ()),
         Err(_) => Err(()),
     }
 }
