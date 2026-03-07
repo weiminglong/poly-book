@@ -114,11 +114,14 @@ export default function LiveFeedPage({
   const useWs = sourceMode === 'api' && wsStatus !== 'fallback' && wsStatus !== 'closed'
 
   const snapshotPolling = useAdaptivePolling({
-    enabled: Boolean(selectedAssetId) && !useWs,
-    visibleIntervalMs: liveVisiblePollIntervalMs,
+    enabled: Boolean(selectedAssetId),
+    visibleIntervalMs: useWs ? liveHiddenPollIntervalMs : liveVisiblePollIntervalMs,
     hiddenIntervalMs: liveHiddenPollIntervalMs,
     runTask: refreshSnapshot,
   })
+
+  const httpSnapshot =
+    snapshotState.data?.asset_id === selectedAssetId ? snapshotState.data : null
 
   const wsAsLiveSnapshot: LiveOrderBookSnapshot | null = useMemo(() => {
     if (!wsSnapshot || wsSnapshot.asset_id !== selectedAssetId) return null
@@ -134,16 +137,12 @@ export default function LiveFeedPage({
       ask_depth: wsSnapshot.asks.length,
       bids: wsSnapshot.bids,
       asks: wsSnapshot.asks,
-      stale: false,
-      latest_warning: null,
+      stale: httpSnapshot?.stale ?? false,
+      latest_warning: httpSnapshot?.latest_warning ?? null,
     }
-  }, [wsSnapshot, selectedAssetId])
+  }, [wsSnapshot, selectedAssetId, httpSnapshot?.stale, httpSnapshot?.latest_warning])
 
-  const liveSnapshot = useWs
-    ? wsAsLiveSnapshot
-    : snapshotState.data?.asset_id === selectedAssetId
-      ? snapshotState.data
-      : null
+  const liveSnapshot = useWs ? (wsAsLiveSnapshot ?? httpSnapshot) : httpSnapshot
 
   const transportLabel = useWs
     ? `WebSocket (${wsStatus})`

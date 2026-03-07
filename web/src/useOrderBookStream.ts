@@ -92,10 +92,12 @@ export function useOrderBookStream(assetId: string | null) {
         if (unmountedRef.current) return
         wsRef.current = null
         setStatus('reconnecting')
-        const delay = Math.min(
+        const baseDelay = Math.min(
           RECONNECT_BASE_MS * Math.pow(2, retriesRef.current),
           RECONNECT_MAX_MS,
         )
+        const jitter = Math.random() * baseDelay * 0.3
+        const delay = baseDelay + jitter
         retriesRef.current += 1
 
         if (retriesRef.current > 8) {

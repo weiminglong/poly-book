@@ -37,8 +37,11 @@ impl BookBroadcast {
         }
     }
 
+    pub fn has_subscribers(&self) -> bool {
+        self.sender.receiver_count() > 0
+    }
+
     pub fn send(&self, msg: BookUpdateMessage) {
-        // Ignore send errors — they just mean no active subscribers.
         let _ = self.sender.send(msg);
     }
 

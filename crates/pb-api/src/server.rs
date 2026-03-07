@@ -187,16 +187,28 @@ async fn replay_reconstruct(
 
 const EXECUTION_DEFAULT_LIMIT: usize = 100;
 const EXECUTION_MAX_LIMIT: usize = 1000;
+const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
+
+fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ApiError> {
+    if start_us >= end_us {
+        return Err(ApiError::BadRequest(
+            "start_us must be less than end_us".to_string(),
+        ));
+    }
+    if end_us - start_us > MAX_QUERY_WINDOW_US {
+        return Err(ApiError::BadRequest(format!(
+            "time window exceeds maximum of {} hours",
+            MAX_QUERY_WINDOW_US / 3_600_000_000
+        )));
+    }
+    Ok(())
+}
 
 async fn integrity_summary(
     State(state): State<AppState>,
     Query(query): Query<IntegrityQuery>,
 ) -> Result<Json<IntegritySummaryResponse>, ApiError> {
-    if query.start_us >= query.end_us {
-        return Err(ApiError::BadRequest(
-            "start_us must be less than end_us".to_string(),
-        ));
-    }
+    validate_time_window(query.start_us, query.end_us)?;
     let reader = ParquetReader::new(state.config.parquet_base_path.clone());
     let asset_id = AssetId::new(query.asset_id.clone());
 
@@ -265,11 +277,7 @@ async fn execution_orders(
     State(state): State<AppState>,
     Query(query): Query<ExecutionQuery>,
 ) -> Result<Json<ExecutionTimelineResponse>, ApiError> {
-    if query.start_us >= query.end_us {
-        return Err(ApiError::BadRequest(
-            "start_us must be less than end_us".to_string(),
-        ));
-    }
+    validate_time_window(query.start_us, query.end_us)?;
     let limit = query.limit.unwrap_or(EXECUTION_DEFAULT_LIMIT);
     if limit == 0 || limit > EXECUTION_MAX_LIMIT {
         return Err(ApiError::BadRequest(format!(
@@ -663,7 +671,10 @@ mod tests {
         assert_eq!(summary.total_book_events, 1);
         assert!(summary.total_ingest_events >= 1);
         assert!(summary.gap_count >= 1);
-        assert_eq!(summary.completeness, crate::dto::CompletenessLabel::BestEffort);
+        assert_eq!(
+            summary.completeness,
+            crate::dto::CompletenessLabel::BestEffort
+        );
     }
 
     #[tokio::test]
@@ -850,10 +861,12 @@ mod tests {
             addr.port()
         );
         let result = tokio_tungstenite::connect_async(&url).await;
-        assert!(result.is_err() || {
-            let (_, response) = result.unwrap();
-            response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS
-        });
+        assert!(
+            result.is_err() || {
+                let (_, response) = result.unwrap();
+                response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS
+            }
+        );
 
         shutdown.cancel();
         let _ = server_handle.await;
@@ -868,10 +881,7 @@ mod tests {
         let broadcast = crate::streaming::BookBroadcast::new();
         state.broadcast = Some(broadcast.clone());
 
-        state
-            .live
-            .set_active_assets(vec!["tok1".to_string()])
-            .await;
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
         state
             .live
             .apply_record(PersistedRecord::Book(BookEvent {

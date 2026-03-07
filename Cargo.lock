@@ -2659,6 +2659,8 @@ name = "pb-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
+ "hyper",
  "object_store",
  "pb-book",
  "pb-replay",
@@ -2669,6 +2671,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tower",
  "tracing",

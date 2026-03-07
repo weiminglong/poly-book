@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
  * Like useState but coalesces rapid updates so React re-renders at most once
@@ -8,6 +8,15 @@ export function useThrottledState<T>(initial: T): [T, (value: T) => void] {
   const [state, setState] = useState<T>(initial)
   const pendingRef = useRef<T | null>(null)
   const rafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [])
 
   const set = useCallback((value: T) => {
     pendingRef.current = value

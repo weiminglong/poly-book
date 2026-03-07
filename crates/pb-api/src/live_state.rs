@@ -283,22 +283,25 @@ impl LiveReadModel {
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
+                                let is_book = matches!(&record, PersistedRecord::Book(_));
                                 let asset_id = match &record {
                                     PersistedRecord::Book(e) => Some(e.asset_id.to_string()),
                                     _ => None,
                                 };
                                 model.apply_record(record).await;
-                                if let Some(asset_id) = asset_id {
-                                    if let Ok(snap) = model.snapshot(&asset_id, default_depth, stale_after_secs).await {
-                                        broadcast.send(crate::dto::BookUpdateMessage {
-                                            asset_id: snap.asset_id,
-                                            sequence: snap.sequence,
-                                            last_update_us: snap.last_update_us,
-                                            bids: snap.bids,
-                                            asks: snap.asks,
-                                            mid_price: snap.mid_price,
-                                            spread: snap.spread,
-                                        });
+                                if is_book && broadcast.has_subscribers() {
+                                    if let Some(asset_id) = asset_id {
+                                        if let Ok(snap) = model.snapshot(&asset_id, default_depth, stale_after_secs).await {
+                                            broadcast.send(crate::dto::BookUpdateMessage {
+                                                asset_id: snap.asset_id,
+                                                sequence: snap.sequence,
+                                                last_update_us: snap.last_update_us,
+                                                bids: snap.bids,
+                                                asks: snap.asks,
+                                                mid_price: snap.mid_price,
+                                                spread: snap.spread,
+                                            });
+                                        }
                                     }
                                 }
                             }
