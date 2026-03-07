@@ -128,9 +128,13 @@ impl L2Book {
     /// Check if there's a sequence gap.
     pub fn check_sequence(&self, incoming: Sequence) -> Result<(), BookError> {
         if self.sequence.raw() > 0 && incoming.raw() != self.sequence.raw() + 1 {
+            let expected = self.sequence.raw() + 1;
+            let got = incoming.raw();
             return Err(BookError::SequenceGap {
-                expected: self.sequence.raw() + 1,
-                got: incoming.raw(),
+                asset_id: self.asset_id.to_string(),
+                expected,
+                got,
+                gap_size: got.abs_diff(expected),
             });
         }
         Ok(())
@@ -313,5 +317,198 @@ mod tests {
         assert_eq!(book.bid_depth(), 1);
         assert_eq!(book.ask_depth(), 1);
         assert_eq!(book.sequence.raw(), 10);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    fn arb_price() -> impl Strategy<Value = FixedPrice> {
+        (1u32..=10_000u32).prop_map(|raw| FixedPrice::new(raw).unwrap())
+    }
+
+    fn arb_nonzero_size() -> impl Strategy<Value = FixedSize> {
+        (1u64..=1_000_000_000u64).prop_map(FixedSize::new)
+    }
+
+    fn arb_level() -> impl Strategy<Value = (FixedPrice, FixedSize)> {
+        (arb_price(), arb_nonzero_size())
+    }
+
+    fn arb_side() -> impl Strategy<Value = Side> {
+        prop_oneof![Just(Side::Bid), Just(Side::Ask)]
+    }
+
+    proptest! {
+        /// After applying a snapshot, all bids are strictly descending and
+        /// all asks are strictly ascending (price ordering invariant).
+        #[test]
+        fn snapshot_preserves_price_ordering(
+            bids in prop_vec(arb_level(), 0..50),
+            asks in prop_vec(arb_level(), 0..50),
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            let sorted_bids = book.bids_sorted();
+            for w in sorted_bids.windows(2) {
+                prop_assert!(w[0].0 >= w[1].0, "bids not descending: {:?} < {:?}", w[0].0, w[1].0);
+            }
+
+            let sorted_asks = book.asks_sorted();
+            for w in sorted_asks.windows(2) {
+                prop_assert!(w[0].0 <= w[1].0, "asks not ascending: {:?} > {:?}", w[0].0, w[1].0);
+            }
+        }
+
+        /// The spread is never negative when both sides have levels.
+        /// This is the critical invariant: bid < ask (no crossed book).
+        #[test]
+        fn spread_never_negative_after_snapshot(
+            bid_prices in prop_vec(1u32..=4999u32, 1..20),
+            ask_prices in prop_vec(5001u32..=10_000u32, 1..20),
+        ) {
+            let bids: Vec<_> = bid_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+            let asks: Vec<_> = ask_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            if let Some(spread) = book.spread() {
+                prop_assert!(spread >= 0.0, "negative spread: {}", spread);
+            }
+        }
+
+        /// Mid price, when it exists, is bounded by best bid and best ask.
+        #[test]
+        fn mid_price_between_best_bid_and_ask(
+            bid_prices in prop_vec(1u32..=4999u32, 1..20),
+            ask_prices in prop_vec(5001u32..=10_000u32, 1..20),
+        ) {
+            let bids: Vec<_> = bid_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+            let asks: Vec<_> = ask_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            if let (Some((best_bid, _)), Some((best_ask, _)), Some(mid)) =
+                (book.best_bid(), book.best_ask(), book.mid_price())
+            {
+                prop_assert!(mid >= best_bid.as_f64(), "mid {} < best_bid {}", mid, best_bid.as_f64());
+                prop_assert!(mid <= best_ask.as_f64(), "mid {} > best_ask {}", mid, best_ask.as_f64());
+            }
+        }
+
+        /// Removing a level (size=0 delta) never increases depth.
+        #[test]
+        fn zero_size_delta_removes_level(
+            bids in prop_vec(arb_level(), 1..30),
+            asks in prop_vec(arb_level(), 1..30),
+            remove_idx in 0usize..30,
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(0), 0);
+            let bid_depth_before = book.bid_depth();
+            let ask_depth_before = book.ask_depth();
+
+            let sorted_bids = book.bids_sorted();
+            if !sorted_bids.is_empty() {
+                let idx = remove_idx % sorted_bids.len();
+                let (price, _) = sorted_bids[idx];
+                book.apply_delta(Side::Bid, price, FixedSize::ZERO, Sequence::new(1), 1);
+                prop_assert!(book.bid_depth() < bid_depth_before);
+            }
+
+            let sorted_asks = book.asks_sorted();
+            if !sorted_asks.is_empty() {
+                let idx = remove_idx % sorted_asks.len();
+                let (price, _) = sorted_asks[idx];
+                book.apply_delta(Side::Ask, price, FixedSize::ZERO, Sequence::new(2), 2);
+                prop_assert!(book.ask_depth() < ask_depth_before);
+            }
+        }
+
+        /// Applying a snapshot then a sequence of deltas yields a monotonically
+        /// increasing sequence number.
+        #[test]
+        fn sequence_monotonically_increases(
+            num_deltas in 1u64..100,
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&[], &[], Sequence::new(0), 0);
+
+            for i in 1..=num_deltas {
+                let price = FixedPrice::new(((i % 100) * 100).min(10_000) as u32).unwrap();
+                book.apply_delta(
+                    if i % 2 == 0 { Side::Bid } else { Side::Ask },
+                    price,
+                    FixedSize::new(1_000_000),
+                    Sequence::new(i),
+                    i * 1000,
+                );
+                prop_assert_eq!(book.sequence.raw(), i);
+            }
+        }
+
+        /// Applying the same snapshot twice is idempotent.
+        #[test]
+        fn snapshot_idempotent(
+            bids in prop_vec(arb_level(), 0..30),
+            asks in prop_vec(arb_level(), 0..30),
+        ) {
+            let mut book1 = L2Book::new(AssetId::new("prop"));
+            book1.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            let mut book2 = L2Book::new(AssetId::new("prop"));
+            book2.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+            book2.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            prop_assert_eq!(book1.bids_sorted(), book2.bids_sorted());
+            prop_assert_eq!(book1.asks_sorted(), book2.asks_sorted());
+        }
+
+        /// Applying a delta to a non-existent level with nonzero size adds exactly one level.
+        #[test]
+        fn delta_adds_new_level(
+            side in arb_side(),
+            price in arb_price(),
+            size in arb_nonzero_size(),
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            let depth_before = match side {
+                Side::Bid => book.bid_depth(),
+                Side::Ask => book.ask_depth(),
+            };
+            book.apply_delta(side, price, size, Sequence::new(1), 1_000_000);
+            let depth_after = match side {
+                Side::Bid => book.bid_depth(),
+                Side::Ask => book.ask_depth(),
+            };
+            prop_assert_eq!(depth_after, depth_before + 1);
+        }
+
+        /// Sequence gap detection is sound: only consecutive sequences pass.
+        #[test]
+        fn sequence_gap_detection(current in 1u64..1_000_000, incoming in 1u64..1_000_000) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.sequence = Sequence::new(current);
+            let result = book.check_sequence(Sequence::new(incoming));
+            if incoming == current + 1 {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
     }
 }

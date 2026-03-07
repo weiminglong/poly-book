@@ -73,6 +73,13 @@ testcontainers-modules = { version = "0.15", features = ["clickhouse"] }
 # Benchmarks
 criterion = { version = "0.8", features = ["html_reports"] }
 
+# Property-based testing
+proptest = "1"
+
+# Performance
+mimalloc = { version = "0.1", default-features = false }
+rustc-hash = "2"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
@@ -84,3 +91,12 @@ governor = "0.10"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
+
+[profile.release-full]
+inherits = "release"
+lto = "fat"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
