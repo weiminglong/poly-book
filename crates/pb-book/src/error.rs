@@ -28,11 +28,4 @@ pub enum BookError {
         best_bid: String,
         best_ask: String,
     },
-
-    #[error("orderbook {asset_id}: stale update at {update_ts_us}us, last seen {last_ts_us}us")]
-    StaleUpdate {
-        asset_id: String,
-        update_ts_us: u64,
-        last_ts_us: u64,
-    },
 }

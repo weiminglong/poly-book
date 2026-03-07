@@ -140,6 +140,65 @@ impl L2Book {
         Ok(())
     }
 
+    /// Verify structural invariants: no crossed book, no zero-size levels.
+    /// Returns `Ok(())` if the book is internally consistent.
+    pub fn check_integrity(&self) -> Result<(), BookError> {
+        if let (Some((bid, _)), Some((ask, _))) = (self.best_bid(), self.best_ask()) {
+            if bid >= ask {
+                return Err(BookError::CrossedBook {
+                    asset_id: self.asset_id.to_string(),
+                    best_bid: bid.to_string(),
+                    best_ask: ask.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Total size across all bid levels (raw FixedSize units).
+    pub fn total_bid_size(&self) -> FixedSize {
+        FixedSize::new(self.bids.values().map(|s| s.raw()).sum())
+    }
+
+    /// Total size across all ask levels (raw FixedSize units).
+    pub fn total_ask_size(&self) -> FixedSize {
+        FixedSize::new(self.asks.values().map(|s| s.raw()).sum())
+    }
+
+    /// Size-weighted mid price: accounts for liquidity imbalance at top of book.
+    /// Returns `None` if either side is empty.
+    pub fn weighted_mid_price(&self) -> Option<f64> {
+        match (self.best_bid(), self.best_ask()) {
+            (Some((bid_p, bid_s)), Some((ask_p, ask_s))) => {
+                let bid_f = bid_p.as_f64();
+                let ask_f = ask_p.as_f64();
+                let bid_sz = bid_s.as_f64();
+                let ask_sz = ask_s.as_f64();
+                let total = bid_sz + ask_sz;
+                if total == 0.0 {
+                    return Some((bid_f + ask_f) / 2.0);
+                }
+                Some((bid_f * ask_sz + ask_f * bid_sz) / total)
+            }
+            _ => None,
+        }
+    }
+
+    /// Top-N bids sorted best-to-worst. Avoids full Vec allocation when only
+    /// a few levels are needed.
+    pub fn top_bids(&self, n: usize) -> Vec<(FixedPrice, FixedSize)> {
+        self.bids
+            .iter()
+            .take(n)
+            .map(|(Reverse(p), &s)| (*p, s))
+            .collect()
+    }
+
+    /// Top-N asks sorted best-to-worst (lowest first).
+    pub fn top_asks(&self, n: usize) -> Vec<(FixedPrice, FixedSize)> {
+        self.asks.iter().take(n).map(|(p, &s)| (*p, s)).collect()
+    }
+
     /// Get all bids as (price, size) sorted best-to-worst.
     pub fn bids_sorted(&self) -> Vec<(FixedPrice, FixedSize)> {
         self.bids.iter().map(|(Reverse(p), &s)| (*p, s)).collect()
@@ -297,6 +356,64 @@ mod tests {
         assert!(book.best_ask().is_none());
         assert!(book.mid_price().is_none());
         assert!(book.spread().is_none());
+    }
+
+    #[test]
+    fn test_total_sizes() {
+        let book = make_book();
+        let total_bid = book.total_bid_size();
+        // 100 + 200 + 300 = 600.0 → 600_000_000 raw
+        assert_eq!(total_bid.raw(), 600_000_000);
+        let total_ask = book.total_ask_size();
+        // 150 + 250 = 400.0 → 400_000_000 raw
+        assert_eq!(total_ask.raw(), 400_000_000);
+    }
+
+    #[test]
+    fn test_weighted_mid_price() {
+        let book = make_book();
+        let wmid = book.weighted_mid_price().unwrap();
+        // best_bid=0.50 size=100, best_ask=0.55 size=150
+        // wmid = (0.50 * 150 + 0.55 * 100) / (100 + 150)
+        //      = (75.0 + 55.0) / 250.0 = 130.0 / 250.0 = 0.52
+        assert!((wmid - 0.52).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_top_n() {
+        let book = make_book();
+        let top2_bids = book.top_bids(2);
+        assert_eq!(top2_bids.len(), 2);
+        assert_eq!(top2_bids[0].0.raw(), 5000);
+        assert_eq!(top2_bids[1].0.raw(), 4900);
+
+        let top1_asks = book.top_asks(1);
+        assert_eq!(top1_asks.len(), 1);
+        assert_eq!(top1_asks[0].0.raw(), 5500);
+    }
+
+    #[test]
+    fn test_check_integrity_valid() {
+        let book = make_book();
+        assert!(book.check_integrity().is_ok());
+    }
+
+    #[test]
+    fn test_check_integrity_crossed() {
+        let mut book = L2Book::new(AssetId::new("test"));
+        book.apply_snapshot(
+            &[(
+                FixedPrice::from_f64(0.60).unwrap(),
+                FixedSize::from_f64(100.0).unwrap(),
+            )],
+            &[(
+                FixedPrice::from_f64(0.50).unwrap(),
+                FixedSize::from_f64(100.0).unwrap(),
+            )],
+            Sequence::new(1),
+            1_000_000,
+        );
+        assert!(book.check_integrity().is_err());
     }
 
     #[test]
@@ -509,6 +626,62 @@ mod proptests {
             } else {
                 prop_assert!(result.is_err());
             }
+        }
+
+        /// check_integrity detects crossed books (best_bid >= best_ask).
+        #[test]
+        fn integrity_detects_crossed_book(
+            bid_price in 5001u32..=10_000u32,
+            ask_price in 1u32..=5000u32,
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(
+                &[(FixedPrice::new(bid_price).unwrap(), FixedSize::new(1_000_000))],
+                &[(FixedPrice::new(ask_price).unwrap(), FixedSize::new(1_000_000))],
+                Sequence::new(1),
+                1_000_000,
+            );
+            prop_assert!(book.check_integrity().is_err());
+        }
+
+        /// Weighted mid price is bounded by best bid and best ask.
+        #[test]
+        fn weighted_mid_bounded(
+            bid_prices in prop_vec(1u32..=4999u32, 1..20),
+            ask_prices in prop_vec(5001u32..=10_000u32, 1..20),
+        ) {
+            let bids: Vec<_> = bid_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+            let asks: Vec<_> = ask_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            if let (Some((best_bid, _)), Some((best_ask, _)), Some(wmid)) =
+                (book.best_bid(), book.best_ask(), book.weighted_mid_price())
+            {
+                prop_assert!(wmid >= best_bid.as_f64(), "wmid {} < bid {}", wmid, best_bid.as_f64());
+                prop_assert!(wmid <= best_ask.as_f64(), "wmid {} > ask {}", wmid, best_ask.as_f64());
+            }
+        }
+
+        /// total_bid_size equals sum of all bid levels.
+        #[test]
+        fn total_size_consistent(
+            bids in prop_vec(arb_level(), 0..50),
+            asks in prop_vec(arb_level(), 0..50),
+        ) {
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            let manual_bid_sum: u64 = book.bids_sorted().iter().map(|(_, s)| s.raw()).sum();
+            prop_assert_eq!(book.total_bid_size().raw(), manual_bid_sum);
+
+            let manual_ask_sum: u64 = book.asks_sorted().iter().map(|(_, s)| s.raw()).sum();
+            prop_assert_eq!(book.total_ask_size().raw(), manual_ask_sum);
         }
     }
 }

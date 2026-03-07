@@ -20,9 +20,6 @@ pub enum StoreError {
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("store: flush failed for dataset '{dataset}' — {reason}")]
-    FlushFailed { dataset: String, reason: String },
-
     #[error("{0}")]
     Other(String),
 }

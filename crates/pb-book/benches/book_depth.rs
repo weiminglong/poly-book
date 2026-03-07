@@ -98,26 +98,27 @@ fn bench_snapshot_at_depth(c: &mut Criterion) {
 }
 
 fn bench_mixed_delta_workload(c: &mut Criterion) {
+    let bids: Vec<_> = (0..20)
+        .map(|i| {
+            (
+                FixedPrice::new(5000 - i * 10).unwrap(),
+                FixedSize::new(1_000_000),
+            )
+        })
+        .collect();
+    let asks: Vec<_> = (0..20)
+        .map(|i| {
+            (
+                FixedPrice::new(5100 + i * 10).unwrap(),
+                FixedSize::new(1_000_000),
+            )
+        })
+        .collect();
+
     let mut group = c.benchmark_group("mixed_workload");
-    group.bench_function("10k_mixed_updates_inserts_deletes", |b| {
+    group.bench_function("10k_deltas_on_20_level_book", |b| {
         b.iter(|| {
             let mut book = L2Book::new(AssetId::new("bench"));
-            let bids: Vec<_> = (0..20)
-                .map(|i| {
-                    (
-                        FixedPrice::new(5000 - i * 10).unwrap(),
-                        FixedSize::new(1_000_000),
-                    )
-                })
-                .collect();
-            let asks: Vec<_> = (0..20)
-                .map(|i| {
-                    (
-                        FixedPrice::new(5100 + i * 10).unwrap(),
-                        FixedSize::new(1_000_000),
-                    )
-                })
-                .collect();
             book.apply_snapshot(&bids, &asks, Sequence::new(0), 0);
 
             for i in 0u64..10_000 {
@@ -145,11 +146,32 @@ fn bench_mixed_delta_workload(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_analytics(c: &mut Criterion) {
+    let book = make_book(100);
+    let mut group = c.benchmark_group("analytics");
+    group.bench_function("total_bid_size", |b| {
+        b.iter(|| black_box(book.total_bid_size()))
+    });
+    group.bench_function("total_ask_size", |b| {
+        b.iter(|| black_box(book.total_ask_size()))
+    });
+    group.bench_function("weighted_mid_price", |b| {
+        b.iter(|| black_box(book.weighted_mid_price()))
+    });
+    group.bench_function("check_integrity", |b| {
+        b.iter(|| black_box(book.check_integrity()))
+    });
+    group.bench_function("top_5_bids", |b| b.iter(|| black_box(book.top_bids(5))));
+    group.bench_function("top_5_asks", |b| b.iter(|| black_box(book.top_asks(5))));
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_depth_iteration,
     bench_spread_at_depth,
     bench_snapshot_at_depth,
     bench_mixed_delta_workload,
+    bench_analytics,
 );
 criterion_main!(benches);

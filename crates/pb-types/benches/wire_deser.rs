@@ -42,15 +42,15 @@ fn bench_last_trade_deser(c: &mut Criterion) {
 }
 
 fn bench_batch_deser(c: &mut Criterion) {
-    let messages = vec![BOOK_MSG, PRICE_CHANGE_MSG, LAST_TRADE_MSG];
-    let total_bytes: u64 = messages.iter().map(|m| m.len() as u64).sum();
+    const MESSAGES: &[&str] = &[BOOK_MSG, PRICE_CHANGE_MSG, LAST_TRADE_MSG];
+    let total_bytes: u64 = MESSAGES.iter().map(|m| m.len() as u64).sum();
 
     let mut group = c.benchmark_group("wire_deser");
     group.throughput(Throughput::Bytes(total_bytes * 100));
     group.bench_function("batch_100_mixed_messages", |b| {
         b.iter(|| {
             for _ in 0..100 {
-                for msg in &messages {
+                for msg in MESSAGES {
                     let _: WsMessage<'_> = serde_json::from_str(black_box(msg)).unwrap();
                 }
             }

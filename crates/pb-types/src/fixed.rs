@@ -27,7 +27,9 @@ impl FixedPrice {
     /// Create from a float (e.g., 0.5 -> FixedPrice(5000))
     pub fn from_f64(v: f64) -> Result<Self, TypesError> {
         if v.is_nan() || v.is_infinite() || v < 0.0 {
-            return Err(TypesError::InvalidPrice { raw: 0 });
+            return Err(TypesError::InvalidPriceValue {
+                value: v.to_string(),
+            });
         }
         let raw = (v * PRICE_SCALE as f64).round() as u32;
         Self::new(raw)

@@ -18,56 +18,100 @@ struct FuzzInput {
     deltas: Vec<FuzzDelta>,
 }
 
+fn check_ordering(book: &L2Book, context: &str) {
+    let sorted_bids = book.bids_sorted();
+    for w in sorted_bids.windows(2) {
+        assert!(
+            w[0].0 >= w[1].0,
+            "bid ordering violated {context}: {:?} < {:?}",
+            w[0].0,
+            w[1].0
+        );
+    }
+    let sorted_asks = book.asks_sorted();
+    for w in sorted_asks.windows(2) {
+        assert!(
+            w[0].0 <= w[1].0,
+            "ask ordering violated {context}: {:?} > {:?}",
+            w[0].0,
+            w[1].0
+        );
+    }
+}
+
 fuzz_target!(|input: FuzzInput| {
     let mut book = L2Book::new(AssetId::new("fuzz"));
 
-    let bids: Vec<_> = input.initial_bids.iter()
+    let bids: Vec<_> = input
+        .initial_bids
+        .iter()
         .filter_map(|&(p, s)| {
             let price = FixedPrice::new((p as u32).min(10_000)).ok()?;
-            Some((price, FixedSize::new(s as u64)))
+            (s > 0).then(|| (price, FixedSize::new(s as u64)))
         })
-        .filter(|(_, s)| !s.is_zero())
         .collect();
 
-    let asks: Vec<_> = input.initial_asks.iter()
+    let asks: Vec<_> = input
+        .initial_asks
+        .iter()
         .filter_map(|&(p, s)| {
             let price = FixedPrice::new((p as u32).min(10_000)).ok()?;
-            Some((price, FixedSize::new(s as u64)))
+            (s > 0).then(|| (price, FixedSize::new(s as u64)))
         })
-        .filter(|(_, s)| !s.is_zero())
         .collect();
 
     book.apply_snapshot(&bids, &asks, Sequence::new(0), 0);
+    check_ordering(&book, "after snapshot");
 
-    // Invariant: bids sorted descending
-    let sorted = book.bids_sorted();
-    for w in sorted.windows(2) {
-        assert!(w[0].0 >= w[1].0, "bid ordering violated");
-    }
-
-    // Invariant: asks sorted ascending
-    let sorted = book.asks_sorted();
-    for w in sorted.windows(2) {
-        assert!(w[0].0 <= w[1].0, "ask ordering violated");
-    }
+    assert_eq!(
+        book.total_bid_size().raw(),
+        book.bids_sorted().iter().map(|(_, s)| s.raw()).sum::<u64>(),
+        "total_bid_size inconsistent"
+    );
 
     for (i, delta) in input.deltas.iter().enumerate() {
         let price_raw = (delta.price_raw as u32).min(10_000);
-        if price_raw == 0 { continue; }
+        if price_raw == 0 {
+            continue;
+        }
         let price = FixedPrice::new(price_raw).unwrap();
         let size = FixedSize::new(delta.size_raw as u64);
         let side = if delta.is_bid { Side::Bid } else { Side::Ask };
 
-        book.apply_delta(side, price, size, Sequence::new(i as u64 + 1), (i as u64 + 1) * 1000);
+        let depth_before = match side {
+            Side::Bid => book.bid_depth(),
+            Side::Ask => book.ask_depth(),
+        };
+        let had_level = match side {
+            Side::Bid => book
+                .bids_sorted()
+                .iter()
+                .any(|(p, _)| *p == price),
+            Side::Ask => book
+                .asks_sorted()
+                .iter()
+                .any(|(p, _)| *p == price),
+        };
 
-        // Post-delta invariant: ordering preserved
-        let sorted_bids = book.bids_sorted();
-        for w in sorted_bids.windows(2) {
-            assert!(w[0].0 >= w[1].0, "bid ordering violated after delta {i}");
+        book.apply_delta(
+            side,
+            price,
+            size,
+            Sequence::new(i as u64 + 1),
+            (i as u64 + 1) * 1000,
+        );
+
+        let depth_after = match side {
+            Side::Bid => book.bid_depth(),
+            Side::Ask => book.ask_depth(),
+        };
+
+        if size.is_zero() && had_level {
+            assert!(depth_after < depth_before, "zero-size delta didn't remove");
+        } else if !size.is_zero() && !had_level {
+            assert_eq!(depth_after, depth_before + 1, "new level not added");
         }
-        let sorted_asks = book.asks_sorted();
-        for w in sorted_asks.windows(2) {
-            assert!(w[0].0 <= w[1].0, "ask ordering violated after delta {i}");
-        }
+
+        check_ordering(&book, &format!("after delta {i}"));
     }
 });
