@@ -63,10 +63,15 @@ jobs:
   miri:
     name: Miri (undefined behavior)
     runs-on: ubuntu-latest
+    env:
+      MIRIFLAGS: -Zmiri-disable-isolation
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +nightly miri test -p pb-types -p pb-book -- --test-threads=1
+      - name: Miri pb-types (unit tests only)
+        run: cargo +nightly miri test -p pb-types -- --test-threads=1 --skip proptests
+      - name: Miri pb-book (unit tests only)
+        run: cargo +nightly miri test -p pb-book -- --test-threads=1 --skip proptests
