@@ -25,3 +25,4 @@ tracing = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 url = { workspace = true }
+rustc-hash = { workspace = true }

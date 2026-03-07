@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -33,11 +34,11 @@ pub struct Dispatcher {
     rx: mpsc::Receiver<FeedMessage>,
     tx: mpsc::Sender<PersistedRecord>,
     /// Per-asset monotonic sequence counters. Snapshots reset the counter.
-    asset_sequences: HashMap<Arc<str>, u64>,
+    asset_sequences: FxHashMap<Arc<str>, u64>,
     /// Per-asset last snapshot exchange timestamp for staleness detection.
-    last_snapshot_ts: HashMap<Arc<str>, u64>,
+    last_snapshot_ts: FxHashMap<Arc<str>, u64>,
     /// Interned AssetIds to avoid heap allocation on every message.
-    asset_id_cache: HashMap<Arc<str>, AssetId>,
+    asset_id_cache: FxHashMap<Arc<str>, AssetId>,
     current_session_id: Option<String>,
 }
 
@@ -46,9 +47,9 @@ impl Dispatcher {
         Self {
             rx,
             tx,
-            asset_sequences: HashMap::new(),
-            last_snapshot_ts: HashMap::new(),
-            asset_id_cache: HashMap::new(),
+            asset_sequences: FxHashMap::default(),
+            last_snapshot_ts: FxHashMap::default(),
+            asset_id_cache: FxHashMap::default(),
             current_session_id: None,
         }
     }
