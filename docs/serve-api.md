@@ -109,6 +109,15 @@ web surfaces are:
 - `Live Feed`
 - `Replay Lab`
 
+Current browser transport behavior:
+
+- adaptive HTTP polling for live views
+- foreground polling faster than background polling
+- stale browser requests are cancelled before the next refresh cycle
+
+This remains an interim client strategy until the deferred workstation streaming
+route exists.
+
 The SPA is developed and served separately from `serve-api` today. Packaging the
 Rust API and static frontend assets together remains later work.
 

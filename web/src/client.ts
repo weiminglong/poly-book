@@ -5,12 +5,14 @@ import {
   getDemoReplay,
   getDemoSnapshot,
 } from './demoData'
+import { requestTimeoutMs } from './constants'
 import type {
   ActiveAssetSummary,
   ApiErrorResponse,
   DataSourceMode,
   FeedStatusResponse,
   LiveOrderBookSnapshot,
+  RequestOptions,
   ReplayReconstructionResponse,
   WorkstationClient,
 } from './types'
@@ -33,16 +35,18 @@ export function createWorkstationClient(
   }
 
   return {
-    getFeedStatus: () => fetchJson<FeedStatusResponse>(buildUrl(apiBaseUrl, '/api/v1/feed/status')),
-    getActiveAssets: () =>
-      fetchJson<ActiveAssetSummary[]>(buildUrl(apiBaseUrl, '/api/v1/assets/active')),
-    getOrderBookSnapshot: (assetId, depth) =>
+    getFeedStatus: (options) =>
+      fetchJson<FeedStatusResponse>(buildUrl(apiBaseUrl, '/api/v1/feed/status'), options),
+    getActiveAssets: (options) =>
+      fetchJson<ActiveAssetSummary[]>(buildUrl(apiBaseUrl, '/api/v1/assets/active'), options),
+    getOrderBookSnapshot: (assetId, depth, options) =>
       fetchJson<LiveOrderBookSnapshot>(
         buildUrl(apiBaseUrl, `/api/v1/orderbooks/${encodeURIComponent(assetId)}/snapshot`, {
           depth: String(depth),
         }),
+        options,
       ),
-    getReplayReconstruction: ({ assetId, atUs, mode, depth }) =>
+    getReplayReconstruction: ({ assetId, atUs, mode, depth }, options) =>
       fetchJson<ReplayReconstructionResponse>(
         buildUrl(apiBaseUrl, '/api/v1/replay/reconstruct', {
           asset_id: assetId,
@@ -51,6 +55,7 @@ export function createWorkstationClient(
           source: 'parquet',
           depth: String(depth),
         }),
+        options,
       ),
   }
 }
@@ -88,20 +93,48 @@ function buildUrl(pathPrefix: string, path: string, params?: Record<string, stri
   return `${url}?${query.toString()}`
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url)
-  if (!response.ok) {
-    let message = `Request failed with status ${response.status}`
-    try {
-      const body = (await response.json()) as ApiErrorResponse
-      if (typeof body.error === 'string') {
-        message = body.error
-      }
-    } catch {
-      // Ignore JSON parsing failures and fall back to the HTTP status.
-    }
-    throw new Error(message)
-  }
+async function fetchJson<T>(url: string, options?: RequestOptions): Promise<T> {
+  const timeoutController = new AbortController()
+  let timedOut = false
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true
+    timeoutController.abort()
+  }, requestTimeoutMs)
 
-  return (await response.json()) as T
+  const abortHandler = () => timeoutController.abort()
+  options?.signal?.addEventListener('abort', abortHandler, { once: true })
+
+  try {
+    const response = await fetch(url, {
+      signal: timeoutController.signal,
+    })
+    if (!response.ok) {
+      let message = `Request failed with status ${response.status}`
+      try {
+        const body = (await response.json()) as ApiErrorResponse
+        if (typeof body.error === 'string') {
+          message = body.error
+        }
+      } catch {
+        // Ignore JSON parsing failures and fall back to the HTTP status.
+      }
+      throw new Error(message)
+    }
+
+    return (await response.json()) as T
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`Request timed out after ${requestTimeoutMs}ms`)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
+    options?.signal?.removeEventListener('abort', abortHandler)
+  }
+}
+
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError'
 }

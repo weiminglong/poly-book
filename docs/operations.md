@@ -230,6 +230,16 @@ VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 The SPA also supports a seeded demo mode for offline review. Use the in-app
 source toggle or open `http://127.0.0.1:4173/?source=demo`.
 
+Current web transport behavior:
+
+- `Live Feed` uses adaptive HTTP polling
+- foreground cadence: `1s`
+- background cadence: `5s`
+- stale in-flight browser requests are aborted before the next poll
+
+This is a Phase 4.5 hardening step only. Trader-grade streaming still depends on
+the deferred WebSocket order-book route.
+
 Deferred from the current SPA pass:
 
 - Integrity

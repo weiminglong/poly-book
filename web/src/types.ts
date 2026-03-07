@@ -84,9 +84,20 @@ export interface ReplayRequest {
   depth: number
 }
 
+export interface RequestOptions {
+  signal?: AbortSignal
+}
+
 export interface WorkstationClient {
-  getFeedStatus(): Promise<FeedStatusResponse>
-  getActiveAssets(): Promise<ActiveAssetSummary[]>
-  getOrderBookSnapshot(assetId: string, depth: number): Promise<LiveOrderBookSnapshot>
-  getReplayReconstruction(request: ReplayRequest): Promise<ReplayReconstructionResponse>
+  getFeedStatus(options?: RequestOptions): Promise<FeedStatusResponse>
+  getActiveAssets(options?: RequestOptions): Promise<ActiveAssetSummary[]>
+  getOrderBookSnapshot(
+    assetId: string,
+    depth: number,
+    options?: RequestOptions,
+  ): Promise<LiveOrderBookSnapshot>
+  getReplayReconstruction(
+    request: ReplayRequest,
+    options?: RequestOptions,
+  ): Promise<ReplayReconstructionResponse>
 }

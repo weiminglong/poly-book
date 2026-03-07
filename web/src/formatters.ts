@@ -10,6 +10,14 @@ export function formatTimestamp(timestampUs: number | null | undefined): string 
   return new Date(timestampUs / microsecondMultiplier).toLocaleString()
 }
 
+export function formatClientTimestamp(timestampMs: number | null | undefined): string {
+  if (!timestampMs) {
+    return '—'
+  }
+
+  return new Date(timestampMs).toLocaleString()
+}
+
 export function formatNumber(value: number | null | undefined, digits = 4): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return '—'
@@ -53,4 +61,8 @@ export function titleCase(value: string): string {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+}
+
+export function formatIntervalMs(intervalMs: number): string {
+  return `${(intervalMs / 1000).toFixed(intervalMs < 1000 ? 1 : 0)}s`
 }

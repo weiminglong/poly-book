@@ -13,8 +13,11 @@ describe('workstation SPA', () => {
   })
 
   it('renders the replay lab route with a seeded reconstruction result', async () => {
-    render(<TestableApp initialEntries={['/replay-lab']} sourceMode="demo" />)
+    render(<TestableApp initialEntries={['/live-feed']} sourceMode="demo" />)
 
+    await userEvent.click(screen.getByRole('link', { name: /replay lab/i }))
+    await screen.findByRole('button', { name: /load demo query/i })
+    await userEvent.click(screen.getByRole('button', { name: /load demo query/i }))
     await userEvent.click(screen.getByRole('button', { name: /run reconstruction/i }))
     expect(await screen.findByText('Used checkpoint')).toBeInTheDocument()
     expect(await screen.findByText(/Replay started from a stored checkpoint\./i)).toBeInTheDocument()

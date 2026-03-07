@@ -36,6 +36,14 @@
 - [x] Add seeded sample data so the UI can be reviewed without live infrastructure
 - [x] Add web unit tests and smoke coverage for Live Feed and Replay Lab
 
+## Phase 4.5: Trader-Grade Performance Hardening
+
+- [x] Add adaptive foreground/background polling with stale request cancellation
+- [x] Split the shipped routes into lazy-loaded bundles
+- [ ] Replace HTTP polling with WebSocket order book streaming once the backend route exists
+- [ ] Add virtualization and render throttling for deeper books and future streams
+- [ ] Add frontend performance budgets and production profiling hooks
+
 ## Phase 5: CI, Docs, And Packaging
 
 - [ ] Add frontend lint, typecheck, test, and build jobs to CI
