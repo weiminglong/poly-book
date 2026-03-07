@@ -386,6 +386,19 @@ th {
   }
 }
 
+.table-scroll {
+  overflow-x: auto;
+}
+
+.table-scroll table {
+  white-space: nowrap;
+}
+
+.mono {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.85em;
+}
+
 @media (max-width: 720px) {
   .app-shell {
     padding: 20px;
