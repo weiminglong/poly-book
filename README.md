@@ -31,7 +31,7 @@ If you want to contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.75+
+- [Rust](https://rustup.rs/) 1.94+
 - Docker for the full integration suite
 - `just` is optional
 - `duckdb` is optional for Parquet inspection

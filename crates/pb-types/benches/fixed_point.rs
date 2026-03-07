@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use pb_types::{FixedPrice, FixedSize};
+use std::hint::black_box;
 
 fn bench_fixed_price_from_f64(c: &mut Criterion) {
     c.bench_function("FixedPrice::from_f64", |b| {

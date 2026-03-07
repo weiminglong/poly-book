@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use pb_book::L2Book;
 use pb_types::{AssetId, FixedPrice, FixedSize, Sequence, Side};
+use std::hint::black_box;
 
 type LevelVec = Vec<(FixedPrice, FixedSize)>;
 
