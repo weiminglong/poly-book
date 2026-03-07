@@ -188,3 +188,51 @@ Current `serve-api` does not yet provide:
 
 The existing Docker and ECS deployment remains ingestion-oriented today. The
 workstation API is not yet part of that production deployment flow.
+
+## Workstation Web App
+
+The Phase 4 SPA currently ships only:
+
+- `Live Feed`
+- `Replay Lab`
+
+Local workflow:
+
+```bash
+# terminal 1
+cargo run -- serve-api --auto-rotate
+
+# terminal 2
+cd web
+npm install
+npm run dev
+```
+
+Defaults:
+
+- Web app: `http://127.0.0.1:4173`
+- API proxy target in dev: `http://127.0.0.1:3000`
+
+Override the dev proxy target with:
+
+```bash
+cd web
+VITE_DEV_API_PROXY_TARGET=http://127.0.0.1:3100 npm run dev
+```
+
+Or bypass the proxy entirely and fetch from an explicit origin:
+
+```bash
+cd web
+VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
+```
+
+The SPA also supports a seeded demo mode for offline review. Use the in-app
+source toggle or open `http://127.0.0.1:4173/?source=demo`.
+
+Deferred from the current SPA pass:
+
+- Integrity
+- Latency
+- Execution Timeline
+- Query Workbench
