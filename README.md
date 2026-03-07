@@ -12,6 +12,7 @@ It is aimed at people building or studying low-latency market-data systems:
 - live WebSocket and REST ingestion
 - split Parquet and ClickHouse storage
 - checkpoint-based historical replay
+- read-only workstation API for live and historical inspection
 - metrics and operational hooks
 
 ## Project Status
@@ -119,6 +120,18 @@ Replay modes:
 
 Add `--validate` to compare replay output against the next checkpoint.
 
+### Serve the workstation API
+
+```bash
+cargo run -- serve-api --tokens <TOKEN_ID>
+# or
+cargo run -- serve-api --auto-rotate
+```
+
+This starts the read-only API layer for the quant workstation backend. The
+first release serves live feed status, active assets, live book snapshots, and
+Parquet-backed replay reconstruction.
+
 ### Replay execution history
 
 ```bash
@@ -155,15 +168,20 @@ The project demonstrates a specific style of trading-infrastructure design:
 
 ```text
 Polymarket WS -> pb-feed -> pb-store -> Parquet / ClickHouse
-REST snapshots -> pb-replay -------^
-                               |
-                               -> pb-metrics
+                 |                     ^
+                 v                     |
+              pb-api <---- pb-replay --+
+                 |
+                 +-> workstation clients
+                 |
+                 +-> pb-metrics
 ```
 
 Workspace crates:
 
 | Crate | Responsibility |
 |-------|----------------|
+| `pb-api` | Read-only HTTP API and live read model for workstation clients |
 | `pb-types` | Fixed-point types, wire formats, and persisted records |
 | `pb-book` | In-memory L2 order book engine |
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
@@ -189,11 +207,18 @@ PB__LOGGING__LEVEL=debug cargo run -- auto-ingest
 Operational details, deployment notes, infrastructure setup, and data layout live
 in [docs/operations.md](docs/operations.md).
 
+Current workstation API routes and runtime notes live in:
+
+- [docs/api.md](docs/api.md)
+- [docs/serve-api.md](docs/serve-api.md)
+
 ## Roadmap
 
 Near-term work that would make strong public contributions:
 
 - broader replay validation and determinism coverage
+- workstation integrity, execution, and query API expansion beyond the current
+  read-only Phase 3 slice
 - better local sample-data workflows for offline development
 - more explicit schema/versioning guarantees for persisted datasets
 - clearer operational docs for ClickHouse and cloud object storage

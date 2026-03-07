@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/pb-api",
     "crates/pb-types",
     "crates/pb-book",
     "crates/pb-feed",
@@ -24,6 +25,7 @@ readme = "README.md"
 [workspace.dependencies]
 # Internal crates
 pb-types = { path = "crates/pb-types" }
+pb-api = { path = "crates/pb-api" }
 pb-book = { path = "crates/pb-book" }
 pb-feed = { path = "crates/pb-feed" }
 pb-store = { path = "crates/pb-store" }

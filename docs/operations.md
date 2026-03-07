@@ -39,6 +39,12 @@ clickhouse_batch_size = 10000
 listen_addr = "0.0.0.0:9090"
 endpoint = "/metrics"
 
+[api]
+listen_addr = "0.0.0.0:3000"
+default_depth = 20
+max_depth = 200
+stale_after_secs = 15
+
 [logging]
 level = "info"
 format = "pretty"
@@ -50,6 +56,14 @@ Example overrides:
 PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data \
 PB__LOGGING__LEVEL=debug \
 cargo run -- auto-ingest
+```
+
+Serve the workstation API with explicit port overrides:
+
+```bash
+PB__API__LISTEN_ADDR=127.0.0.1:3000 \
+PB__METRICS__LISTEN_ADDR=127.0.0.1:9090 \
+cargo run -- serve-api --tokens <TOKEN_ID>
 ```
 
 ## Data Layout
@@ -134,3 +148,38 @@ just parquet-peek
 just parquet-schema
 just parquet-stats
 ```
+
+## Workstation API
+
+Current local API workflows:
+
+```bash
+# Serve fixed token IDs
+cargo run -- serve-api --tokens <TOKEN_ID>
+
+# Follow the rotating BTC 5-minute market
+cargo run -- serve-api --auto-rotate
+```
+
+Port defaults:
+
+- API: `3000`
+- Metrics: `9090`
+
+Current `serve-api` scope:
+
+- read-only HTTP API
+- live feed status and active asset visibility
+- live in-memory order book snapshots
+- Parquet-backed replay reconstruction
+
+Current `serve-api` does not yet provide:
+
+- ClickHouse-backed API reads
+- integrity summary endpoints
+- execution timeline endpoints
+- SQL workbench endpoints
+- WebSocket order book streaming
+
+The existing Docker and ECS deployment remains ingestion-oriented today. The
+workstation API is not yet part of that production deployment flow.
