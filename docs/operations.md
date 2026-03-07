@@ -88,9 +88,14 @@ Primary datasets:
 GitHub Actions runs the following checks on pushes and pull requests to `main`:
 
 - `cargo check --all-targets`
-- `cargo test`
+- `cargo test --workspace --exclude pb-integration-tests`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
+- `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
+- `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
+
+Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
+separate weekly schedule and on pushes/PRs.
 
 ## Deployment
 

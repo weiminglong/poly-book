@@ -172,9 +172,11 @@ invariants across randomized inputs:
 - fixed-point roundtrip, ordering, and serde consistency
 - bid/ask ordering preserved after arbitrary snapshots and deltas
 - spread never negative for non-crossed books
-- mid price bounded by best bid/ask
-- sequence monotonicity
+- mid price and weighted mid price bounded by best bid/ask
+- sequence monotonicity and gap detection soundness
 - snapshot idempotency
+- crossed-book detection via `check_integrity()`
+- total size consistency across all levels
 
 ### Fuzzing
 
@@ -227,7 +229,7 @@ Workspace crates:
 |-------|----------------|
 | `pb-api` | Read-only HTTP API and live read model for workstation clients |
 | `pb-types` | Fixed-point types, wire formats, and persisted records |
-| `pb-book` | In-memory L2 order book engine |
+| `pb-book` | In-memory L2 order book engine with analytics (weighted mid, top-N, integrity checks) |
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
 | `pb-store` | Parquet and ClickHouse sinks |
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |

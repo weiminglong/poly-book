@@ -25,6 +25,9 @@ WebSocket frame arrival
     │   └─ apply_delta            ~50 ns
     │   └─ apply_snapshot (50)    ~2.5 µs
     │   └─ best_bid + best_ask   ~5 ns
+    │   └─ weighted_mid_price     ~10 ns
+    │   └─ check_integrity        ~10 ns
+    │   └─ top_bids/asks(5)       ~20 ns
     │
     ├─ Storage flush              async, off hot path
     │   └─ Parquet row group      ~10–50 ms  (buffered, 5-min interval)
@@ -56,7 +59,7 @@ WebSocket frame arrival
 ```bash
 cargo bench                      # all benchmarks
 cargo bench -p pb-types          # fixed-point and wire deser
-cargo bench -p pb-book           # book operations and depth
+cargo bench -p pb-book           # book operations, depth, and analytics
 ```
 
 ### Prometheus Metrics
