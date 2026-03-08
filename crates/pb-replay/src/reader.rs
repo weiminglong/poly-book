@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{UInt32Type, UInt64Type};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use tokio::fs::File;
 use tracing::debug;
@@ -54,6 +55,9 @@ pub trait EventReader: Send + Sync {
 pub struct ParquetReader {
     base_path: PathBuf,
 }
+
+const PARQUET_READ_CONCURRENCY: usize = 8;
+const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
 
 impl ParquetReader {
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
@@ -156,6 +160,29 @@ impl ParquetReader {
         }
 
         Ok(rows)
+    }
+
+    async fn read_parquet_files<T, F>(
+        &self,
+        paths: Vec<PathBuf>,
+        extractor: F,
+    ) -> Result<Vec<T>, ReplayError>
+    where
+        T: Send,
+        F: Fn(&arrow::record_batch::RecordBatch) -> Result<Vec<T>, ReplayError>
+            + Clone
+            + Send
+            + Sync,
+    {
+        let batches = stream::iter(paths.into_iter().map(|path| {
+            let extractor = extractor.clone();
+            async move { self.read_parquet_file(&path, extractor).await }
+        }))
+        .buffer_unordered(PARQUET_READ_CONCURRENCY)
+        .try_collect::<Vec<Vec<T>>>()
+        .await?;
+
+        Ok(batches.into_iter().flatten().collect())
     }
 }
 
@@ -823,42 +850,54 @@ impl EventReader for ParquetReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
-        let book_files = self
-            .dataset_files("book_events", Some(asset_id.as_str()), start_us, end_us)
-            .await?;
-        let trade_files = self
-            .dataset_files("trade_events", Some(asset_id.as_str()), start_us, end_us)
-            .await?;
-        let ingest_files = self
-            .dataset_files("ingest_events", None, start_us, end_us)
-            .await?;
+        let (book_files, trade_files, ingest_files) = tokio::try_join!(
+            self.dataset_files("book_events", Some(asset_id.as_str()), start_us, end_us),
+            self.dataset_files("trade_events", Some(asset_id.as_str()), start_us, end_us),
+            self.dataset_files("ingest_events", None, start_us, end_us),
+        )?;
 
-        let mut window = MarketDataWindow::default();
-        for path in book_files {
-            window.book_events.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_book_events(batch, asset_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
-        for path in trade_files {
-            window.trade_events.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_trade_events(batch, asset_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
-        for path in ingest_files {
-            window.ingest_events.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_ingest_events(batch, asset_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
-        Ok(window)
+        let asset_id = asset_id.clone();
+        let (book_events, trade_events, ingest_events) = tokio::try_join!(
+            self.read_parquet_files(book_files, {
+                let asset_id = asset_id.clone();
+                move |batch| extract_book_events(batch, &asset_id, start_us, end_us)
+            }),
+            self.read_parquet_files(trade_files, {
+                let asset_id = asset_id.clone();
+                move |batch| extract_trade_events(batch, &asset_id, start_us, end_us)
+            }),
+            self.read_parquet_files(ingest_files, move |batch| {
+                extract_ingest_events(batch, &asset_id, start_us, end_us)
+            }),
+        )?;
+
+        let mut book_events = book_events;
+        book_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+        let mut trade_events = trade_events;
+        trade_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+        let mut ingest_events = ingest_events;
+        ingest_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+
+        Ok(MarketDataWindow {
+            book_events,
+            trade_events,
+            ingest_events,
+        })
     }
 
     async fn read_checkpoints(
@@ -875,15 +914,11 @@ impl EventReader for ParquetReader {
                 end_us,
             )
             .await?;
-        let mut checkpoints = Vec::new();
-        for path in files {
-            checkpoints.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_checkpoints(batch, asset_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
+        let mut checkpoints = self
+            .read_parquet_files(files, |batch| {
+                extract_checkpoints(batch, asset_id, start_us, end_us)
+            })
+            .await?;
         checkpoints.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
         Ok(checkpoints)
     }
@@ -893,6 +928,27 @@ impl EventReader for ParquetReader {
         asset_id: &AssetId,
         at_us: u64,
     ) -> Result<Option<BookCheckpoint>, ReplayError> {
+        let recent_start = at_us.saturating_sub(RECENT_CHECKPOINT_LOOKBACK_US);
+        let recent_files = self
+            .dataset_files(
+                "book_checkpoints",
+                Some(asset_id.as_str()),
+                recent_start,
+                at_us,
+            )
+            .await?;
+        if !recent_files.is_empty() {
+            let mut recent = self
+                .read_parquet_files(recent_files, |batch| {
+                    extract_checkpoints(batch, asset_id, recent_start, at_us)
+                })
+                .await?;
+            recent.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
+            if let Some(checkpoint) = recent.pop() {
+                return Ok(Some(checkpoint));
+            }
+        }
+
         let mut checkpoints = self.read_checkpoints(asset_id, 0, at_us).await?;
         Ok(checkpoints.pop())
     }
@@ -911,15 +967,11 @@ impl EventReader for ParquetReader {
                 end_us,
             )
             .await?;
-        let mut validations = Vec::new();
-        for path in files {
-            validations.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_validations(batch, asset_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
+        let mut validations = self
+            .read_parquet_files(files, |batch| {
+                extract_validations(batch, asset_id, start_us, end_us)
+            })
+            .await?;
         validations.sort_by_key(|validation| validation.persisted_at_us);
         Ok(validations)
     }
@@ -933,15 +985,11 @@ impl EventReader for ParquetReader {
         let files = self
             .dataset_files("execution_events", None, start_us, end_us)
             .await?;
-        let mut events = Vec::new();
-        for path in files {
-            events.extend(
-                self.read_parquet_file(&path, |batch| {
-                    extract_execution_events(batch, order_id, start_us, end_us)
-                })
-                .await?,
-            );
-        }
+        let mut events = self
+            .read_parquet_files(files, |batch| {
+                extract_execution_events(batch, order_id, start_us, end_us)
+            })
+            .await?;
         events.sort_by_key(|event| event.event_timestamp_us);
         Ok(events)
     }
@@ -1081,7 +1129,7 @@ impl EventReader for ClickHouseReader {
             .fetch_all()
             .await?;
 
-        let book_events = book_rows
+        let mut book_events = book_rows
             .into_iter()
             .map(|row| {
                 Ok(BookEvent {
@@ -1109,7 +1157,14 @@ impl EventReader for ClickHouseReader {
                 })
             })
             .collect::<Result<Vec<_>, ReplayError>>()?;
-        let trade_events = trade_rows
+        book_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+
+        let mut trade_events = trade_rows
             .into_iter()
             .map(|row| {
                 Ok(TradeEvent {
@@ -1130,7 +1185,14 @@ impl EventReader for ClickHouseReader {
                 })
             })
             .collect::<Result<Vec<_>, ReplayError>>()?;
-        let ingest_events = ingest_rows
+        trade_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+
+        let mut ingest_events = ingest_rows
             .into_iter()
             .filter(|row| {
                 row.asset_id.as_deref().is_none()
@@ -1154,6 +1216,12 @@ impl EventReader for ClickHouseReader {
                 })
             })
             .collect::<Result<Vec<_>, ReplayError>>()?;
+        ingest_events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
 
         Ok(MarketDataWindow {
             book_events,

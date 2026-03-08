@@ -1,4 +1,9 @@
-use axum::extract::{Path, Query, State};
+use std::time::Instant;
+
+use axum::extract::{MatchedPath, Path, Query, State};
+use axum::http::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use pb_replay::{EventReader, ParquetReader, ReplayEngine, ReplayError};
@@ -77,6 +82,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/streams/orderbook",
             any(crate::streaming::ws_orderbook),
         )
+        .layer(middleware::from_fn(track_request_metrics))
         .with_state(state)
 }
 
@@ -165,18 +171,8 @@ async fn replay_reconstruct(
         spread: book.spread(),
         bid_depth: book.bid_depth(),
         ask_depth: book.ask_depth(),
-        bids: book
-            .bids_sorted()
-            .into_iter()
-            .take(depth)
-            .map(level_view)
-            .collect(),
-        asks: book
-            .asks_sorted()
-            .into_iter()
-            .take(depth)
-            .map(level_view)
-            .collect(),
+        bids: book.top_bids(depth).into_iter().map(level_view).collect(),
+        asks: book.top_asks(depth).into_iter().map(level_view).collect(),
         continuity_events: replay
             .continuity_events
             .into_iter()
@@ -386,6 +382,27 @@ fn level_view(
     crate::dto::PriceLevelView { price, size }
 }
 
+async fn track_request_metrics(req: Request<axum::body::Body>, next: Next) -> Response {
+    let method = req.method().clone();
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("<unmatched>")
+        .to_string();
+    let start = Instant::now();
+    let response = next.run(req).await;
+
+    pb_metrics::record_api_request_duration_ms(
+        method.as_str(),
+        &route,
+        response.status().as_u16(),
+        start.elapsed().as_secs_f64() * 1_000.0,
+    );
+
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -438,6 +455,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn orderbook_snapshot_returns_503_until_snapshot_group_materializes() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Bid,
+                price: FixedPrice::from_f64(0.50).unwrap(),
+                size: FixedSize::from_f64(10.0).unwrap(),
+                provenance: EventProvenance {
+                    recv_timestamp_us: 100,
+                    exchange_timestamp_us: 90,
+                    source: DataSource::WebSocket,
+                    source_event_id: Some("snap-1".to_string()),
+                    source_session_id: Some("ws-session-1".to_string()),
+                    sequence: Some(Sequence::new(0)),
+                },
+            }))
+            .await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbooks/tok1/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

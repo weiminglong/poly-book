@@ -59,6 +59,13 @@
 ### Dependency graph
 
 ```text
+Phase 6.1 (serving runtime split)
+  ├─> Phase 6.2 (durable live-state hydration)
+  ├─> Phase 6.3 (gRPC internal surface)
+  └─> Phase 6.4 (stateless serving replicas)
+Phase 6.5 (ClickHouse interactive reads)
+  ├─> Phase 6.6 (query workbench backend migration)
+  └─> Phase 6.7 (interactive replay/integrity migration)
 Phase 3.3 (response types)
   ├─> Phase 3.4 (API tests)
   └─> Phase 4 (frontend routes)
@@ -89,6 +96,27 @@ Phase 5.3 (deployment packaging) ── independent, last
 | 11 | Frontend performance budgets and profiling hooks | 4.5 | nothing |
 | 12 | Local dev docs for API + web together | 5 | steps 3, 8 |
 | 13 | Deployment packaging for API + static web assets | 5 | steps 8, 9 |
+
+---
+
+## Phase 6: Clean-Slate Serving Architecture
+
+- [ ] Define a separate ingest runtime and serve runtime boundary for the
+  workstation platform
+- [ ] Define durable live-state hydration from checkpoints plus ordered update
+  streams rather than direct venue sockets in serving processes
+- [ ] Add a transport-neutral service layer that can back browser HTTP/WS and
+  internal gRPC interfaces
+- [ ] Add a gRPC read surface for internal workstation consumers without
+  replacing browser transports
+- [ ] Move interactive replay, integrity, execution, and query reads onto a
+  serving-oriented backend such as ClickHouse
+- [ ] Keep Parquet as the audit and replay-truth source for validation,
+  reproducibility, and recovery
+- [ ] Define readiness, resync, and backpressure behavior for stateless serving
+  replicas
+- [ ] Document the clean-slate serving topology as a future replacement for the
+  current in-process `serve-api` runtime
 
 ---
 

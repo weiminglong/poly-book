@@ -14,6 +14,7 @@ description = "Browser-facing API and live read model for the poly-book workstat
 pb-types = { workspace = true }
 pb-book = { workspace = true }
 pb-replay = { workspace = true }
+pb-metrics = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 axum = { workspace = true }

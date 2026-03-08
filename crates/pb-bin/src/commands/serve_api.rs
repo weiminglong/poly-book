@@ -52,7 +52,6 @@ pub async fn run(
         event_rx,
         broadcast.clone(),
         default_depth,
-        stale_after_secs,
         shutdown.child_token(),
     );
 

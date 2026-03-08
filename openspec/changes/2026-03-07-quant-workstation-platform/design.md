@@ -31,6 +31,33 @@ Polymarket WS/REST -> ingest pipeline -> storage + metrics
 The browser does not talk directly to ingest internals, Parquet files, or
 Prometheus endpoints. A dedicated Rust API layer owns browser-facing contracts.
 
+## Target Clean-Slate Serving Topology
+
+The long-term serving architecture is intentionally stronger than the current
+`serve-api` runtime. The target topology is:
+
+```text
+Polymarket WS/REST -> ingest runtime -> Parquet + ClickHouse + metrics + durable update bus
+                                                      |
+                                                      +-> serve runtime replicas
+                                                            |- live snapshot cache / stream fanout
+                                                            |- replay / integrity / execution readers
+                                                            |- browser HTTP + WebSocket APIs
+                                                            \- internal gRPC APIs
+```
+
+This target architecture makes three boundaries explicit:
+
+- ingest owns exchange connectivity, normalization, sequencing, and durable
+  writes
+- serving owns browser and internal read contracts, caching, and stream fanout
+- archival truth and interactive serving storage are allowed to differ so long
+  replay semantics remain auditably grounded in canonical stored data
+
+The current in-process `serve-api` runtime is still the shipped implementation.
+This clean-slate topology defines the intended replacement direction rather than
+claiming it is already deployed.
+
 ## Serving Architecture
 
 ### Rust API layer
@@ -48,6 +75,18 @@ The API layer provides versioned REST and WebSocket interfaces under
 The API layer may run in the same deployment unit as the current runtime
 initially, but it must remain separately deployable later.
 
+### Internal service interface
+
+The workstation platform may add a typed gRPC interface for internal consumers
+without replacing browser-facing HTTP and WebSocket contracts.
+
+The target transport split is:
+
+- browser clients use versioned HTTP and WebSocket interfaces
+- internal services use gRPC over the same serving domain model
+- transport-specific DTOs and error mappings are derived from a shared
+  transport-neutral service layer rather than duplicating domain logic
+
 ### Live read model
 
 Live book views should be maintained server-side from a non-blocking fanout of
@@ -62,6 +101,10 @@ The live read model is responsible for:
 - reconnect and continuity indicators
 - freshness metadata
 
+In the target clean-slate topology, the live read model should be hydrated by
+durable checkpoints and ordered update streams rather than depending on a
+browser-serving process to own exchange sockets directly.
+
 ### Historical and analytical reads
 
 Historical replay remains grounded in the existing replay readers and datasets.
@@ -73,6 +116,17 @@ For deployed interactive queries:
 
 This keeps the workstation responsive without changing the source of truth for
 historical reconstruction.
+
+The target serving split for historical reads is:
+
+- ClickHouse serves interactive replay, integrity, execution, and query views
+- Parquet remains the audit and replay-truth source for offline validation,
+  recovery, and reproducibility
+- local and development workflows may still use DuckDB over Parquet where a
+  deployed serving backend is not required
+
+This allows the workstation to scale interactive serving without redefining
+replay truth around the serving backend itself.
 
 ## Product Surfaces
 
@@ -201,6 +255,23 @@ The following planned surfaces remain deferred:
 - SQL workbench routes
 - WebSocket order book streaming
 - ClickHouse-backed API reads
+
+## Future Clean-Slate Runtime Boundary
+
+The target replacement for the current Phase 3 runtime should meet these
+architecture constraints:
+
+- browser-serving processes do not own direct venue connectivity
+- serving replicas are stateless beyond in-memory caches and can be scaled
+  horizontally
+- readiness depends on storage and live-state hydration rather than process
+  startup alone
+- slow consumers receive bounded buffers and explicit resync behavior
+- replay and integrity routes use a serving-oriented backend for interactive
+  workloads
+- Parquet remains available for audit and replay verification
+- internal consumers can use gRPC without forcing browser clients onto gRPC-Web
+  or proxy-specific behavior
 
 ## Rollout
 
