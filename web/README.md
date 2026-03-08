@@ -6,18 +6,20 @@ Current shipped routes:
 
 - `Live Feed`
 - `Replay Lab`
+- `Integrity`
+- `Execution Timeline`
 
 Current Phase 4.5 hardening in the web client:
 
 - adaptive live polling (`1s` foreground / `5s` background)
 - abortable API requests with a client timeout
-- lazy-loaded route bundles for `Live Feed` and `Replay Lab`
+- lazy-loaded route bundles for current shipped routes
+- WebSocket order book streaming with HTTP fallback
+- virtualized order book rendering with throttled stream updates
 
 Deferred UI surfaces:
 
-- Integrity
 - Latency
-- Execution Timeline
 - Query Workbench
 
 ## Local development
@@ -50,10 +52,9 @@ in-app data-source toggle.
 
 ## Current transport notes
 
-`Live Feed` still uses HTTP polling because the backend WebSocket book stream is
-not implemented yet. The client now polls aggressively only while the page is in
-the foreground and backs off when the tab is hidden, which is a stopgap until
-true streaming transport lands.
+`Live Feed` uses the backend WebSocket book stream when available and falls back
+to adaptive HTTP polling if the stream cannot be established. Feed status and
+active asset summaries still use adaptive foreground/background polling.
 
 ## Validation
 
