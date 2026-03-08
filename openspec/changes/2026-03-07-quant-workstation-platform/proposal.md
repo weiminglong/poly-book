@@ -48,6 +48,8 @@ top quant firms care about:
 - `execution-observability-console`: read-only inspection of order lifecycle
   state and latency traces.
 - `query-workbench`: safe read-only query access to the split datasets.
+- `serving-runtime-platform`: clean-slate serving topology for browser and
+  internal workstation consumers, with separated ingest and serve runtimes.
 - `live-trading-control-plane`: future authenticated trading workflows with
   explicit safety boundaries.
 - `backtest-workbench`: future replay-backed research workflows with explicit
@@ -68,6 +70,12 @@ top quant firms care about:
 
 - New active OpenSpec change for frontend and serving architecture.
 - New Rust API surface for browser-facing REST and WebSocket endpoints.
+- Future serving work is expected to split the current in-process API runtime
+  into separately deployable ingest and serve services.
+- Future internal consumers are expected to use a typed gRPC interface alongside
+  browser-facing HTTP and WebSocket contracts.
+- Future interactive historical reads are expected to move to a serving backend
+  such as ClickHouse while Parquet remains the audit and replay truth source.
 - New web application and CI checks for frontend validation.
 - Later deployment work will need separate packaging for API and static web
   assets.

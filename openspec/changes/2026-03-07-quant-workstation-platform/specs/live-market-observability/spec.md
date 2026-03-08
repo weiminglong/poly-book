@@ -20,6 +20,15 @@ Then the response includes freshness metadata derived from the latest observed t
 And a consumer can detect when an asset or feed has gone stale
 ```
 
+### Scenario: Live market views remain available from serving replicas after restarts
+
+```
+Given live book views are served from a separately deployable serving runtime
+When an individual serving replica restarts or is replaced
+Then the replica rebuilds live state from durable checkpoints and ordered updates
+And operators do not need the browser-serving process to reconnect directly to the venue to recover live visibility
+```
+
 ## Live Book Views
 
 ### Scenario: Live order book snapshot is queryable
@@ -38,6 +47,15 @@ Given a client subscribes to live order book updates for an asset
 When the order book changes
 Then the workstation receives ordered update messages over a streaming interface
 And the messages include enough metadata to identify update time and continuity state
+```
+
+### Scenario: Slow stream consumers receive explicit resync behavior
+
+```
+Given a client falls behind the live order book update rate
+When the serving runtime can no longer deliver every incremental update within the configured stream buffer
+Then the client receives an explicit resync snapshot or equivalent recovery signal
+And the workstation does not silently continue from an unknown live-book continuity state
 ```
 
 ## Continuity Visibility

@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    ActiveAssetSummary, ContinuityWarning, FeedMode, FeedStatusResponse, LiveOrderBookSnapshot,
-    PriceLevelView, SessionStatus,
+    ActiveAssetSummary, BookUpdateMessage, ContinuityWarning, FeedMode, FeedStatusResponse,
+    LiveOrderBookSnapshot, PriceLevelView, SessionStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,14 +100,18 @@ impl LiveState {
         });
     }
 
-    fn materialize_all_pending(&mut self) {
+    fn materialize_all_pending(&mut self) -> Vec<String> {
         let keys: Vec<String> = self.pending_snapshots.keys().cloned().collect();
+        let mut materialized = Vec::new();
         for asset_id in keys {
-            self.materialize_pending_for_asset(&asset_id);
+            if self.materialize_pending_for_asset(&asset_id) {
+                materialized.push(asset_id);
+            }
         }
+        materialized
     }
 
-    fn materialize_pending_before_record(&mut self, record: &PersistedRecord) {
+    fn materialize_pending_before_record(&mut self, record: &PersistedRecord) -> Vec<String> {
         match record {
             PersistedRecord::Book(event) if event.kind == BookEventKind::Snapshot => {
                 let key = SnapshotGroupKey {
@@ -122,17 +126,21 @@ impl LiveState {
                     .filter(|(_, pending)| pending.key != key)
                     .map(|(asset_id, _)| asset_id.clone())
                     .collect();
+                let mut materialized = Vec::new();
                 for asset_id in stale_keys {
-                    self.materialize_pending_for_asset(&asset_id);
+                    if self.materialize_pending_for_asset(&asset_id) {
+                        materialized.push(asset_id);
+                    }
                 }
+                materialized
             }
             _ => self.materialize_all_pending(),
         }
     }
 
-    fn materialize_pending_for_asset(&mut self, asset_id: &str) {
+    fn materialize_pending_for_asset(&mut self, asset_id: &str) -> bool {
         let Some(pending) = self.pending_snapshots.remove(asset_id) else {
-            return;
+            return false;
         };
         let state = self.ensure_asset(asset_id);
         state.book.apply_snapshot(
@@ -144,6 +152,7 @@ impl LiveState {
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(pending.last_recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(pending.key.exchange_timestamp_us);
+        true
     }
 
     fn record_snapshot_event(&mut self, event: BookEvent) {
@@ -270,7 +279,6 @@ impl LiveReadModel {
         mut rx: mpsc::Receiver<PersistedRecord>,
         broadcast: crate::streaming::BookBroadcast,
         default_depth: usize,
-        stale_after_secs: u64,
         token: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let model = self.clone();
@@ -283,26 +291,15 @@ impl LiveReadModel {
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
-                                let is_book = matches!(&record, PersistedRecord::Book(_));
-                                let asset_id = match &record {
-                                    PersistedRecord::Book(e) => Some(e.asset_id.to_string()),
-                                    _ => None,
-                                };
-                                model.apply_record(record).await;
-                                if is_book && broadcast.has_subscribers() {
-                                    if let Some(asset_id) = asset_id {
-                                        if let Ok(snap) = model.snapshot(&asset_id, default_depth, stale_after_secs).await {
-                                            broadcast.send(crate::dto::BookUpdateMessage {
-                                                asset_id: snap.asset_id,
-                                                sequence: snap.sequence,
-                                                last_update_us: snap.last_update_us,
-                                                bids: snap.bids,
-                                                asks: snap.asks,
-                                                mid_price: snap.mid_price,
-                                                spread: snap.spread,
-                                            });
-                                        }
+                                if broadcast.has_subscribers() {
+                                    for update in model
+                                        .apply_record_and_build_updates(record, default_depth)
+                                        .await
+                                    {
+                                        broadcast.send(update);
                                     }
+                                } else {
+                                    model.apply_record(record).await;
                                 }
                             }
                             None => break,
@@ -314,19 +311,56 @@ impl LiveReadModel {
     }
 
     pub async fn apply_record(&self, record: PersistedRecord) {
+        let _ = self.apply_record_and_build_updates(record, 0).await;
+    }
+
+    pub async fn apply_record_and_build_updates(
+        &self,
+        record: PersistedRecord,
+        depth: usize,
+    ) -> Vec<BookUpdateMessage> {
         let mut state = self.inner.write().await;
-        state.materialize_pending_before_record(&record);
-        match record {
-            PersistedRecord::Book(event) => match event.kind {
-                BookEventKind::Snapshot => state.record_snapshot_event(event),
-                BookEventKind::Delta => state.record_delta_event(event),
-            },
-            PersistedRecord::Ingest(event) => state.record_ingest_event(event),
+        let materialized_assets = state.materialize_pending_before_record(&record);
+        let current_book_asset = match record {
+            PersistedRecord::Book(event) => {
+                let asset_id = event.asset_id.to_string();
+                match event.kind {
+                    BookEventKind::Snapshot => {
+                        state.record_snapshot_event(event);
+                        None
+                    }
+                    BookEventKind::Delta => {
+                        state.record_delta_event(event);
+                        Some(asset_id)
+                    }
+                }
+            }
+            PersistedRecord::Ingest(event) => {
+                state.record_ingest_event(event);
+                None
+            }
             PersistedRecord::Trade(_)
             | PersistedRecord::Checkpoint(_)
             | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => {}
+            | PersistedRecord::Execution(_) => None,
+        };
+
+        if depth == 0 {
+            return Vec::new();
         }
+
+        let mut updates = Vec::new();
+        for asset_id in materialized_assets {
+            if let Some(update) = state.materialized_book_update_message(&asset_id, depth) {
+                updates.push(update);
+            }
+        }
+        if let Some(asset_id) = current_book_asset {
+            if let Some(update) = state.materialized_book_update_message(&asset_id, depth) {
+                updates.push(update);
+            }
+        }
+        updates
     }
 
     pub async fn set_active_assets(&self, assets: Vec<String>) {
@@ -340,8 +374,7 @@ impl LiveReadModel {
     }
 
     pub async fn feed_status(&self) -> FeedStatusResponse {
-        let mut state = self.inner.write().await;
-        state.materialize_all_pending();
+        let state = self.inner.read().await;
         FeedStatusResponse {
             mode: state.mode,
             session_status: state.session_status,
@@ -355,8 +388,7 @@ impl LiveReadModel {
 
     pub async fn active_assets(&self, stale_after_secs: u64) -> Vec<ActiveAssetSummary> {
         let now_us = now_us();
-        let mut state = self.inner.write().await;
-        state.materialize_all_pending();
+        let state = self.inner.read().await;
         state
             .active_assets
             .iter()
@@ -392,49 +424,133 @@ impl LiveReadModel {
         stale_after_secs: u64,
     ) -> Result<LiveOrderBookSnapshot, SnapshotLookupError> {
         let now_us = now_us();
-        let mut state = self.inner.write().await;
-        state.materialize_all_pending();
-        if !state
+        let state = self.inner.read().await;
+        state.snapshot(asset_id, depth, stale_after_secs, now_us)
+    }
+}
+
+impl LiveState {
+    fn snapshot(
+        &self,
+        asset_id: &str,
+        depth: usize,
+        stale_after_secs: u64,
+        now_us: u64,
+    ) -> Result<LiveOrderBookSnapshot, SnapshotLookupError> {
+        if !self
             .active_assets
             .iter()
             .any(|candidate| candidate == asset_id)
         {
             return Err(SnapshotLookupError::AssetNotActive);
         }
-        let Some(asset_state) = state.assets.get(asset_id) else {
+
+        let asset_state = self.assets.get(asset_id);
+        if self.pending_snapshots.contains_key(asset_id) {
+            if let Some(asset_state) = asset_state.filter(|state| state.initialized_from_snapshot) {
+                return Ok(build_live_snapshot(
+                    asset_id,
+                    asset_state,
+                    depth,
+                    stale_after_secs,
+                    now_us,
+                ));
+            }
+            return Err(SnapshotLookupError::SnapshotNotReady);
+        }
+
+        let Some(asset_state) = asset_state else {
             return Err(SnapshotLookupError::SnapshotNotReady);
         };
         if !asset_state.initialized_from_snapshot {
             return Err(SnapshotLookupError::SnapshotNotReady);
         }
 
-        Ok(LiveOrderBookSnapshot {
-            asset_id: asset_id.to_string(),
-            sequence: asset_state.book.sequence.raw(),
-            last_update_us: asset_state.book.last_update_us,
-            best_bid: level_pair(asset_state.book.best_bid()),
-            best_ask: level_pair(asset_state.book.best_ask()),
-            mid_price: asset_state.book.mid_price(),
-            spread: asset_state.book.spread(),
-            bid_depth: asset_state.book.bid_depth(),
-            ask_depth: asset_state.book.ask_depth(),
-            bids: asset_state
-                .book
-                .bids_sorted()
-                .into_iter()
-                .take(depth)
-                .map(level_view)
-                .collect(),
-            asks: asset_state
-                .book
-                .asks_sorted()
-                .into_iter()
-                .take(depth)
-                .map(level_view)
-                .collect(),
-            stale: is_stale(asset_state.last_recv_timestamp_us, stale_after_secs, now_us),
-            latest_warning: asset_state.latest_warning.clone(),
-        })
+        Ok(build_live_snapshot(
+            asset_id,
+            asset_state,
+            depth,
+            stale_after_secs,
+            now_us,
+        ))
+    }
+
+    fn materialized_book_update_message(
+        &self,
+        asset_id: &str,
+        depth: usize,
+    ) -> Option<BookUpdateMessage> {
+        if depth == 0
+            || !self
+                .active_assets
+                .iter()
+                .any(|candidate| candidate == asset_id)
+        {
+            return None;
+        }
+
+        let asset_state = self.assets.get(asset_id)?;
+        if !asset_state.initialized_from_snapshot {
+            return None;
+        }
+
+        Some(build_book_update(asset_id, asset_state, depth))
+    }
+}
+
+fn build_live_snapshot(
+    asset_id: &str,
+    asset_state: &AssetState,
+    depth: usize,
+    stale_after_secs: u64,
+    now_us: u64,
+) -> LiveOrderBookSnapshot {
+    LiveOrderBookSnapshot {
+        asset_id: asset_id.to_string(),
+        sequence: asset_state.book.sequence.raw(),
+        last_update_us: asset_state.book.last_update_us,
+        best_bid: level_pair(asset_state.book.best_bid()),
+        best_ask: level_pair(asset_state.book.best_ask()),
+        mid_price: asset_state.book.mid_price(),
+        spread: asset_state.book.spread(),
+        bid_depth: asset_state.book.bid_depth(),
+        ask_depth: asset_state.book.ask_depth(),
+        bids: asset_state
+            .book
+            .top_bids(depth)
+            .into_iter()
+            .map(level_view)
+            .collect(),
+        asks: asset_state
+            .book
+            .top_asks(depth)
+            .into_iter()
+            .map(level_view)
+            .collect(),
+        stale: is_stale(asset_state.last_recv_timestamp_us, stale_after_secs, now_us),
+        latest_warning: asset_state.latest_warning.clone(),
+    }
+}
+
+fn build_book_update(asset_id: &str, asset_state: &AssetState, depth: usize) -> BookUpdateMessage {
+    BookUpdateMessage {
+        asset_id: asset_id.to_string(),
+        sequence: asset_state.book.sequence.raw(),
+        last_update_us: asset_state.book.last_update_us,
+        bids: asset_state
+            .book
+            .top_bids(depth)
+            .into_iter()
+            .map(level_view)
+            .collect(),
+        asks: asset_state
+            .book
+            .top_asks(depth)
+            .into_iter()
+            .map(level_view)
+            .collect(),
+        mid_price: asset_state.book.mid_price(),
+        spread: asset_state.book.spread(),
     }
 }
 
@@ -520,6 +636,47 @@ mod tests {
         assert_eq!(snapshot.bid_depth, 1);
         assert_eq!(snapshot.ask_depth, 1);
         assert_eq!(snapshot.sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_stays_not_ready_until_group_materializes() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        let first = model.snapshot("tok1", 5, 100).await.unwrap_err();
+        assert_eq!(first, SnapshotLookupError::SnapshotNotReady);
+
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+        let second = model.snapshot("tok1", 5, 100).await.unwrap_err();
+        assert_eq!(second, SnapshotLookupError::SnapshotNotReady);
+
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: Some("ws-session-1".to_string()),
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let third = model.snapshot("tok1", 5, 100).await.unwrap();
+        assert_eq!(third.bid_depth, 1);
+        assert_eq!(third.ask_depth, 1);
+        assert_eq!(third.sequence, 1);
     }
 
     #[tokio::test]

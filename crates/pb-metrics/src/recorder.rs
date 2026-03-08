@@ -42,6 +42,10 @@ pub fn register_metrics() {
         "pb_ws_latency_us",
         "WebSocket message latency (recv - exchange timestamp, microseconds)"
     );
+    describe_histogram!(
+        "pb_api_request_duration_ms",
+        "Time to serve an API request (milliseconds)"
+    );
 }
 
 pub fn record_message_received(event_type: &'static str) {
@@ -94,6 +98,16 @@ pub fn record_flush_duration_ms(duration_ms: f64) {
 
 pub fn record_ws_latency_us(latency_us: f64) {
     histogram!("pb_ws_latency_us").record(latency_us);
+}
+
+pub fn record_api_request_duration_ms(method: &str, route: &str, status: u16, duration_ms: f64) {
+    histogram!(
+        "pb_api_request_duration_ms",
+        "method" => method.to_string(),
+        "route" => route.to_string(),
+        "status" => status.to_string()
+    )
+    .record(duration_ms);
 }
 
 pub fn record_rotation() {

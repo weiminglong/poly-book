@@ -40,6 +40,15 @@ Then the response includes whether replay matched the reference checkpoint or sn
 And any mismatch summary is queryable for inspection
 ```
 
+### Scenario: Interactive replay uses a serving backend without redefining replay truth
+
+```
+Given the deployed workstation uses a serving-oriented backend for interactive replay queries
+When a user requests replay or integrity diagnostics
+Then the interactive response may be served from ClickHouse or an equivalent approved backend
+And the workstation still treats canonical stored replay data such as Parquet as the audit and validation truth source
+```
+
 ## Integrity Views
 
 ### Scenario: Best-effort windows are labeled explicitly
@@ -49,4 +58,13 @@ Given the replayed data contains one or more continuity boundaries
 When the workstation renders the replay or integrity view
 Then the response includes an explicit completeness indicator
 And the operator is not forced to infer replay confidence from logs or missing rows
+```
+
+### Scenario: Interactive replay windows are bounded for serving reliability
+
+```
+Given a replay or integrity request exceeds the configured interactive serving window
+When the workstation evaluates the request
+Then the server may reject the request as too large for interactive serving
+And the response explains that larger audit or research workflows must use an offline or non-interactive replay path
 ```

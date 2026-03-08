@@ -41,3 +41,12 @@ When query execution is configured
 Then local or development workflows may use DuckDB over Parquet
 And deployed interactive workflows use an approved serving backend such as ClickHouse
 ```
+
+### Scenario: Query serving is decoupled from archival file scans
+
+```
+Given a deployed workstation serves concurrent operator and research queries
+When an approved interactive SQL request is executed
+Then the normal interactive path uses a serving-oriented backend rather than direct archival file scans
+And archival datasets remain available for audit, recovery, or local development workflows without becoming the primary deployed query path
+```
