@@ -24,13 +24,17 @@ Deferred UI surfaces:
 
 ## Local development
 
+The workstation SPA requires Node `22.12.0` or newer. Use the checked-in
+[`web/.nvmrc`](./.nvmrc) as the source of truth for local and CI runs.
+
 ```bash
 # from the repo root
 cargo run -- serve-api --auto-rotate
 
 # in another terminal
 cd web
-npm install
+nvm use
+npm ci
 npm run dev
 ```
 
@@ -59,7 +63,9 @@ active asset summaries still use adaptive foreground/background polling.
 ## Validation
 
 ```bash
+nvm use
 npm run lint
+npx tsc -b
 npm run test
 npm run build
 ```

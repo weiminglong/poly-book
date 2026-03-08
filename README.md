@@ -136,7 +136,8 @@ Parquet-backed replay reconstruction.
 
 ```bash
 cd web
-npm install
+nvm use
+npm ci
 npm run dev
 ```
 
@@ -145,7 +146,9 @@ By default the Vite dev server runs on `:4173` and proxies `/api` requests to
 --auto-rotate`. The shipped SPA currently includes only `Live Feed` and
 `Replay Lab`; the other planned workstation surfaces remain deferred. Append
 `?source=demo` to the URL or use the in-app toggle to review seeded sample data
-without a running backend.
+without a running backend. The SPA uses a newer Node runtime than the Rust-only
+workspace commands; see [`web/README.md`](web/README.md) for the exact supported
+version and validation flow.
 
 ### Replay execution history
 
