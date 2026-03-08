@@ -192,18 +192,18 @@ Port defaults:
 
 Current `serve-api` scope:
 
-- read-only HTTP API
+- read-only HTTP and WebSocket API
 - live feed status and active asset visibility
-- live in-memory order book snapshots
+- live in-memory order book snapshots and streaming updates
 - Parquet-backed replay reconstruction
+- Parquet-backed integrity summaries
+- Parquet-backed execution timeline inspection
 
 Current `serve-api` does not yet provide:
 
 - ClickHouse-backed API reads
-- integrity summary endpoints
-- execution timeline endpoints
 - SQL workbench endpoints
-- WebSocket order book streaming
+- latency summary endpoints
 
 The existing Docker and ECS deployment remains ingestion-oriented today. The
 workstation API is not yet part of that production deployment flow.

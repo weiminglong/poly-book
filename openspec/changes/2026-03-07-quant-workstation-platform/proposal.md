@@ -29,9 +29,10 @@ top quant firms care about:
 
 - Add a frontend-serving platform based on a Rust API layer plus a separate web
   application.
-- Define the initial product as a read-only workstation for live feed health,
-  replay, integrity, latency, execution-state inspection, and safe ad hoc
-  queries.
+- Define the initial shipped product as a read-only workstation for live feed
+  health, replay, integrity, and execution-state inspection, while keeping
+  latency summaries and safe ad hoc queries as explicitly deferred follow-on
+  surfaces.
 - Keep the current repository honest about scope: v1 does not claim live order
   routing, authentication, or risk controls.
 - Define future capability specs for live trading, backtesting, and strategy

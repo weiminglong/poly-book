@@ -12,8 +12,10 @@ The first shipped version is intentionally read-only. It is meant to answer:
 - what is happening on the live feed right now
 - whether the data is continuous and trustworthy
 - how replay behaves under different time semantics
-- where latency is being spent
 - what happened to locally recorded orders and fills
+
+Latency summaries and ad hoc query work are planned next surfaces, not part of
+the current shipped v1 boundary.
 
 ## Topology
 
@@ -232,6 +234,9 @@ surface. The current shipped routes are:
 - `GET /api/v1/assets/active`
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
+- `GET /api/v1/integrity/summary`
+- `GET /api/v1/execution/orders`
+- `WS /api/v1/streams/orderbook?asset_id=...`
 
 Current backend constraints:
 
@@ -242,18 +247,19 @@ Current backend constraints:
 Current shipped frontend boundary:
 
 - separate TypeScript SPA
-- Live Feed and Replay Lab routes only
-- adaptive HTTP polling for live views until streaming lands
+- Live Feed, Replay Lab, Integrity, and Execution Timeline routes
+- WebSocket order book streaming for live book views, with adaptive HTTP
+  polling fallback
 - lazy-loaded route bundles for current shipped surfaces
 - seeded demo mode for offline review and screenshots
-- no shipped Integrity, Latency, Execution Timeline, or Query Workbench UI yet
+- no shipped Latency or Query Workbench UI yet
 
 The following planned surfaces remain deferred:
 
-- `GET /api/v1/integrity/summary`
-- execution timeline routes
+- `GET /api/v1/latency/summary`
 - SQL workbench routes
-- WebSocket order book streaming
+- Latency UI
+- Query Workbench UI
 - ClickHouse-backed API reads
 
 ## Future Clean-Slate Runtime Boundary

@@ -26,7 +26,7 @@
 - [x] Add stable response types for feed status, live book, and replay results
 - [x] Add stable response types for integrity, latency, execution, and query results
 - [x] Add API tests for current route contracts and replay semantics
-- [x] Add API tests for deferred integrity, execution, query, and streaming routes
+- [x] Add API tests for integrity, execution, and streaming routes
 
 ## Phase 4: Web Application Implementation
 
@@ -54,7 +54,13 @@
 
 ---
 
-## Implementation Plan for Remaining Tasks
+## Historical Phase 3-5 Implementation Plan
+
+The detailed step plan below captures the implementation order used for the
+Phase 3-5 workstation rollout. The checklist sections above are the source of
+truth for what has shipped; the remaining open work is query adapters, latency
+and query surfaces, ClickHouse-backed reads, and the Phase 6 clean-slate
+serving split.
 
 ### Dependency graph
 
@@ -471,7 +477,7 @@ tests in step 7.
 
 ---
 
-### Step 7: Add API tests for deferred integrity, execution, query, and streaming routes
+### Step 7: Add API tests for integrity, execution, query, and streaming routes
 
 **Phase**: 3  
 **Depends on**: steps 3, 5, 6  

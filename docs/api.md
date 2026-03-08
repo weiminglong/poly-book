@@ -9,7 +9,14 @@ The current API is intentionally narrow. It is meant to support the first
 backend slice of the workstation and may evolve as later phases add integrity,
 execution, query, and frontend capabilities.
 
-The current SPA consumes only these routes for `Live Feed` and `Replay Lab`.
+The current SPA consumes these shipped surfaces:
+
+- `Live Feed`
+- `Replay Lab`
+- `Integrity`
+- `Execution Timeline`
+
+Latency and Query Workbench surfaces remain deferred.
 
 ## Encoding Notes
 
