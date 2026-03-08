@@ -60,7 +60,7 @@ these in order:
 
 If you are changing replay, storage, or integrity semantics, also read:
 
-1. `openspec/changes/2026-03-06-market-data-upgrades/`
+1. `openspec/changes/archive/2026-03-06-market-data-upgrades/`
 2. `docs/operations.md`
 
 ## Persisting Design Decisions
