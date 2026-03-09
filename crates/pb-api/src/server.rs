@@ -6,11 +6,11 @@ use axum::extract::{MatchedPath, Path, Query, State};
 use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use pb_service::{
-    AnyExecutionService, AnyIntegrityService, AnyReplayService, ExecutionService,
-    IntegrityService, ReplayService,
+    AnyExecutionService, AnyIntegrityService, AnyQueryService, AnyReplayService,
+    ExecutionService, IntegrityService, QueryService, ReplayService,
 };
 use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
@@ -18,9 +18,10 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    AssetRef, AssetResolveResponse, CompletenessLabel, ContinuityWarning, ExecutionEventView,
-    ExecutionTimelineResponse, FeedStatusResponse, IntegritySummaryResponse, LatencyTraceView,
-    LiveOrderBookSnapshot, ReplayReconstructionResponse,
+    AssetRef, AssetResolveResponse, CompletenessLabel, ContinuityWarning, DatasetInfo,
+    DatasetSchemaResponse, ExecutionEventView, ExecutionTimelineResponse, FeedStatusResponse,
+    IntegritySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot, QueryColumn,
+    QueryResultResponse, ReplayReconstructionResponse,
 };
 use crate::error::ApiError;
 use crate::live_state::{LiveReadModel, SnapshotLookupError};
@@ -31,6 +32,8 @@ pub struct ApiConfig {
     pub default_depth: usize,
     pub max_depth: usize,
     pub stale_after_secs: u64,
+    pub query_max_rows: usize,
+    pub query_timeout_secs: u64,
 }
 
 #[derive(Clone)]
@@ -42,6 +45,7 @@ pub struct AppState {
     pub replay_service: AnyReplayService,
     pub integrity_service: AnyIntegrityService,
     pub execution_service: AnyExecutionService,
+    pub query_service: Option<AnyQueryService>,
     /// WAL consumer lag in bytes, updated by the WAL tailer.
     pub wal_lag_bytes: Arc<AtomicU64>,
     /// Whether the WAL reader detected a segment gap and needs re-hydration.
@@ -83,6 +87,12 @@ struct ResolveQuery {
     q: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct QuerySqlRequest {
+    sql: String,
+    max_rows: Option<usize>,
+}
+
 /// Resolve a slug or token ID to the canonical token ID string.
 /// If the input matches a registered slug, returns the mapped token ID.
 /// Otherwise, passes the input through unchanged (it may be a raw token ID).
@@ -114,6 +124,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/assets/resolve", get(asset_resolve))
         .route("/api/v1/integrity/summary", get(integrity_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
+        .route("/api/v1/query/datasets", get(query_datasets))
+        .route("/api/v1/query/sql", post(query_sql))
         .route(
             "/api/v1/streams/orderbook",
             any(crate::streaming::ws_orderbook),
@@ -386,6 +398,63 @@ fn execution_event_view(event: pb_types::ExecutionEvent) -> ExecutionEventView {
     }
 }
 
+async fn query_datasets(
+    State(state): State<AppState>,
+) -> Result<Json<DatasetSchemaResponse>, ApiError> {
+    let service = state.query_service.as_ref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
+    })?;
+    let datasets = service.list_datasets().await?;
+    Ok(Json(DatasetSchemaResponse {
+        datasets: datasets
+            .into_iter()
+            .map(|d| DatasetInfo {
+                name: d.name,
+                description: d.description,
+                columns: d
+                    .columns
+                    .into_iter()
+                    .map(|c| QueryColumn {
+                        name: c.name,
+                        data_type: c.data_type,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }))
+}
+
+async fn query_sql(
+    State(state): State<AppState>,
+    Json(req): Json<QuerySqlRequest>,
+) -> Result<Json<QueryResultResponse>, ApiError> {
+    let service = state.query_service.as_ref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
+    })?;
+
+    let guard = pb_service::QueryGuard {
+        max_rows: req.max_rows.unwrap_or(state.config.query_max_rows),
+        timeout_secs: state.config.query_timeout_secs,
+    };
+
+    let result = service.execute_sql(&req.sql, &guard).await?;
+
+    Ok(Json(QueryResultResponse {
+        columns: result
+            .columns
+            .into_iter()
+            .map(|c| QueryColumn {
+                name: c.name,
+                data_type: c.data_type,
+            })
+            .collect(),
+        rows: result.rows,
+        row_count: result.row_count as u64,
+        truncated: result.truncated,
+        execution_time_ms: result.execution_time_ms,
+    }))
+}
+
 fn validate_depth(depth: usize, max_depth: usize) -> Result<usize, ApiError> {
     if depth == 0 {
         return Err(ApiError::BadRequest(
@@ -472,6 +541,8 @@ mod tests {
                 default_depth: 20,
                 max_depth: 200,
                 stale_after_secs: 60,
+                query_max_rows: 10_000,
+                query_timeout_secs: 30,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
@@ -484,6 +555,7 @@ mod tests {
             execution_service: AnyExecutionService::Parquet(
                 pb_service::ParquetExecutionService::new(&temp_path),
             ),
+            query_service: None,
             wal_lag_bytes: Arc::new(AtomicU64::new(0)),
             needs_resync: Arc::new(AtomicBool::new(false)),
         }

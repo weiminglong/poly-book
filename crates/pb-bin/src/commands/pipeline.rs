@@ -271,6 +271,55 @@ pub async fn build_services(
     )
 }
 
+/// Build the query service from config.
+///
+/// Returns `None` if `api.query_workbench_enabled` is not set to `true`.
+pub async fn build_query_service(
+    settings: &Config,
+) -> Option<pb_service::AnyQueryService> {
+    let enabled = settings
+        .get_bool("api.query_workbench_enabled")
+        .unwrap_or(false);
+    if !enabled {
+        tracing::info!("query workbench disabled");
+        return None;
+    }
+
+    let backend = settings
+        .get_string("api.historical_backend")
+        .unwrap_or_else(|_| "parquet".to_string());
+
+    match backend.as_str() {
+        "clickhouse" => {
+            let ch_url = settings
+                .get_string("storage.clickhouse_url")
+                .unwrap_or_else(|_| "http://localhost:8123".to_string());
+            let ch_db = settings
+                .get_string("storage.clickhouse_database")
+                .unwrap_or_else(|_| "poly_book".to_string());
+            tracing::info!(url = %ch_url, database = %ch_db, "query workbench enabled (ClickHouse)");
+            Some(pb_service::AnyQueryService::ClickHouse(
+                pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
+            ))
+        }
+        _ => {
+            tracing::warn!("query workbench requires clickhouse backend, currently using {backend}");
+            None
+        }
+    }
+}
+
+/// Read query guard settings from config.
+pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
+    let max_rows = settings
+        .get_int("api.query_max_rows")
+        .unwrap_or(10_000) as usize;
+    let timeout_secs = settings
+        .get_int("api.query_timeout_secs")
+        .unwrap_or(30) as u64;
+    (max_rows, timeout_secs)
+}
+
 pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
     let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
     let addr: SocketAddr = settings

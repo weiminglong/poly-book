@@ -69,7 +69,7 @@ these in order:
 1. `docs/serve-api.md` — current runtime purpose, constraints, and deferred scope
 2. `docs/api.md` — current route contract and error semantics
 3. `docs/operations.md` — config, ports, and local run commands
-4. `openspec/changes/2026-03-07-quant-workstation-platform/` — source of truth for current workstation scope and future module boundaries
+4. `openspec/changes/archive/2026-03-07-quant-workstation-platform/` — archived workstation scope and future module boundaries
 
 If you are changing replay, storage, or integrity semantics, also read:
 
@@ -85,7 +85,7 @@ When you change the workstation/API/runtime scope:
 - update `docs/api.md` for route shape and error semantics
 - update `docs/operations.md` for commands, config, and ports
 - update `README.md` if contributor discovery changes
-- update the active OpenSpec change under `openspec/changes/2026-03-07-quant-workstation-platform/`
+- update the archived OpenSpec change under `openspec/changes/archive/2026-03-07-quant-workstation-platform/` if scope boundaries change
 
 When you implement only part of a planned capability, explicitly document what
 shipped and what remains deferred. Keep the docs and OpenSpec honest about
@@ -109,11 +109,12 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/integrity/summary`
   - `GET /api/v1/execution/orders`
   - `GET /api/v1/health`
+  - `GET /api/v1/query/datasets`
+  - `POST /api/v1/query/sql`
   - `WS /api/v1/streams/orderbook?asset_id=...`
 
 Deferred for later phases:
 
-- SQL workbench routes
 - latency summary routes
 - frontend SPA implementation
 
@@ -130,6 +131,6 @@ Spec-driven development artifacts live under `openspec/changes/`.
 - Archived changes live under `openspec/changes/archive/`
 - Each change has: `proposal.md`, `design.md`, `specs/*/spec.md`, `tasks.md`
 
-For workstation work, prefer the active change
-`openspec/changes/2026-03-07-quant-workstation-platform/` rather than only the
-archive.
+For workstation work, refer to the archived change
+`openspec/changes/archive/2026-03-07-quant-workstation-platform/` for scope and
+module boundary definitions.
