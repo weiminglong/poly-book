@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use config::Config;
@@ -66,6 +68,12 @@ pub async fn run(
         "serve runtime hydration complete"
     );
 
+    // Health tracking atomics shared between WAL tailer and API.
+    let wal_lag_bytes = Arc::new(AtomicU64::new(0));
+    let needs_resync = Arc::new(AtomicBool::new(false));
+
+    let max_consumer_lag = wal_config.max_consumer_lag_bytes;
+
     // Start tailing WAL for new records (live tail).
     let wal_tail_handle = spawn_wal_tailer(
         wal_config,
@@ -73,11 +81,33 @@ pub async fn run(
         broadcast.clone(),
         default_depth,
         shutdown.child_token(),
+        wal_lag_bytes.clone(),
+        needs_resync.clone(),
+        max_consumer_lag,
     );
 
     // Build and start HTTP/WS server.
     let (replay_service, integrity_service, execution_service) =
         pipeline::build_services(&settings).await;
+
+    // Optionally start gRPC server.
+    let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
+    let grpc_handle = if grpc_enabled {
+        Some(
+            pb_grpc::start_grpc_server(
+                grpc_addr,
+                replay_service.clone(),
+                integrity_service.clone(),
+                execution_service.clone(),
+                shutdown.child_token(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        )
+    } else {
+        None
+    };
+
     let state = pb_api::AppState {
         live,
         config: pb_api::ApiConfig {
@@ -91,24 +121,34 @@ pub async fn run(
         replay_service,
         integrity_service,
         execution_service,
+        wal_lag_bytes,
+        needs_resync,
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "serve runtime API server bound");
 
     let serve_result = pb_api::serve(listener, state, shutdown.child_token()).await;
-    pipeline::shutdown_handles(vec![wal_tail_handle], "wal tailer").await;
+    let mut handles = vec![wal_tail_handle];
+    if let Some(h) = grpc_handle {
+        handles.push(h);
+    }
+    pipeline::shutdown_handles(handles, "serve task").await;
     serve_result?;
     Ok(())
 }
 
 /// Spawn a background task that continuously tails the WAL for new records
-/// and feeds them through the projector.
+/// and feeds them through the projector. Updates health atomics for the
+/// `/health` endpoint.
 fn spawn_wal_tailer(
     config: pb_wal::WalConfig,
     live: pb_api::LiveReadModel,
     _broadcast: pb_api::PerAssetBroadcast,
     _default_depth: usize,
     shutdown: CancellationToken,
+    lag_bytes_atomic: Arc<AtomicU64>,
+    needs_resync_atomic: Arc<AtomicBool>,
+    max_consumer_lag_bytes: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = match pb_wal::WalReader::open(config, "serve-live") {
@@ -124,6 +164,25 @@ fn spawn_wal_tailer(
         loop {
             if shutdown.is_cancelled() {
                 break;
+            }
+
+            // Check for segment gap (pruned segments).
+            if reader.needs_resync() {
+                tracing::warn!("WAL segment gap detected, triggering re-hydration");
+                needs_resync_atomic.store(true, Ordering::Relaxed);
+                break;
+            }
+
+            // Update lag tracking.
+            if let Some(lag) = reader.lag_bytes() {
+                lag_bytes_atomic.store(lag, Ordering::Relaxed);
+                if lag > max_consumer_lag_bytes {
+                    tracing::warn!(
+                        lag_bytes = lag,
+                        threshold = max_consumer_lag_bytes,
+                        "WAL consumer lag exceeds threshold"
+                    );
+                }
             }
 
             match reader.next() {

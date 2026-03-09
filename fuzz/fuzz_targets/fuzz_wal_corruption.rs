@@ -24,6 +24,7 @@ fuzz_target!(|input: FuzzInput| {
         base_path: dir.path().to_path_buf(),
         segment_size: 4096,
         max_segments: 8,
+        ..WalConfig::default()
     };
 
     // Write records.

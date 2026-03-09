@@ -25,6 +25,13 @@ pub enum WalError {
 
     #[error("codec error: {0}")]
     Codec(String),
+
+    #[error("segment gap: consumer {consumer} at segment {committed_segment} but earliest available is {earliest_available}")]
+    SegmentGap {
+        consumer: String,
+        committed_segment: u64,
+        earliest_available: u64,
+    },
 }
 
 impl WalError {

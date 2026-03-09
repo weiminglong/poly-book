@@ -26,6 +26,9 @@ pub struct WalConfig {
     /// when this limit is exceeded and all consumers have advanced past them.
     /// Default: 16.
     pub max_segments: usize,
+    /// Maximum allowed consumer lag in bytes before pruning is paused.
+    /// Default: 256 MB.
+    pub max_consumer_lag_bytes: u64,
 }
 
 impl Default for WalConfig {
@@ -34,6 +37,7 @@ impl Default for WalConfig {
             base_path: std::path::PathBuf::from("./data/wal"),
             segment_size: 64 * 1024 * 1024, // 64 MB
             max_segments: 16,
+            max_consumer_lag_bytes: 256 * 1024 * 1024, // 256 MB
         }
     }
 }
@@ -61,6 +65,7 @@ mod tests {
             base_path: dir.path().to_path_buf(),
             segment_size: 4096,
             max_segments: 4,
+            ..WalConfig::default()
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -91,6 +96,7 @@ mod tests {
             // Tiny segments to force rotation.
             segment_size: 128,
             max_segments: 8,
+            ..WalConfig::default()
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -135,6 +141,7 @@ mod tests {
             base_path: dir.path().to_path_buf(),
             segment_size: 4096,
             max_segments: 4,
+            ..WalConfig::default()
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -185,6 +192,7 @@ mod tests {
             base_path: dir.path().to_path_buf(),
             segment_size: 4096,
             max_segments: 4,
+            ..WalConfig::default()
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -226,6 +234,7 @@ mod tests {
             // Tiny segments — each record gets its own segment.
             segment_size: 64,
             max_segments: 100,
+            ..WalConfig::default()
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -265,6 +274,122 @@ mod tests {
             .count()
     }
 
+    #[test]
+    fn gap_detection_after_pruning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 64,
+            max_segments: 100,
+            max_consumer_lag_bytes: 0,
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for i in 0..10 {
+            writer.append(format!("rec-{i}").as_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+
+        // Consumer A reads all records and commits.
+        let mut reader_a = WalReader::open(config.clone(), "consumer-a").unwrap();
+        while reader_a.next().unwrap().is_some() {}
+        reader_a.commit_position().unwrap();
+
+        // Consumer B reads only the first record and commits (at segment 0).
+        let mut reader_b = WalReader::open(config.clone(), "consumer-b").unwrap();
+        let _ = reader_b.next().unwrap();
+        reader_b.commit_position().unwrap();
+        let (b_seg, _) = reader_b.position();
+
+        // Prune old segments (only consumer-a is passed, so segments B
+        // still references will be pruned).
+        writer
+            .prune(&[dir.path().join("consumer_consumer-a.pos")])
+            .unwrap();
+
+        // Verify that segments before consumer A's position were actually pruned.
+        let remaining = segment::list_segment_ids(dir.path()).unwrap();
+        let earliest_remaining = *remaining.first().unwrap();
+        assert!(
+            earliest_remaining > b_seg,
+            "expected pruning to remove segment {b_seg}, earliest remaining is {earliest_remaining}"
+        );
+
+        // Re-open consumer B from its saved position — it should detect a gap.
+        let reader_b2 = WalReader::open(config, "consumer-b").unwrap();
+        assert!(
+            reader_b2.needs_resync(),
+            "consumer with stale position should detect segment gap after pruning"
+        );
+    }
+
+    #[test]
+    fn lag_bytes_calculation() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            max_consumer_lag_bytes: 256 * 1024 * 1024,
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for i in 0..5 {
+            writer.append(format!("payload-{i}").as_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+
+        let mut reader = WalReader::open(config, "lag-consumer").unwrap();
+
+        // Before reading, lag should be positive.
+        let initial_lag = reader.lag_bytes().unwrap();
+        assert!(initial_lag > 0, "expected positive lag before reading");
+
+        // Read all records.
+        while reader.next().unwrap().is_some() {}
+
+        // After reading all, lag should be 0.
+        let final_lag = reader.lag_bytes().unwrap();
+        assert_eq!(final_lag, 0, "expected zero lag after reading all records");
+    }
+
+    #[test]
+    fn prune_respects_backpressure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 64,
+            max_segments: 100,
+            // Set a very large retention window so no segments are pruned.
+            max_consumer_lag_bytes: 1024 * 1024,
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for i in 0..10 {
+            writer.append(format!("rec-{i}").as_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+
+        let initial_segments = count_wal_files(dir.path());
+        assert!(initial_segments > 1);
+
+        // Consumer reads all records and commits.
+        let mut reader = WalReader::open(config.clone(), "bp-consumer").unwrap();
+        while reader.next().unwrap().is_some() {}
+        reader.commit_position().unwrap();
+
+        // Prune with backpressure — large retention window should keep all segments.
+        writer
+            .prune_with_backpressure(&[dir.path().join("consumer_bp-consumer.pos")])
+            .unwrap();
+
+        let after_prune = count_wal_files(dir.path());
+        assert_eq!(
+            after_prune, initial_segments,
+            "backpressure should retain all segments within retention window"
+        );
+    }
+
     mod proptests {
         use proptest::prelude::*;
 
@@ -283,6 +408,7 @@ mod tests {
                     base_path: dir.path().to_path_buf(),
                     segment_size: 256,
                     max_segments: 64,
+                    ..WalConfig::default()
                 };
 
                 let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -309,6 +435,7 @@ mod tests {
                     // Tiny segments to force rotation on every few records.
                     segment_size: 64,
                     max_segments: 100,
+                    ..WalConfig::default()
                 };
 
                 let mut writer = WalWriter::open(config.clone()).unwrap();

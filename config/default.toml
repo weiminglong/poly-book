@@ -27,6 +27,7 @@ endpoint = "/metrics"
 base_path = "./data/wal"
 segment_size_mb = 64
 max_segments = 16
+max_consumer_lag_bytes = 268435456  # 256 MB
 
 [api]
 listen_addr = "0.0.0.0:3000"
@@ -35,6 +36,10 @@ max_depth = 200
 stale_after_secs = 15
 # Backend for historical queries: "parquet" or "clickhouse"
 historical_backend = "parquet"
+
+[grpc]
+enabled = false
+listen_addr = "0.0.0.0:50051"
 
 [logging]
 level = "info"

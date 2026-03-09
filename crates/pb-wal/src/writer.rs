@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::WalError;
 use crate::segment::{self, Segment};
@@ -86,6 +86,64 @@ impl WalWriter {
                         .map_err(|e| WalError::io(&path, e))?;
                     info!(segment_id = id, "pruned WAL segment");
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Prune with backpressure: retains at least `max_consumer_lag_bytes` worth
+    /// of segments even if all consumers have advanced past them, so that new
+    /// replicas have a window to hydrate before segments disappear.
+    pub fn prune_with_backpressure(
+        &self,
+        consumer_position_files: &[std::path::PathBuf],
+    ) -> Result<(), WalError> {
+        let min_consumed = self.min_consumer_segment(consumer_position_files)?;
+        let ids = segment::list_segment_ids(&self.config.base_path)?;
+
+        // Calculate cumulative size of segments from the writer head backwards
+        // to determine which segments fall within the retention window.
+        let mut retained_bytes: u64 = 0;
+        let mut retention_cutoff_id: u64 = self.active.id;
+
+        for &id in ids.iter().rev() {
+            if id >= self.active.id {
+                continue;
+            }
+            let path = segment::segment_path(&self.config.base_path, id);
+            let file_size = std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            retained_bytes += file_size;
+            if retained_bytes <= self.config.max_consumer_lag_bytes {
+                retention_cutoff_id = id;
+            } else {
+                break;
+            }
+        }
+
+        for &id in &ids {
+            if id >= self.active.id {
+                continue;
+            }
+            // Keep segments within the retention window.
+            if id >= retention_cutoff_id {
+                continue;
+            }
+            // Only prune segments fully consumed by all consumers.
+            if id < min_consumed {
+                let path = segment::segment_path(&self.config.base_path, id);
+                if path.exists() {
+                    std::fs::remove_file(&path)
+                        .map_err(|e| WalError::io(&path, e))?;
+                    info!(segment_id = id, "pruned WAL segment (backpressure-aware)");
+                }
+            } else {
+                warn!(
+                    segment_id = id,
+                    min_consumed,
+                    "skipping prune: consumer has not advanced past segment"
+                );
             }
         }
         Ok(())

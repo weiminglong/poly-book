@@ -150,9 +150,42 @@ The current implementation exposes:
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`
 - `GET /api/v1/execution/orders`
+- `GET /api/v1/health`
 - `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
+
+### gRPC Surface
+
+When `grpc.enabled = true`, the `serve` and `serve-api` processes also start a
+gRPC server (default `0.0.0.0:50051`) exposing the same historical query
+services via the `WorkstationService`:
+
+- `Reconstruct` — replay book reconstruction at a target timestamp
+- `IntegritySummary` — integrity check results for an asset time window
+- `ExecutionTimeline` — execution event timeline for an order
+
+The gRPC service delegates to the same `pb-service` traits used by the HTTP
+routes, so backend selection (`parquet` / `clickhouse`) applies equally.
+
+### Health Endpoint
+
+`GET /api/v1/health` returns operational status for the serve process:
+
+```json
+{
+  "ready": true,
+  "hydrated": true,
+  "wal_lag_bytes": 0,
+  "needs_resync": false
+}
+```
+
+- `ready` — true when hydration is complete and the read model is serving
+- `hydrated` — true after checkpoint + WAL replay finishes
+- `wal_lag_bytes` — byte distance between WAL reader position and latest data
+- `needs_resync` — true if the WAL reader's committed segment has been pruned
+  (requires a fresh checkpoint hydration to recover)
 
 ## Current Browser Client
 
@@ -183,3 +216,4 @@ The following are intentionally not part of the current serving runtime:
 
 - SQL workbench routes
 - latency summary routes
+- multi-replica WAL fan-out (single reader is sufficient for current scale)

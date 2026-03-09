@@ -154,10 +154,14 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
         .unwrap_or_else(|_| "./data/wal".to_string());
     let segment_size_mb = settings.get_int("wal.segment_size_mb").unwrap_or(64) as u64;
     let max_segments = settings.get_int("wal.max_segments").unwrap_or(16) as usize;
+    let max_consumer_lag_bytes = settings
+        .get_int("wal.max_consumer_lag_bytes")
+        .unwrap_or(256 * 1024 * 1024) as u64;
     pb_wal::WalConfig {
         base_path: std::path::PathBuf::from(base_path),
         segment_size: segment_size_mb * 1024 * 1024,
         max_segments,
+        max_consumer_lag_bytes,
     }
 }
 
@@ -265,6 +269,16 @@ pub async fn build_services(
             pb_service::ParquetExecutionService::new(&parquet_base_path),
         ),
     )
+}
+
+pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
+    let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
+    let addr: SocketAddr = settings
+        .get_string("grpc.listen_addr")
+        .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
+    (enabled, addr)
 }
 
 pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {

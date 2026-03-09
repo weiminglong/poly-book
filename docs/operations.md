@@ -50,6 +50,11 @@ historical_backend = "parquet"  # or "clickhouse"
 base_path = "./data/wal"
 segment_size_mb = 64
 max_segments = 16
+max_consumer_lag_bytes = 268435456  # 256 MB
+
+[grpc]
+enabled = false
+listen_addr = "0.0.0.0:50051"
 
 [logging]
 level = "info"
@@ -232,18 +237,47 @@ PB__API__HISTORICAL_BACKEND=clickhouse cargo run -- serve-api --auto-rotate
 If ClickHouse is configured but unreachable at startup, the system falls back to
 Parquet with a warning.
 
+### gRPC Surface
+
+Enable the gRPC read surface for programmatic access to historical queries:
+
+```bash
+PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
+```
+
+The gRPC server listens on `0.0.0.0:50051` by default and exposes `Reconstruct`,
+`IntegritySummary`, and `ExecutionTimeline` RPCs via the `WorkstationService`.
+
+### Health Endpoint
+
+The `serve` process exposes `GET /api/v1/health` for liveness and readiness
+checks:
+
+```bash
+curl http://localhost:3000/api/v1/health
+# {"ready":true,"hydrated":true,"wal_lag_bytes":0,"needs_resync":false}
+```
+
+Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
+and requires a fresh checkpoint hydration.
+
 ### Port Defaults
 
-- API: `3000`
-- Metrics: `9090`
+| Service | Port  |
+|---------|-------|
+| API     | 3000  |
+| Metrics | 9090  |
+| gRPC    | 50051 |
 
 ### Current Scope
 
-- read-only HTTP and WebSocket API
+- read-only HTTP, WebSocket, and gRPC API
 - live feed status and active asset visibility
 - live in-memory order book snapshots and per-asset WS streaming
 - configurable Parquet or ClickHouse historical backend
 - replay reconstruction, integrity summaries, execution timeline inspection
+- WAL gap detection, lag tracking, and backpressure-aware pruning
+- health endpoint with hydration and WAL status
 
 ### Not Yet Provided
 

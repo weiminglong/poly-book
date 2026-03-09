@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Path, Query, State};
@@ -40,6 +42,10 @@ pub struct AppState {
     pub replay_service: AnyReplayService,
     pub integrity_service: AnyIntegrityService,
     pub execution_service: AnyExecutionService,
+    /// WAL consumer lag in bytes, updated by the WAL tailer.
+    pub wal_lag_bytes: Arc<AtomicU64>,
+    /// Whether the WAL reader detected a segment gap and needs re-hydration.
+    pub needs_resync: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,14 +134,16 @@ pub async fn serve(
         .await
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    if state.live.is_hydrated() {
-        Ok(Json(serde_json::json!({"status": "ok"})))
-    } else {
-        Err(ApiError::ServiceUnavailable(
-            "hydration in progress".to_string(),
-        ))
-    }
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let hydrated = state.live.is_hydrated();
+    let wal_lag = state.wal_lag_bytes.load(Ordering::Relaxed);
+    let needs_resync = state.needs_resync.load(Ordering::Relaxed);
+    Json(serde_json::json!({
+        "ready": hydrated && !needs_resync,
+        "hydrated": hydrated,
+        "wal_lag_bytes": wal_lag,
+        "needs_resync": needs_resync,
+    }))
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
@@ -476,6 +484,8 @@ mod tests {
             execution_service: AnyExecutionService::Parquet(
                 pb_service::ParquetExecutionService::new(&temp_path),
             ),
+            wal_lag_bytes: Arc::new(AtomicU64::new(0)),
+            needs_resync: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1173,5 +1183,54 @@ mod tests {
         let result: crate::dto::AssetResolveResponse = response_json(response).await;
         assert!(!result.found);
         assert!(result.asset_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_status() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["hydrated"], true);
+        assert_eq!(body["wal_lag_bytes"], 0);
+        assert_eq!(body["needs_resync"], false);
+    }
+
+    #[tokio::test]
+    async fn health_reports_not_ready_when_resync_needed() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state
+            .needs_resync
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["needs_resync"], true);
     }
 }

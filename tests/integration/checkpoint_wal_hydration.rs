@@ -81,6 +81,7 @@ async fn hydrate_from_checkpoint_and_wal() {
         base_path: wal_path.clone(),
         segment_size: 4096,
         max_segments: 4,
+        ..pb_wal::WalConfig::default()
     };
     let mut wal_writer = pb_wal::WalWriter::open(wal_config).unwrap();
 
@@ -189,6 +190,7 @@ async fn hydrate_with_no_checkpoint_tails_wal_from_beginning() {
         base_path: wal_path.clone(),
         segment_size: 4096,
         max_segments: 4,
+        ..pb_wal::WalConfig::default()
     };
     let mut wal_writer = pb_wal::WalWriter::open(wal_config).unwrap();
 

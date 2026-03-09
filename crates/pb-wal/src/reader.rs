@@ -114,6 +114,44 @@ impl WalReader {
         (self.current_segment_id, self.current_offset)
     }
 
+    /// Check if the reader's committed position references a segment that has been pruned.
+    /// Returns true if the reader needs to re-hydrate from checkpoint.
+    pub fn needs_resync(&self) -> bool {
+        let committed_seg = self.current_segment_id;
+        if let Ok(available) = segment::list_segment_ids(&self.config.base_path) {
+            if let Some(&earliest) = available.first() {
+                return committed_seg < earliest;
+            }
+        }
+        false
+    }
+
+    /// Returns the byte lag between the reader's current position and the latest
+    /// data on disk. Returns None if lag cannot be determined.
+    pub fn lag_bytes(&self) -> Option<u64> {
+        let available = segment::list_segment_ids(&self.config.base_path).ok()?;
+        if available.is_empty() {
+            return Some(0);
+        }
+
+        let mut lag: u64 = 0;
+
+        for &seg_id in &available {
+            if seg_id < self.current_segment_id {
+                continue;
+            }
+            let path = segment::segment_path(&self.config.base_path, seg_id);
+            let file_size = std::fs::metadata(&path).ok()?.len();
+
+            if seg_id == self.current_segment_id {
+                lag += file_size.saturating_sub(self.current_offset as u64);
+            } else {
+                lag += file_size;
+            }
+        }
+        Some(lag)
+    }
+
     fn position_file_path(&self) -> PathBuf {
         self.config
             .base_path

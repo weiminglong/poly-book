@@ -35,6 +35,7 @@ Full system diagram, crate dependency graph, and runtime topology:
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-wal**: Embedded write-ahead log. Mmap'd segments with length-prefix + CRC32C framing. `WalWriter` appends and rotates, `WalReader` tails with independent consumer positions, `WalPruner` reclaims. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
 - **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, etc.) for configurable backend selection.
+- **pb-grpc**: gRPC read surface using tonic. Exposes `WorkstationService` with `Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs. Delegates to `pb-service` traits. Configurable via `[grpc]` config section (disabled by default, port 50051).
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
 - **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `serve-api`, `serve`, and `all`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `all` (combined). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
@@ -97,6 +98,8 @@ The workstation backend is read-only with process separation:
 - `serve` process: checkpoint hydration → WAL tail → watch-based read model → HTTP/WS
 - `serve-api` / `all`: combined mode (backward compatible, no WAL)
 - configurable backend: `api.historical_backend = "parquet" | "clickhouse"` with auto-fallback
+- optional gRPC surface: `grpc.enabled = true` exposes WorkstationService on port 50051
+- WAL coordination: gap detection, lag tracking, backpressure pruning for multi-replica setups
 - current routes:
   - `GET /api/v1/feed/status`
   - `GET /api/v1/assets/active`
@@ -105,6 +108,7 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/replay/reconstruct`
   - `GET /api/v1/integrity/summary`
   - `GET /api/v1/execution/orders`
+  - `GET /api/v1/health`
   - `WS /api/v1/streams/orderbook?asset_id=...`
 
 Deferred for later phases:

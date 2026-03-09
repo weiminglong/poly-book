@@ -82,6 +82,25 @@ pub async fn run(
 
     let (replay_service, integrity_service, execution_service) =
         pipeline::build_services(&settings).await;
+
+    // Optionally start gRPC server.
+    let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
+    let grpc_handle = if grpc_enabled {
+        Some(
+            pb_grpc::start_grpc_server(
+                grpc_addr,
+                replay_service.clone(),
+                integrity_service.clone(),
+                execution_service.clone(),
+                shutdown.child_token(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        )
+    } else {
+        None
+    };
+
     let state = pb_api::AppState {
         live,
         config: pb_api::ApiConfig {
@@ -95,13 +114,19 @@ pub async fn run(
         replay_service,
         integrity_service,
         execution_service,
+        wal_lag_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        needs_resync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "api server bound");
 
     let serve_result = pb_api::serve(listener, state, shutdown.child_token()).await;
     drop(event_tx);
-    pipeline::shutdown_handles(vec![runtime_handle, consumer_handle], "serve-api task").await;
+    let mut handles = vec![runtime_handle, consumer_handle];
+    if let Some(h) = grpc_handle {
+        handles.push(h);
+    }
+    pipeline::shutdown_handles(handles, "serve-api task").await;
     serve_result?;
     Ok(())
 }

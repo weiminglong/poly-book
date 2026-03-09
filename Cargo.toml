@@ -11,6 +11,7 @@ members = [
     "crates/pb-wal",
     "crates/pb-service",
     "crates/pb-bin",
+    "crates/pb-grpc",
     "tests/integration",
 ]
 
@@ -35,6 +36,7 @@ pb-replay = { path = "crates/pb-replay" }
 pb-metrics = { path = "crates/pb-metrics" }
 pb-wal = { path = "crates/pb-wal" }
 pb-service = { path = "crates/pb-service" }
+pb-grpc = { path = "crates/pb-grpc" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -84,6 +86,13 @@ proptest = "1"
 # Performance
 mimalloc = { version = "0.1", default-features = false }
 rustc-hash = "2"
+
+# gRPC
+tonic = "0.14"
+prost = "0.14"
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
