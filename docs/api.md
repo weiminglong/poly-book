@@ -16,7 +16,8 @@ The current SPA consumes these shipped surfaces:
 - `Integrity`
 - `Execution Timeline`
 
-Latency and Query Workbench surfaces remain deferred.
+Latency surfaces remain deferred. The Query Workbench is implemented but
+opt-in (`api.query_workbench_enabled = true`, requires ClickHouse backend).
 
 ## Slug Resolution
 
@@ -222,10 +223,54 @@ Returns:
 
 This endpoint always returns 200. Use `found` to check resolution status.
 
+### `GET /api/v1/health`
+
+Returns operational status:
+
+- `ready`: true when hydration is complete and read model is serving
+- `hydrated`: true after checkpoint + WAL replay finishes
+- `wal_lag_bytes`: byte distance between WAL reader position and latest data
+- `needs_resync`: true if WAL reader needs re-hydration
+
+### `GET /api/v1/query/datasets`
+
+Returns available dataset schemas when query workbench is enabled.
+
+Returns 503 when `api.query_workbench_enabled` is `false` (the default).
+
+Response:
+
+- `datasets`: array of dataset objects, each with `name`, `description`, and
+  `columns` (array of `{ name, data_type }`)
+
+### `POST /api/v1/query/sql`
+
+Executes a read-only SQL query when query workbench is enabled.
+
+Returns 503 when `api.query_workbench_enabled` is `false`.
+
+Request body (JSON):
+
+- `sql`: the SQL query string (required)
+- `max_rows`: optional row limit override (default from config)
+
+Guard rails:
+
+- Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
+  `TRUNCATE`) are rejected with 400
+- `LIMIT` is injected if not present
+- Queries time out after `api.query_timeout_secs` (default 30s)
+
+Response:
+
+- `columns`: array of `{ name, data_type }`
+- `rows`: array of row arrays (JSON values)
+- `row_count`: number of rows returned
+- `truncated`: true if row limit was hit
+- `execution_time_ms`: query execution duration
+
 ## Deferred Endpoints
 
 The current API does not yet implement:
 
-- SQL workbench routes
-- ClickHouse-backed API reads
 - latency summary routes
