@@ -23,6 +23,9 @@ pb-feed (WS/REST) -> dispatcher -> pb-store (Parquet + ClickHouse)
                  pb-api <------ pb-replay ----+
 ```
 
+Full system diagram, crate dependency graph, and runtime topology:
+[docs/architecture.md](docs/architecture.md).
+
 ## Crates
 - **pb-api**: Read-only HTTP API and live read model for workstation clients. Current routes: feed status, active assets, live snapshots, Parquet-backed replay reconstruction.
 - **pb-types**: Foundation types. `FixedPrice(u32)` scaled by 10,000, `FixedSize(u64)` scaled by 1,000,000. Persisted record model includes split datasets such as `BookEvent`, `TradeEvent`, `IngestEvent`, `BookCheckpoint`, `ReplayValidation`, and `ExecutionEvent`.
@@ -32,6 +35,13 @@ pb-feed (WS/REST) -> dispatcher -> pb-store (Parquet + ClickHouse)
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
 - **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, and `serve-api`. Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
+
+## Per-Crate Documentation
+Each crate has a `README.md` at its root with: purpose, key types, data flow,
+design notes, and a **Docs to Update After Changes** table. Before modifying a
+crate, read its README. After making changes, check the update table and
+propagate changes to all listed targets (docs/, config, other crates, OpenSpec
+artifacts, web/).
 
 ## Conventions
 - Fixed-point over floating-point for prices and sizes — never use `f64` for orderbook state

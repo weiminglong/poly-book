@@ -1,3 +1,5 @@
+//! Prometheus metrics helpers and HTTP scrape endpoint. See [README](../README.md).
+
 pub mod error;
 pub mod recorder;
 pub mod server;

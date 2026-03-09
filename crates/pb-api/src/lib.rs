@@ -1,3 +1,5 @@
+//! Read-only HTTP API and live read model for workstation clients. See [README](../README.md).
+
 pub mod dto;
 pub mod error;
 pub mod live_state;

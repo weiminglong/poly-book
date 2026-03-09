@@ -1,3 +1,5 @@
+//! Shared fixed-point, wire, and persisted event types for the poly-book workspace. See [README](../README.md).
+
 pub mod error;
 pub mod event;
 pub mod fixed;

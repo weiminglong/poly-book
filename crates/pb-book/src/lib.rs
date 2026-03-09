@@ -1,3 +1,5 @@
+//! In-memory L2 order book engine with sorted BTreeMap sides. See [README](../README.md).
+
 pub mod book;
 pub mod error;
 

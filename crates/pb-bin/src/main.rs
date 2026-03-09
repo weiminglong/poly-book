@@ -1,3 +1,5 @@
+//! CLI entrypoint for the poly-book workspace. See [README](../README.md).
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
