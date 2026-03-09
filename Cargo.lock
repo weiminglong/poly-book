@@ -2784,6 +2784,7 @@ dependencies = [
  "pb-feed",
  "pb-metrics",
  "pb-replay",
+ "pb-service",
  "pb-store",
  "pb-types",
  "pb-wal",
@@ -2835,12 +2836,16 @@ dependencies = [
 name = "pb-service"
 version = "0.1.0"
 dependencies = [
+ "clickhouse",
+ "criterion",
  "object_store",
  "pb-book",
  "pb-replay",
  "pb-store",
  "pb-types",
  "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

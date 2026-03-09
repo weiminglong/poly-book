@@ -22,3 +22,11 @@ pb-store = { workspace = true }
 object_store = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion = { workspace = true }
+clickhouse = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+
+[[bench]]
+name = "cross_backend"
+harness = false

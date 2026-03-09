@@ -13,6 +13,7 @@ pb-store = { path = "../../crates/pb-store" }
 pb-replay = { path = "../../crates/pb-replay" }
 pb-metrics = { path = "../../crates/pb-metrics" }
 pb-api = { path = "../../crates/pb-api" }
+pb-service = { path = "../../crates/pb-service" }
 pb-wal = { path = "../../crates/pb-wal" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -55,3 +56,7 @@ path = "clickhouse_roundtrip.rs"
 [[test]]
 name = "checkpoint_wal_hydration"
 path = "checkpoint_wal_hydration.rs"
+
+[[test]]
+name = "cross_backend_service"
+path = "cross_backend_service.rs"

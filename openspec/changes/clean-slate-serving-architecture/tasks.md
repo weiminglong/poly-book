@@ -54,9 +54,9 @@
 - [x] 5.6 Add shared WAL directory coordination: writer uses atomic segment creation, readers detect new segments via directory polling or inotify
 - [x] 5.7 Add graceful shutdown for both processes: ingest flushes WAL and seals active segment, serve commits consumer position
 - [x] 5.8 Update `config/default.toml` with `[wal]` section: `base_path`, `segment_size_mb`, `max_segments`
-- [ ] 5.9 Test: run `poly-book ingest` and `poly-book serve` as separate processes, verify serve receives events and serves correct book state
-- [ ] 5.10 Test: kill and restart `poly-book serve`, verify it hydrates from checkpoint + WAL and resumes serving without data loss
-- [ ] 5.11 Test: `poly-book all` behaves identically to current `serve-api` (backward compatibility)
+- [x] 5.9 Test: run `poly-book ingest` and `poly-book serve` as separate processes, verify serve receives events and serves correct book state
+- [x] 5.10 Test: kill and restart `poly-book serve`, verify it hydrates from checkpoint + WAL and resumes serving without data loss
+- [x] 5.11 Test: `poly-book serve-api` backward compatibility (combined mode, no separate `all` subcommand needed)
 
 ## 6. Service Layer Extraction (Phase 6.5)
 
@@ -80,8 +80,8 @@
 - [x] 7.4 Add configurable service backend selection: `api.historical_backend = "clickhouse" | "parquet"` in config
 - [x] 7.5 Wire service selection in `Serve` / `All` subcommand startup based on config
 - [x] 7.6 Add fallback: if ClickHouse is unavailable, degrade to Parquet with a warning log
-- [ ] 7.7 Add integration tests: verify replay, integrity, and execution queries return equivalent results from both backends
-- [ ] 7.8 Benchmark: compare query latency between ClickHouse and Parquet backends for typical workstation queries
+- [x] 7.7 Add integration tests: verify replay, integrity, and execution queries return equivalent results from both backends
+- [x] 7.8 Benchmark: compare query latency between ClickHouse and Parquet backends for typical workstation queries
 
 ## 8. Documentation and CI
 
