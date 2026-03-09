@@ -248,6 +248,29 @@ PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
 The gRPC server listens on `0.0.0.0:50051` by default and exposes `Reconstruct`,
 `IntegritySummary`, and `ExecutionTimeline` RPCs via the `WorkstationService`.
 
+### Query Workbench
+
+Enable the query workbench for ad-hoc read-only SQL against ClickHouse:
+
+```bash
+PB__API__QUERY_WORKBENCH_ENABLED=true \
+PB__API__HISTORICAL_BACKEND=clickhouse \
+cargo run -- serve-api --auto-rotate
+```
+
+```bash
+# List available datasets
+curl http://localhost:3000/api/v1/query/datasets
+
+# Execute a query
+curl -X POST http://localhost:3000/api/v1/query/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT count() FROM book_events", "max_rows": 100}'
+```
+
+The workbench rejects write SQL and injects LIMIT if not present. Returns 503
+when disabled (the default).
+
 ### Health Endpoint
 
 The `serve` process exposes `GET /api/v1/health` for liveness and readiness
@@ -278,10 +301,10 @@ and requires a fresh checkpoint hydration.
 - replay reconstruction, integrity summaries, execution timeline inspection
 - WAL gap detection, lag tracking, and backpressure-aware pruning
 - health endpoint with hydration and WAL status
+- query workbench for ad-hoc read-only SQL (ClickHouse backend, opt-in)
 
 ### Not Yet Provided
 
-- SQL workbench endpoints
 - latency summary endpoints
 
 The existing Docker and ECS deployment remains ingestion-oriented today. The

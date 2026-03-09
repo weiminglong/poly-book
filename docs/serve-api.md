@@ -151,6 +151,8 @@ The current implementation exposes:
 - `GET /api/v1/integrity/summary`
 - `GET /api/v1/execution/orders`
 - `GET /api/v1/health`
+- `GET /api/v1/query/datasets`
+- `POST /api/v1/query/sql`
 - `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
@@ -167,6 +169,21 @@ services via the `WorkstationService`:
 
 The gRPC service delegates to the same `pb-service` traits used by the HTTP
 routes, so backend selection (`parquet` / `clickhouse`) applies equally.
+
+### Query Workbench
+
+When `api.query_workbench_enabled = true` and the historical backend is
+`clickhouse`, the query workbench endpoints become active:
+
+- `GET /api/v1/query/datasets` — lists available tables and their column schemas
+- `POST /api/v1/query/sql` — executes a read-only SQL query with guard rails
+
+Guard rails:
+- Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
+  `TRUNCATE`) are rejected at the adapter level
+- `LIMIT` is injected if not present (default `query_max_rows = 10000`)
+- Queries time out after `query_timeout_secs` (default 30s)
+- Both endpoints return 503 when the query workbench is disabled
 
 ### Health Endpoint
 
@@ -214,6 +231,5 @@ Rust API and static frontend assets together remains later work.
 
 The following are intentionally not part of the current serving runtime:
 
-- SQL workbench routes
 - latency summary routes
 - multi-replica WAL fan-out (single reader is sufficient for current scale)

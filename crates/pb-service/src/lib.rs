@@ -7,12 +7,17 @@
 pub mod clickhouse;
 mod error;
 pub mod parquet;
+pub mod query;
 
 pub use clickhouse::{
     ClickHouseExecutionService, ClickHouseIntegrityService, ClickHouseReplayService,
 };
 pub use error::ServiceError;
 pub use parquet::{ParquetExecutionService, ParquetIntegrityService, ParquetReplayService};
+pub use query::{
+    AnyQueryService, ClickHouseQueryService, DatasetSchema, QueryColumnInfo, QueryGuard,
+    QueryResult, QueryService,
+};
 
 use pb_types::event::{ExecutionEvent, ReplayMode};
 use pb_types::{AssetId, FixedPrice, FixedSize};
