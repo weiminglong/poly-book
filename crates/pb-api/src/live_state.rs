@@ -2,15 +2,58 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_book::L2Book;
-use pb_types::event::{BookEvent, BookEventKind, IngestEvent, PersistedRecord};
+use pb_types::event::{BookCheckpoint, BookEvent, BookEventKind, IngestEvent, PersistedRecord};
 use pb_types::{AssetId, FixedPrice, FixedSize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
     ActiveAssetSummary, AssetRef, BookUpdateMessage, ContinuityWarning, FeedMode,
     FeedStatusResponse, LiveOrderBookSnapshot, PriceLevelView, SessionStatus,
 };
+
+// ---------------------------------------------------------------------------
+// Published read-only state (shared via watch channel, zero-contention reads)
+// ---------------------------------------------------------------------------
+
+/// Read-only projection of the live state, published by the projector task.
+/// Readers access this via `watch::Receiver::borrow()` without any locking.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedState {
+    pub(crate) mode: FeedMode,
+    pub(crate) session_status: SessionStatus,
+    pub(crate) current_session_id: Option<String>,
+    pub(crate) active_assets: Vec<String>,
+    pub(crate) last_rotation_us: Option<u64>,
+    pub(crate) latest_global_warning: Option<ContinuityWarning>,
+    pub(crate) assets: HashMap<String, AssetReadView>,
+    /// Whether checkpoint hydration has completed (or was skipped).
+    pub(crate) hydrated: bool,
+}
+
+/// Read-only projection of one asset's book state.
+#[derive(Debug, Clone)]
+pub(crate) struct AssetReadView {
+    pub(crate) sequence: u64,
+    pub(crate) last_update_us: u64,
+    pub(crate) best_bid: Option<PriceLevelView>,
+    pub(crate) best_ask: Option<PriceLevelView>,
+    pub(crate) mid_price: Option<f64>,
+    pub(crate) spread: Option<f64>,
+    pub(crate) bid_depth: usize,
+    pub(crate) ask_depth: usize,
+    pub(crate) bids: Vec<PriceLevelView>,
+    pub(crate) asks: Vec<PriceLevelView>,
+    pub(crate) initialized_from_snapshot: bool,
+    pub(crate) has_pending_snapshot: bool,
+    pub(crate) last_recv_timestamp_us: Option<u64>,
+    pub(crate) last_exchange_timestamp_us: Option<u64>,
+    pub(crate) latest_warning: Option<ContinuityWarning>,
+}
+
+// ---------------------------------------------------------------------------
+// Internal mutable state (owned exclusively by the projector task)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotGroupKey {
@@ -60,6 +103,7 @@ struct LiveState {
     pending_snapshots: HashMap<String, PendingSnapshot>,
     last_rotation_us: Option<u64>,
     latest_global_warning: Option<ContinuityWarning>,
+    hydrated: bool,
 }
 
 impl LiveState {
@@ -73,6 +117,7 @@ impl LiveState {
             pending_snapshots: HashMap::new(),
             last_rotation_us: None,
             latest_global_warning: None,
+            hydrated: false,
         }
     }
 
@@ -231,7 +276,271 @@ impl LiveState {
             self.latest_global_warning = Some(warning);
         }
     }
+
+    /// Apply a checkpoint directly to restore book state during hydration.
+    fn apply_checkpoint(&mut self, checkpoint: &BookCheckpoint) {
+        let asset_id = checkpoint.asset_id.as_str();
+        let state = self.ensure_asset(asset_id);
+        let bids: Vec<(FixedPrice, FixedSize)> = checkpoint
+            .bids
+            .iter()
+            .map(|l| (l.price, l.size))
+            .collect();
+        let asks: Vec<(FixedPrice, FixedSize)> = checkpoint
+            .asks
+            .iter()
+            .map(|l| (l.price, l.size))
+            .collect();
+        state.book.apply_snapshot(
+            &bids,
+            &asks,
+            pb_types::Sequence::default(),
+            checkpoint.checkpoint_timestamp_us,
+        );
+        state.initialized_from_snapshot = true;
+        state.last_recv_timestamp_us = Some(checkpoint.provenance.recv_timestamp_us);
+        state.last_exchange_timestamp_us = Some(checkpoint.provenance.exchange_timestamp_us);
+    }
+
+    /// Apply a record and return the list of asset IDs that had book updates
+    /// (materialized snapshots or deltas).
+    fn apply_record(&mut self, record: PersistedRecord) -> Vec<String> {
+        let materialized_assets = self.materialize_pending_before_record(&record);
+        let current_book_asset = match record {
+            PersistedRecord::Book(event) => {
+                let asset_id = event.asset_id.to_string();
+                match event.kind {
+                    BookEventKind::Snapshot => {
+                        self.record_snapshot_event(event);
+                        None
+                    }
+                    BookEventKind::Delta => {
+                        self.record_delta_event(event);
+                        Some(asset_id)
+                    }
+                }
+            }
+            PersistedRecord::Ingest(event) => {
+                self.record_ingest_event(event);
+                None
+            }
+            PersistedRecord::Trade(_)
+            | PersistedRecord::Checkpoint(_)
+            | PersistedRecord::Validation(_)
+            | PersistedRecord::Execution(_) => None,
+        };
+
+        let mut updated = materialized_assets;
+        if let Some(asset_id) = current_book_asset {
+            updated.push(asset_id);
+        }
+        updated
+    }
+
+    /// Build the published read-only projection of current state.
+    fn publish(&self) -> PublishedState {
+        let assets = self
+            .assets
+            .iter()
+            .map(|(asset_id, state)| {
+                let has_pending = self.pending_snapshots.contains_key(asset_id);
+                let view = AssetReadView {
+                    sequence: state.book.sequence.raw(),
+                    last_update_us: state.book.last_update_us,
+                    best_bid: state.book.best_bid().map(level_view),
+                    best_ask: state.book.best_ask().map(level_view),
+                    mid_price: state.book.mid_price(),
+                    spread: state.book.spread(),
+                    bid_depth: state.book.bid_depth(),
+                    ask_depth: state.book.ask_depth(),
+                    bids: state
+                        .book
+                        .top_bids(state.book.bid_depth())
+                        .into_iter()
+                        .map(level_view)
+                        .collect(),
+                    asks: state
+                        .book
+                        .top_asks(state.book.ask_depth())
+                        .into_iter()
+                        .map(level_view)
+                        .collect(),
+                    initialized_from_snapshot: state.initialized_from_snapshot,
+                    has_pending_snapshot: has_pending,
+                    last_recv_timestamp_us: state.last_recv_timestamp_us,
+                    last_exchange_timestamp_us: state.last_exchange_timestamp_us,
+                    latest_warning: state.latest_warning.clone(),
+                };
+                (asset_id.clone(), view)
+            })
+            .collect();
+
+        PublishedState {
+            mode: self.mode,
+            session_status: self.session_status,
+            current_session_id: self.current_session_id.clone(),
+            active_assets: self.active_assets.clone(),
+            last_rotation_us: self.last_rotation_us,
+            latest_global_warning: self.latest_global_warning.clone(),
+            assets,
+            hydrated: self.hydrated,
+        }
+    }
+
+    /// Build a broadcast update message for a given asset.
+    fn build_book_update(&self, asset_id: &str, depth: usize) -> Option<BookUpdateMessage> {
+        if !self
+            .active_assets
+            .iter()
+            .any(|candidate| candidate == asset_id)
+        {
+            return None;
+        }
+        let state = self.assets.get(asset_id)?;
+        if !state.initialized_from_snapshot {
+            return None;
+        }
+        Some(BookUpdateMessage {
+            asset_id: asset_id.to_string(),
+            slug: None,
+            sequence: state.book.sequence.raw(),
+            last_update_us: state.book.last_update_us,
+            bids: state
+                .book
+                .top_bids(depth)
+                .into_iter()
+                .map(level_view)
+                .collect(),
+            asks: state
+                .book
+                .top_asks(depth)
+                .into_iter()
+                .map(level_view)
+                .collect(),
+            mid_price: state.book.mid_price(),
+            spread: state.book.spread(),
+        })
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Command channel (mutations sent to the projector task)
+// ---------------------------------------------------------------------------
+
+enum ProjectorCommand {
+    /// Apply a record (fire-and-forget, used by the consumer forwarder).
+    Record(PersistedRecord),
+    /// Apply a record and ack when done (used by tests / sync callers).
+    RecordAck(PersistedRecord, oneshot::Sender<()>),
+    /// Set active assets and ack when done.
+    SetActiveAssets(Vec<String>, oneshot::Sender<()>),
+    /// Set last rotation timestamp and ack when done.
+    SetLastRotationUs(u64, oneshot::Sender<()>),
+    /// Configure broadcast for WS streaming.
+    ConfigureBroadcast(crate::streaming::PerAssetBroadcast, usize),
+    /// Apply a checkpoint directly (used during hydration).
+    HydrateCheckpoint(BookCheckpoint, oneshot::Sender<()>),
+    /// Mark the read model as hydrated (ready to serve).
+    MarkHydrated(oneshot::Sender<()>),
+}
+
+// ---------------------------------------------------------------------------
+// Projector task (single writer, owns all mutable state)
+// ---------------------------------------------------------------------------
+
+struct Projector {
+    state: LiveState,
+    watch_tx: watch::Sender<Arc<PublishedState>>,
+    broadcast: Option<(crate::streaming::PerAssetBroadcast, usize)>,
+}
+
+impl Projector {
+    fn new(mode: FeedMode, watch_tx: watch::Sender<Arc<PublishedState>>) -> Self {
+        Self {
+            state: LiveState::new(mode),
+            watch_tx,
+            broadcast: None,
+        }
+    }
+
+    fn handle_command(&mut self, cmd: ProjectorCommand) {
+        match cmd {
+            ProjectorCommand::Record(record) => {
+                self.apply_and_broadcast(record);
+            }
+            ProjectorCommand::RecordAck(record, ack) => {
+                self.apply_and_broadcast(record);
+                let _ = ack.send(());
+            }
+            ProjectorCommand::SetActiveAssets(assets, ack) => {
+                self.state.set_active_assets(assets);
+                self.publish();
+                let _ = ack.send(());
+            }
+            ProjectorCommand::SetLastRotationUs(ts, ack) => {
+                self.state.last_rotation_us = Some(ts);
+                self.publish();
+                let _ = ack.send(());
+            }
+            ProjectorCommand::ConfigureBroadcast(broadcast, depth) => {
+                self.broadcast = Some((broadcast, depth));
+            }
+            ProjectorCommand::HydrateCheckpoint(checkpoint, ack) => {
+                self.state.apply_checkpoint(&checkpoint);
+                self.publish();
+                let _ = ack.send(());
+            }
+            ProjectorCommand::MarkHydrated(ack) => {
+                self.state.hydrated = true;
+                self.publish();
+                let _ = ack.send(());
+            }
+        }
+    }
+
+    fn apply_and_broadcast(&mut self, record: PersistedRecord) {
+        let updated_assets = self.state.apply_record(record);
+        self.publish();
+
+        // Send broadcast updates for assets that changed.
+        if let Some((ref broadcast, depth)) = self.broadcast {
+            if broadcast.has_subscribers() {
+                for asset_id in &updated_assets {
+                    if let Some(update) = self.state.build_book_update(asset_id, depth) {
+                        broadcast.send(update);
+                    }
+                }
+            }
+        }
+    }
+
+    fn publish(&self) {
+        let snapshot = Arc::new(self.state.publish());
+        let _ = self.watch_tx.send(snapshot);
+    }
+
+    async fn run(
+        mut self,
+        mut cmd_rx: mpsc::Receiver<ProjectorCommand>,
+        token: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => self.handle_command(cmd),
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API (LiveReadModel)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotLookupError {
@@ -239,67 +548,54 @@ pub enum SnapshotLookupError {
     SnapshotNotReady,
 }
 
+/// Live read model backed by a single-writer projector task.
+///
+/// All mutations go through the projector via a command channel.
+/// All reads use `watch::Receiver::borrow()` — zero contention with the writer.
 #[derive(Clone)]
 pub struct LiveReadModel {
-    inner: Arc<RwLock<LiveState>>,
+    cmd_tx: mpsc::Sender<ProjectorCommand>,
+    state_rx: watch::Receiver<Arc<PublishedState>>,
 }
 
 impl LiveReadModel {
+    /// Create a new live read model and spawn the internal projector task.
+    ///
+    /// The projector task runs until the cancellation token is triggered
+    /// or all command senders are dropped.
     pub fn new(mode: FeedMode) -> Self {
+        let initial = Arc::new(LiveState::new(mode).publish());
+        let (watch_tx, watch_rx) = watch::channel(initial);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ProjectorCommand>(4_096);
+
+        let projector = Projector::new(mode, watch_tx);
+        // Spawn with a long-lived token; the projector stops when cmd_rx closes.
+        let token = CancellationToken::new();
+        tokio::spawn(projector.run(cmd_rx, token));
+
         Self {
-            inner: Arc::new(RwLock::new(LiveState::new(mode))),
+            cmd_tx,
+            state_rx: watch_rx,
         }
     }
 
+    /// Spawn a forwarder task that reads records from `rx` and sends them
+    /// to the projector. Returns the forwarder's join handle.
     pub fn spawn_consumer(
         &self,
         mut rx: mpsc::Receiver<PersistedRecord>,
         token: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        let model = self.clone();
+        let cmd_tx = self.cmd_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = token.cancelled() => {
-                        break;
-                    }
-                    record = rx.recv() => {
-                        match record {
-                            Some(record) => model.apply_record(record).await,
-                            None => break,
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    pub fn spawn_consumer_with_broadcast(
-        &self,
-        mut rx: mpsc::Receiver<PersistedRecord>,
-        broadcast: crate::streaming::BookBroadcast,
-        default_depth: usize,
-        token: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        let model = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        break;
-                    }
+                    _ = token.cancelled() => break,
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
-                                if broadcast.has_subscribers() {
-                                    for update in model
-                                        .apply_record_and_build_updates(record, default_depth)
-                                        .await
-                                    {
-                                        broadcast.send(update);
-                                    }
-                                } else {
-                                    model.apply_record(record).await;
+                                if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                    break;
                                 }
                             }
                             None => break,
@@ -310,71 +606,109 @@ impl LiveReadModel {
         })
     }
 
-    pub async fn apply_record(&self, record: PersistedRecord) {
-        let _ = self.apply_record_and_build_updates(record, 0).await;
-    }
-
-    pub async fn apply_record_and_build_updates(
+    /// Spawn a forwarder task that reads records from `rx`, sends them to
+    /// the projector (which handles broadcast internally), and returns the
+    /// forwarder's join handle.
+    pub fn spawn_consumer_with_broadcast(
         &self,
-        record: PersistedRecord,
-        depth: usize,
-    ) -> Vec<BookUpdateMessage> {
-        let mut state = self.inner.write().await;
-        let materialized_assets = state.materialize_pending_before_record(&record);
-        let current_book_asset = match record {
-            PersistedRecord::Book(event) => {
-                let asset_id = event.asset_id.to_string();
-                match event.kind {
-                    BookEventKind::Snapshot => {
-                        state.record_snapshot_event(event);
-                        None
-                    }
-                    BookEventKind::Delta => {
-                        state.record_delta_event(event);
-                        Some(asset_id)
+        mut rx: mpsc::Receiver<PersistedRecord>,
+        broadcast: crate::streaming::PerAssetBroadcast,
+        default_depth: usize,
+        token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let cmd_tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            // Configure the projector's broadcast as the first command.
+            // Records will queue behind this, ensuring broadcast is set before
+            // any record processing.
+            if cmd_tx
+                .send(ProjectorCommand::ConfigureBroadcast(
+                    broadcast,
+                    default_depth,
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    record = rx.recv() => {
+                        match record {
+                            Some(record) => {
+                                if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
                     }
                 }
             }
-            PersistedRecord::Ingest(event) => {
-                state.record_ingest_event(event);
-                None
-            }
-            PersistedRecord::Trade(_)
-            | PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => None,
-        };
-
-        if depth == 0 {
-            return Vec::new();
-        }
-
-        let mut updates = Vec::new();
-        for asset_id in materialized_assets {
-            if let Some(update) = state.materialized_book_update_message(&asset_id, depth) {
-                updates.push(update);
-            }
-        }
-        if let Some(asset_id) = current_book_asset {
-            if let Some(update) = state.materialized_book_update_message(&asset_id, depth) {
-                updates.push(update);
-            }
-        }
-        updates
+        })
     }
 
+    /// Apply a single record and wait for it to be processed.
+    /// Primarily used in tests.
+    pub async fn apply_record(&self, record: PersistedRecord) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::RecordAck(record, ack_tx))
+            .await;
+        let _ = ack_rx.await;
+    }
+
+    /// Set the active asset list. Waits for the projector to process the change.
     pub async fn set_active_assets(&self, assets: Vec<String>) {
-        let mut state = self.inner.write().await;
-        state.set_active_assets(assets);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::SetActiveAssets(assets, ack_tx))
+            .await;
+        let _ = ack_rx.await;
     }
 
+    /// Set the last rotation timestamp.
     pub async fn set_last_rotation_us(&self, timestamp_us: u64) {
-        let mut state = self.inner.write().await;
-        state.last_rotation_us = Some(timestamp_us);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::SetLastRotationUs(timestamp_us, ack_tx))
+            .await;
+        let _ = ack_rx.await;
     }
 
+    /// Apply a checkpoint directly to restore book state during hydration.
+    pub async fn hydrate_checkpoint(&self, checkpoint: BookCheckpoint) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::HydrateCheckpoint(checkpoint, ack_tx))
+            .await;
+        let _ = ack_rx.await;
+    }
+
+    /// Mark the read model as hydrated (ready to serve).
+    pub async fn mark_hydrated(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::MarkHydrated(ack_tx))
+            .await;
+        let _ = ack_rx.await;
+    }
+
+    /// Check whether the read model has completed hydration.
+    pub fn is_hydrated(&self) -> bool {
+        self.state_rx.borrow().hydrated
+    }
+
+    /// Read feed status from the latest published state. Zero contention.
     pub async fn feed_status_raw(&self) -> FeedStatusResponse {
-        let state = self.inner.read().await;
+        let state = self.state_rx.borrow().clone();
         FeedStatusResponse {
             mode: state.mode,
             session_status: state.session_status,
@@ -393,39 +727,42 @@ impl LiveReadModel {
         }
     }
 
+    /// Read active asset summaries. Zero contention.
     pub async fn active_assets(&self, stale_after_secs: u64) -> Vec<ActiveAssetSummary> {
         let now_us = now_us();
-        let state = self.inner.read().await;
+        let state = self.state_rx.borrow().clone();
         state
             .active_assets
             .iter()
             .map(|asset_id| {
-                let asset_state = state.assets.get(asset_id);
-                let last_recv = asset_state.and_then(|state| state.last_recv_timestamp_us);
+                let asset = state.assets.get(asset_id);
+                let last_recv = asset.and_then(|a| a.last_recv_timestamp_us);
                 ActiveAssetSummary {
                     asset_id: asset_id.clone(),
                     slug: None,
                     label: None,
                     last_recv_timestamp_us: last_recv,
-                    last_exchange_timestamp_us: asset_state
-                        .and_then(|state| state.last_exchange_timestamp_us),
+                    last_exchange_timestamp_us: asset
+                        .and_then(|a| a.last_exchange_timestamp_us),
                     stale: is_stale(last_recv, stale_after_secs, now_us),
-                    has_book: asset_state
-                        .map(|state| state.initialized_from_snapshot)
+                    has_book: asset
+                        .map(|a| a.initialized_from_snapshot)
                         .unwrap_or(false),
                 }
             })
             .collect()
     }
 
+    /// Check if an asset is active. Zero contention.
     pub async fn is_asset_active(&self, asset_id: &str) -> bool {
-        let state = self.inner.read().await;
+        let state = self.state_rx.borrow().clone();
         state
             .active_assets
             .iter()
             .any(|candidate| candidate == asset_id)
     }
 
+    /// Read a book snapshot for a specific asset. Zero contention.
     pub async fn snapshot(
         &self,
         asset_id: &str,
@@ -433,144 +770,60 @@ impl LiveReadModel {
         stale_after_secs: u64,
     ) -> Result<LiveOrderBookSnapshot, SnapshotLookupError> {
         let now_us = now_us();
-        let state = self.inner.read().await;
-        state.snapshot(asset_id, depth, stale_after_secs, now_us)
+        let state = self.state_rx.borrow().clone();
+        snapshot_from_published(&state, asset_id, depth, stale_after_secs, now_us)
     }
 }
 
-impl LiveState {
-    fn snapshot(
-        &self,
-        asset_id: &str,
-        depth: usize,
-        stale_after_secs: u64,
-        now_us: u64,
-    ) -> Result<LiveOrderBookSnapshot, SnapshotLookupError> {
-        if !self
-            .active_assets
-            .iter()
-            .any(|candidate| candidate == asset_id)
-        {
-            return Err(SnapshotLookupError::AssetNotActive);
-        }
-
-        let asset_state = self.assets.get(asset_id);
-        if self.pending_snapshots.contains_key(asset_id) {
-            if let Some(asset_state) = asset_state.filter(|state| state.initialized_from_snapshot) {
-                return Ok(build_live_snapshot(
-                    asset_id,
-                    asset_state,
-                    depth,
-                    stale_after_secs,
-                    now_us,
-                ));
-            }
-            return Err(SnapshotLookupError::SnapshotNotReady);
-        }
-
-        let Some(asset_state) = asset_state else {
-            return Err(SnapshotLookupError::SnapshotNotReady);
-        };
-        if !asset_state.initialized_from_snapshot {
-            return Err(SnapshotLookupError::SnapshotNotReady);
-        }
-
-        Ok(build_live_snapshot(
-            asset_id,
-            asset_state,
-            depth,
-            stale_after_secs,
-            now_us,
-        ))
-    }
-
-    fn materialized_book_update_message(
-        &self,
-        asset_id: &str,
-        depth: usize,
-    ) -> Option<BookUpdateMessage> {
-        if depth == 0
-            || !self
-                .active_assets
-                .iter()
-                .any(|candidate| candidate == asset_id)
-        {
-            return None;
-        }
-
-        let asset_state = self.assets.get(asset_id)?;
-        if !asset_state.initialized_from_snapshot {
-            return None;
-        }
-
-        Some(build_book_update(asset_id, asset_state, depth))
-    }
-}
-
-fn build_live_snapshot(
+fn snapshot_from_published(
+    state: &PublishedState,
     asset_id: &str,
-    asset_state: &AssetState,
     depth: usize,
     stale_after_secs: u64,
     now_us: u64,
-) -> LiveOrderBookSnapshot {
-    LiveOrderBookSnapshot {
-        asset_id: asset_id.to_string(),
-        slug: None,
-        sequence: asset_state.book.sequence.raw(),
-        last_update_us: asset_state.book.last_update_us,
-        best_bid: level_pair(asset_state.book.best_bid()),
-        best_ask: level_pair(asset_state.book.best_ask()),
-        mid_price: asset_state.book.mid_price(),
-        spread: asset_state.book.spread(),
-        bid_depth: asset_state.book.bid_depth(),
-        ask_depth: asset_state.book.ask_depth(),
-        bids: asset_state
-            .book
-            .top_bids(depth)
-            .into_iter()
-            .map(level_view)
-            .collect(),
-        asks: asset_state
-            .book
-            .top_asks(depth)
-            .into_iter()
-            .map(level_view)
-            .collect(),
-        stale: is_stale(asset_state.last_recv_timestamp_us, stale_after_secs, now_us),
-        latest_warning: asset_state.latest_warning.clone(),
+) -> Result<LiveOrderBookSnapshot, SnapshotLookupError> {
+    if !state
+        .active_assets
+        .iter()
+        .any(|candidate| candidate == asset_id)
+    {
+        return Err(SnapshotLookupError::AssetNotActive);
     }
-}
 
-fn build_book_update(asset_id: &str, asset_state: &AssetState, depth: usize) -> BookUpdateMessage {
-    BookUpdateMessage {
+    let Some(asset) = state.assets.get(asset_id) else {
+        return Err(SnapshotLookupError::SnapshotNotReady);
+    };
+
+    // If a pending snapshot exists and the asset hasn't been initialized yet,
+    // report not ready.
+    if asset.has_pending_snapshot && !asset.initialized_from_snapshot {
+        return Err(SnapshotLookupError::SnapshotNotReady);
+    }
+
+    if !asset.initialized_from_snapshot {
+        return Err(SnapshotLookupError::SnapshotNotReady);
+    }
+
+    Ok(LiveOrderBookSnapshot {
         asset_id: asset_id.to_string(),
         slug: None,
-        sequence: asset_state.book.sequence.raw(),
-        last_update_us: asset_state.book.last_update_us,
-        bids: asset_state
-            .book
-            .top_bids(depth)
-            .into_iter()
-            .map(level_view)
-            .collect(),
-        asks: asset_state
-            .book
-            .top_asks(depth)
-            .into_iter()
-            .map(level_view)
-            .collect(),
-        mid_price: asset_state.book.mid_price(),
-        spread: asset_state.book.spread(),
-    }
+        sequence: asset.sequence,
+        last_update_us: asset.last_update_us,
+        best_bid: asset.best_bid.clone(),
+        best_ask: asset.best_ask.clone(),
+        mid_price: asset.mid_price,
+        spread: asset.spread,
+        bid_depth: asset.bid_depth,
+        ask_depth: asset.ask_depth,
+        bids: asset.bids.iter().take(depth).cloned().collect(),
+        asks: asset.asks.iter().take(depth).cloned().collect(),
+        stale: is_stale(asset.last_recv_timestamp_us, stale_after_secs, now_us),
+        latest_warning: asset.latest_warning.clone(),
+    })
 }
 
 fn level_view((price, size): (FixedPrice, FixedSize)) -> PriceLevelView {
     PriceLevelView { price, size }
-}
-
-fn level_pair(level: Option<(FixedPrice, FixedSize)>) -> Option<PriceLevelView> {
-    level.map(level_view)
 }
 
 fn is_stale(last_recv_us: Option<u64>, stale_after_secs: u64, now_us: u64) -> bool {
@@ -716,5 +969,49 @@ mod tests {
         assert_eq!(assets[0].asset_id, "tok1");
         let snapshot_err = model.snapshot("tok1", 5, 10).await.unwrap_err();
         assert_eq!(snapshot_err, SnapshotLookupError::SnapshotNotReady);
+    }
+
+    #[tokio::test]
+    async fn concurrent_readers_see_consistent_state() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+
+        // Apply snapshot + materialize.
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        // Multiple concurrent readers should all see the same consistent state.
+        let m1 = model.clone();
+        let m2 = model.clone();
+        let (s1, s2) = tokio::join!(
+            m1.snapshot("tok1", 5, 100),
+            m2.snapshot("tok1", 5, 100),
+        );
+        let s1 = s1.unwrap();
+        let s2 = s2.unwrap();
+        assert_eq!(s1.sequence, s2.sequence);
+        assert_eq!(s1.bid_depth, s2.bid_depth);
+        assert_eq!(s1.ask_depth, s2.ask_depth);
     }
 }

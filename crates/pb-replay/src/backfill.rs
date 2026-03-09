@@ -138,6 +138,7 @@ pub fn checkpoint_from_rest(book: &RestBookResponse) -> Result<BookCheckpoint, R
         },
         bids,
         asks,
+        wal_offset: None,
     })
 }
 

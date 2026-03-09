@@ -24,41 +24,47 @@
                                │
                     tokio::mpsc channel (PersistedRecord)
                                │
-              ┌────────────────┼────────────────┐
-              │                │                │
-              ▼                ▼                ▼
-       ┌─────────────┐ ┌─────────────┐  ┌──────────────┐
-       │ ParquetSink │ │ClickHouse   │  │ LiveReadModel│
-       │  (pb-store) │ │Sink         │  │   (pb-api)   │
-       │  5-min Zstd │ │(pb-store)   │  │              │
-       └──────┬──────┘ │ 1s batch    │  └──────┬───────┘
-              │        └──────┬──────┘         │
-              │               │         ┌──────┴───────┐
-              ▼               ▼         │              │
-       ┌──────────┐    ┌──────────┐  REST/WS     broadcast
-       │ Parquet  │    │ClickHouse│    │              │
-       │  files   │    │  tables  │    ▼              ▼
-       └────┬─────┘    └────┬─────┘  HTTP          WebSocket
-            │               │      handlers        clients
-            └───────┬───────┘
-                    │
-                    ▼
-             ┌─────────────┐
-             │ EventReader  │  (ParquetReader / ClickHouseReader)
-             │ (pb-replay)  │
-             └──────┬───────┘
-                    │
-                    ▼
-             ┌──────────────┐
-             │ ReplayEngine │  reconstruct_at(asset_id, timestamp)
-             │ (pb-replay)  │
-             └──────┬───────┘
-                    │
-                    ▼
-             ┌──────────────┐
-             │   pb-api     │  /replay/reconstruct, /integrity/summary
-             │  (read path) │
-             └──────────────┘
+         ┌─────────────────────┼────────────────────┐
+         │                     │                    │
+         ▼                     ▼                    ▼
+  ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
+  │ ParquetSink │      │ClickHouse   │      │  WalWriter   │
+  │  (pb-store) │      │Sink         │      │  (pb-wal)    │
+  │  5-min Zstd │      │(pb-store)   │      │ mmap+CRC32C  │
+  └──────┬──────┘      │ 1s batch    │      └──────┬───────┘
+         │             └──────┬──────┘             │
+         │                    │               WAL segments
+         ▼                    ▼                    │
+  ┌──────────┐         ┌──────────┐                ▼
+  │ Parquet  │         │ClickHouse│         ┌──────────────┐
+  │  files   │         │  tables  │         │  WalReader   │
+  └────┬─────┘         └────┬─────┘         │  (pb-wal)    │
+       │                    │               └──────┬───────┘
+       └────────┬───────────┘                      │
+                │                                  ▼
+                ▼                           ┌──────────────┐
+         ┌─────────────┐                    │ LiveReadModel │
+         │ EventReader  │                   │   (pb-api)   │
+         │ (pb-replay)  │                   │ watch-based  │
+         └──────┬───────┘                   └──────┬───────┘
+                │                                  │
+                ▼                           ┌──────┴───────┐
+         ┌──────────────┐                   │              │
+         │ ReplayEngine │                REST/WS     per-asset
+         │ (pb-replay)  │                   │         broadcast
+         └──────┬───────┘                   ▼              ▼
+                │                        HTTP          WebSocket
+                ▼                       handlers        clients
+         ┌──────────────┐
+         │ pb-service   │  ReplayService / IntegrityService /
+         │  (traits)    │  ExecutionService
+         └──────┬───────┘
+                │
+                ▼
+         ┌──────────────┐
+         │   pb-api     │  thin HTTP adapters
+         │  (handlers)  │
+         └──────────────┘
 ```
 
 ## Crate Dependency Graph
@@ -69,10 +75,12 @@ pb-bin (CLI entrypoint)
 │   ├── pb-types
 │   ├── pb-book
 │   │   └── pb-types
-│   ├── pb-replay
+│   ├── pb-service
 │   │   ├── pb-types
 │   │   ├── pb-book
-│   │   └── pb-metrics
+│   │   └── pb-replay
+│   ├── pb-wal
+│   │   └── pb-types
 │   ├── pb-metrics
 │   └── pb-store (test fixtures)
 │       ├── pb-types
@@ -82,6 +90,8 @@ pb-bin (CLI entrypoint)
 │   └── pb-metrics
 ├── pb-store
 ├── pb-replay
+├── pb-wal
+├── pb-service
 ├── pb-metrics
 └── pb-types
 ```
@@ -104,31 +114,64 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 
 ## Runtime Topology
 
+### Process Separation (ingest + serve)
+
+```text
+┌───────────────────────────────────────────────────────┐
+│                    ingest process                      │
+│                                                       │
+│  WsClient ──▶ Dispatcher ──┬──▶ WalWriter (pb-wal)   │
+│                    ▲        ├──▶ ParquetSink           │
+│  RestClient ───────┘        └──▶ ClickHouseSink        │
+│                                                       │
+│  CheckpointProducer (periodic REST snapshots + WAL    │
+│                       offset capture)                  │
+│  Metrics server on :9090                              │
+└───────────────────────────────────────────────────────┘
+          │
+          │  WAL segments on shared filesystem
+          ▼
+┌───────────────────────────────────────────────────────┐
+│                    serve process                       │
+│                                                       │
+│  Checkpoint hydration ──▶ WAL tail ──▶ LiveReadModel  │
+│  (cold start: load latest checkpoint,                 │
+│   replay WAL from offset, then live tail)             │
+│                                                       │
+│  LiveReadModel (watch-based, zero-contention reads)   │
+│       │                                               │
+│       ├─▶ REST handlers (pb-service traits)           │
+│       └─▶ per-asset WS broadcasts                     │
+│                                                       │
+│  pb-service ──▶ Parquet or ClickHouse backend          │
+│  (configurable via api.historical_backend)            │
+│                                                       │
+│  API server on :3000                                  │
+│  Metrics server on :9090                              │
+└───────────────────────────────────────────────────────┘
+```
+
+### Combined Mode (serve-api / all)
+
 ```text
 ┌─────────────────────────────────────────────────────┐
-│                    serve-api process                 │
+│                 serve-api / all process              │
 │                                                     │
 │  WsClient ──▶ Dispatcher ──▶ LiveReadModel          │
 │                    │              │                  │
 │                    ▼              ├─▶ REST handlers  │
 │              ParquetSink          └─▶ WS streaming   │
 │                                                     │
-│  ParquetReader ──▶ ReplayEngine ──▶ replay handlers │
+│  pb-service ──▶ ReplayEngine ──▶ replay handlers    │
 │                                                     │
 │  Metrics server on :9090                            │
 │  API server on :3000                                │
 └─────────────────────────────────────────────────────┘
+```
 
-┌───────────────────────────────────────────────────┐
-│              ingest / auto-ingest process          │
-│                                                    │
-│  WsClient ──▶ Dispatcher ──┬──▶ ParquetSink       │
-│                    ▲        └──▶ ClickHouseSink    │
-│  RestClient ───────┘                               │
-│                                                    │
-│  Metrics server on :9090                           │
-└───────────────────────────────────────────────────┘
+### Web SPA
 
+```text
 ┌──────────────────────────┐
 │     web SPA (:4173)      │
 │  Vite dev server         │

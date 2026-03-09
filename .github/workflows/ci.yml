@@ -79,6 +79,19 @@ jobs:
       - run: npx vitest run
       - run: npx vite build
 
+  fuzz:
+    name: Fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked || true
+      - name: Fuzz WAL corruption (30s)
+        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30
+      - name: Fuzz book delta (30s)
+        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30
+
   miri:
     name: Miri (undefined behavior)
     runs-on: ubuntu-latest

@@ -69,6 +69,19 @@ pub async fn run(
 
     let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, enable_clickhouse).await?;
 
+    // Open WAL writer for durable event streaming.
+    let wal_config = pipeline::wal_config_from_settings(&settings);
+    let wal_writer = match pb_wal::WalWriter::open(wal_config) {
+        Ok(w) => {
+            tracing::info!("WAL writer opened");
+            Some(std::sync::Arc::new(std::sync::Mutex::new(w)))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to open WAL writer, continuing without WAL");
+            None
+        }
+    };
+
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
 
     let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::PersistedRecord>> = Vec::new();
@@ -130,35 +143,65 @@ pub async fn run(
         }));
     }
 
+    // Drop the original sender so the channel closes when dispatcher stops.
+    drop(event_tx);
+
     loop {
-        match event_rx.recv().await {
-            Some(event) => match fanout_txs.as_slice() {
-                [] => {}
-                [a] => {
-                    if a.send(event).await.is_err() {
-                        tracing::warn!("fan-out channel closed, stopping");
-                        break;
-                    }
+        let event = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            event = event_rx.recv() => match event {
+                Some(e) => e,
+                None => {
+                    tracing::info!("event channel closed, shutting down");
+                    break;
                 }
-                [a, b] => {
-                    let ev_a = event.clone();
-                    let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
-                    if ra.is_err() || rb.is_err() {
-                        if let Err(e) = ra {
-                            tracing::warn!("fan-out channel 0 closed: {e}");
-                        }
-                        if let Err(e) = rb {
-                            tracing::warn!("fan-out channel 1 closed: {e}");
-                        }
-                        break;
-                    }
-                }
-                _ => unreachable!("at most 2 sinks"),
             },
-            None => {
-                tracing::info!("event channel closed, shutting down");
-                break;
+        };
+        // Write to WAL before fan-out to sinks.
+        if let Some(ref wal) = wal_writer {
+            match pb_wal::codec::encode(&event) {
+                Ok(payload) => {
+                    let mut w = wal.lock().unwrap();
+                    if let Err(e) = w.append(&payload) {
+                        tracing::warn!(error = %e, "WAL append failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "WAL encode failed");
+                }
             }
+        }
+        match fanout_txs.as_slice() {
+            [] => {}
+            [a] => {
+                if a.send(event).await.is_err() {
+                    tracing::warn!("fan-out channel closed, stopping");
+                    break;
+                }
+            }
+            [a, b] => {
+                let ev_a = event.clone();
+                let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
+                if ra.is_err() || rb.is_err() {
+                    if let Err(e) = ra {
+                        tracing::warn!("fan-out channel 0 closed: {e}");
+                    }
+                    if let Err(e) = rb {
+                        tracing::warn!("fan-out channel 1 closed: {e}");
+                    }
+                    break;
+                }
+            }
+            _ => unreachable!("at most 2 sinks"),
+        }
+    }
+
+    // Flush WAL before shutdown.
+    if let Some(ref wal) = wal_writer {
+        let w = wal.lock().unwrap();
+        if let Err(e) = w.flush() {
+            tracing::warn!(error = %e, "WAL flush failed during shutdown");
         }
     }
 

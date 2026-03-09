@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -18,37 +19,79 @@ pub struct StreamQuery {
     pub asset_id: String,
 }
 
+/// Per-asset broadcast channels for WebSocket streaming.
+///
+/// Each active asset gets its own `broadcast::Sender`, so WS subscribers
+/// receive only updates for their subscribed asset without client-side
+/// filtering. Uses `std::sync::RwLock` because critical sections are tiny
+/// (hashmap lookup) with no async work inside the lock.
 #[derive(Clone)]
-pub struct BookBroadcast {
-    sender: Arc<broadcast::Sender<BookUpdateMessage>>,
+pub struct PerAssetBroadcast {
+    inner: Arc<std::sync::RwLock<FxHashMap<String, broadcast::Sender<BookUpdateMessage>>>>,
 }
 
-impl Default for BookBroadcast {
+impl Default for PerAssetBroadcast {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BookBroadcast {
+impl PerAssetBroadcast {
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
-            sender: Arc::new(sender),
+            inner: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
         }
     }
 
+    /// Returns true if any asset channel has at least one subscriber.
     pub fn has_subscribers(&self) -> bool {
-        self.sender.receiver_count() > 0
+        let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        map.values().any(|sender| sender.receiver_count() > 0)
     }
 
+    /// Send an update to the broadcast channel for the given asset.
+    /// If no channel exists for the asset, the message is silently dropped.
     pub fn send(&self, msg: BookUpdateMessage) {
-        let _ = self.sender.send(msg);
+        let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(sender) = map.get(&msg.asset_id) {
+            let _ = sender.send(msg);
+        }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<BookUpdateMessage> {
-        self.sender.subscribe()
+    /// Subscribe to updates for a specific asset.
+    /// Returns `None` if the asset has no active broadcast channel.
+    pub fn subscribe(&self, asset_id: &str) -> Option<broadcast::Receiver<BookUpdateMessage>> {
+        let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        map.get(asset_id).map(|sender| sender.subscribe())
+    }
+
+    /// Activate broadcast channels for the given asset set.
+    /// Creates channels for new assets and removes channels for assets
+    /// no longer in the set. Removed channels are dropped, which closes
+    /// all their receivers (WS sessions will see `RecvError::Closed`).
+    pub fn set_active_assets(&self, assets: &[String]) {
+        let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        // Remove channels for assets no longer active.
+        map.retain(|asset_id, _| assets.iter().any(|a| a == asset_id));
+        // Create channels for newly active assets.
+        for asset_id in assets {
+            map.entry(asset_id.clone()).or_insert_with(|| {
+                let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
+                sender
+            });
+        }
+    }
+
+    /// Returns the set of asset IDs that currently have broadcast channels.
+    #[cfg(test)]
+    pub fn active_assets(&self) -> Vec<String> {
+        let map = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        map.keys().cloned().collect()
     }
 }
+
+// Keep backward compatibility: type alias for existing code that references BookBroadcast.
+pub type BookBroadcast = PerAssetBroadcast;
 
 pub async fn ws_orderbook(
     State(state): State<AppState>,
@@ -67,25 +110,23 @@ pub async fn ws_orderbook(
         .clone()
         .ok_or_else(|| ApiError::ServiceUnavailable("streaming not available".to_string()))?;
 
+    // Subscribe to the asset-specific broadcast channel.
+    let rx = broadcast.subscribe(&asset_id).ok_or_else(|| {
+        ApiError::ServiceUnavailable(format!("no broadcast channel for asset: {asset_id}"))
+    })?;
+
     let live = state.live.clone();
     let stale_after_secs = state.config.stale_after_secs;
     let default_depth = state.config.default_depth;
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_ws_session(
-            socket,
-            broadcast,
-            live,
-            asset_id,
-            default_depth,
-            stale_after_secs,
-        )
+        handle_ws_session(socket, rx, live, asset_id, default_depth, stale_after_secs)
     }))
 }
 
 async fn handle_ws_session(
     mut socket: WebSocket,
-    broadcast: BookBroadcast,
+    mut rx: broadcast::Receiver<BookUpdateMessage>,
     live: crate::live_state::LiveReadModel,
     asset_id: String,
     depth: usize,
@@ -113,16 +154,13 @@ async fn handle_ws_session(
         }
     }
 
-    let mut rx = broadcast.subscribe();
-
     loop {
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
                     Ok(update) => {
-                        if update.asset_id != asset_id {
-                            continue;
-                        }
+                        // No need to filter by asset_id — this receiver is
+                        // already subscribed to the asset-specific channel.
                         if send_json(&mut socket, &update).await.is_err() {
                             break;
                         }

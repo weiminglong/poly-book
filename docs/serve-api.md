@@ -24,11 +24,26 @@ It is not meant for:
 
 ## Runtime Topology
 
+### Combined Mode (`serve-api` / `all`)
+
 ```text
 WsClient -> Dispatcher -> PersistedRecord fanout -> LiveReadModel -> pb-api routes
                                                  \
-                                                  -> Parquet-backed replay via pb-replay
+                                                  -> pb-service -> pb-replay
 ```
+
+### Separated Mode (`serve`)
+
+```text
+Checkpoint hydration -> WAL tail -> LiveReadModel -> pb-api routes
+                                                  \
+                                                   -> pb-service -> pb-replay
+```
+
+In separated mode, the `serve` process does not run venue connectivity. Instead
+it hydrates from the latest `BookCheckpoint` (Parquet), replays WAL records from
+the checkpoint offset, then live-tails the WAL written by a separate `ingest`
+process.
 
 The browser or client talks only to the API layer. It does not reconstruct the
 book from raw feed messages directly.
@@ -48,23 +63,41 @@ requirements:
 Keeping `serve-api` read-only makes the current workstation honest about what
 the system can support safely.
 
-## Why It Is Parquet-First
+## Configurable Historical Backend
 
-Historical routes currently use `ParquetReader` through `pb-replay` because
-Parquet is the canonical replay and audit source in the repo today. That keeps
-the first API slice aligned with the existing replay semantics rather than
-optimizing immediately for a broader serving backend.
+Historical routes (replay, integrity, execution) are served through `pb-service`
+traits with configurable backends:
 
-ClickHouse-backed API reads are deferred to a later increment.
+- `api.historical_backend = "parquet"` (default) — uses `ParquetReader` via `pb-replay`
+- `api.historical_backend = "clickhouse"` — uses `ClickHouseReader` via `pb-replay`
+
+If ClickHouse is configured but unavailable at startup, the system probes
+connectivity with a 3-second timeout and falls back to Parquet with a warning.
+
+## Process Separation
+
+The serving runtime supports two operational modes:
+
+### Combined (`serve-api` / `all`)
+
+Runs feed connectivity and API in a single process. No WAL involvement. The live
+read model is fed directly from the dispatcher channel.
+
+### Separated (`ingest` + `serve`)
+
+- **`ingest`**: Runs venue WebSocket, dispatcher, WAL writer, and storage sinks.
+  Does not serve HTTP.
+- **`serve`**: Reads the latest `BookCheckpoint` from Parquet, replays WAL from
+  the checkpoint's offset, then live-tails the WAL for new records. Serves HTTP/WS.
+
+The `serve` process can be killed and restarted without data loss. On restart it
+re-hydrates from the latest checkpoint and catches up from the WAL.
 
 ## Why It Does Not Persist Live Data
 
-The first API release subscribes to live data and derives a live read model in
-memory, but it does not write new market data to storage. That keeps the first
-serving runtime focused on read-model correctness and route contracts instead of
-mixing operator-facing API concerns with ingestion persistence concerns.
-
-If you want durable storage, keep using `ingest` or `auto-ingest`.
+The API processes (both `serve-api` and `serve`) derive a live read model in
+memory but do not write new market data to storage. Ingestion persistence is the
+responsibility of the `ingest` or `auto-ingest` processes.
 
 ## Live Modes
 
@@ -146,8 +179,7 @@ Rust API and static frontend assets together remains later work.
 
 ## Deferred From This Phase
 
-The following are intentionally not part of the current `serve-api` slice:
+The following are intentionally not part of the current serving runtime:
 
 - SQL workbench routes
-- ClickHouse-backed API reads
 - latency summary routes

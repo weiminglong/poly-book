@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS book_checkpoints (
     source_session_id Nullable(String),
     bids_json String,
     asks_json String,
+    wal_offset Nullable(UInt64),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(checkpoint_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
@@ -268,6 +269,7 @@ struct CheckpointRow {
     source_session_id: Option<String>,
     bids_json: String,
     asks_json: String,
+    wal_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, clickhouse::Row)]
@@ -428,6 +430,7 @@ impl ClickHouseRecordWriter {
                         source_session_id: event.provenance.source_session_id.clone(),
                         bids_json: serde_json::to_string(&event.bids)?,
                         asks_json: serde_json::to_string(&event.asks)?,
+                        wal_offset: event.wal_offset,
                     };
                     checkpoint_insert.write(&row).await?;
                 }

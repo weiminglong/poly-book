@@ -6,8 +6,11 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
-use pb_replay::{EventReader, ParquetReader, ReplayEngine, ReplayError};
-use pb_types::{AssetId, IngestEvent, IngestEventKind, ReplayMode};
+use pb_service::{
+    AnyExecutionService, AnyIntegrityService, AnyReplayService, ExecutionService,
+    IntegrityService, ReplayService,
+};
+use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +37,9 @@ pub struct AppState {
     pub config: ApiConfig,
     pub broadcast: Option<crate::streaming::BookBroadcast>,
     pub slug_registry: pb_types::SlugRegistry,
+    pub replay_service: AnyReplayService,
+    pub integrity_service: AnyIntegrityService,
+    pub execution_service: AnyExecutionService,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +97,7 @@ pub fn router(state: AppState) -> Router {
     use axum::routing::any;
 
     Router::new()
+        .route("/health", get(health))
         .route("/api/v1/feed/status", get(feed_status))
         .route("/api/v1/assets/active", get(active_assets))
         .route(
@@ -119,6 +126,16 @@ pub async fn serve(
             shutdown.cancelled().await;
         })
         .await
+}
+
+async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.live.is_hydrated() {
+        Ok(Json(serde_json::json!({"status": "ok"})))
+    } else {
+        Err(ApiError::ServiceUnavailable(
+            "hydration in progress".to_string(),
+        ))
+    }
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
@@ -190,34 +207,31 @@ async fn replay_reconstruct(
         )));
     }
     let mode = parse_replay_mode(&query.mode)?;
-    let reader = ParquetReader::new(state.config.parquet_base_path.clone());
-    let engine = ReplayEngine::new(reader);
     let asset_id = AssetId::new(asset_id_str.clone());
-    let replay = engine
-        .reconstruct_at(&asset_id, query.at_us, mode)
-        .await
-        .map_err(map_replay_error)?;
-    let book = replay.book;
+    let result = state
+        .replay_service
+        .reconstruct(&asset_id, query.at_us, mode, Some(depth))
+        .await?;
 
     Ok(Json(ReplayReconstructionResponse {
         asset_id: asset_id_str.clone(),
         slug: state.slug_registry.slug_for_str(&asset_id_str),
-        mode: mode.to_string(),
-        used_checkpoint: replay.used_checkpoint,
-        sequence: book.sequence.raw(),
-        last_update_us: book.last_update_us,
-        best_bid: book.best_bid().map(level_view),
-        best_ask: book.best_ask().map(level_view),
-        mid_price: book.mid_price(),
-        spread: book.spread(),
-        bid_depth: book.bid_depth(),
-        ask_depth: book.ask_depth(),
-        bids: book.top_bids(depth).into_iter().map(level_view).collect(),
-        asks: book.top_asks(depth).into_iter().map(level_view).collect(),
-        continuity_events: replay
+        mode: result.mode.to_string(),
+        used_checkpoint: result.used_checkpoint,
+        sequence: result.sequence,
+        last_update_us: result.timestamp_us,
+        best_bid: result.best_bid.map(level_view),
+        best_ask: result.best_ask.map(level_view),
+        mid_price: result.mid_price,
+        spread: result.spread,
+        bid_depth: result.bid_depth,
+        ask_depth: result.ask_depth,
+        bids: result.bids.into_iter().map(level_view).collect(),
+        asks: result.asks.into_iter().map(level_view).collect(),
+        continuity_events: result
             .continuity_events
             .into_iter()
-            .map(continuity_warning)
+            .map(service_continuity_warning)
             .collect(),
     }))
 }
@@ -268,68 +282,38 @@ async fn integrity_summary(
 ) -> Result<Json<IntegritySummaryResponse>, ApiError> {
     let asset_id_str = resolve_asset_id(&state, &query.asset_id);
     validate_time_window(query.start_us, query.end_us)?;
-    let reader = ParquetReader::new(state.config.parquet_base_path.clone());
     let asset_id = AssetId::new(asset_id_str.clone());
+    let summary = state
+        .integrity_service
+        .summary(&asset_id, query.start_us, query.end_us)
+        .await?;
 
-    let window = reader
-        .read_market_data(&asset_id, query.start_us, query.end_us)
-        .await
-        .map_err(map_replay_error)?;
-    let validations = reader
-        .read_validations(&asset_id, query.start_us, query.end_us)
-        .await
-        .map_err(map_replay_error)?;
-
-    let total_book_events = window.book_events.len() as u64;
-    let total_ingest_events = window.ingest_events.len() as u64;
-
-    let mut reconnect_count = 0u32;
-    let mut gap_count = 0u32;
-    let mut stale_snapshot_skip_count = 0u32;
-
-    for event in &window.ingest_events {
-        match event.kind {
-            IngestEventKind::ReconnectStart | IngestEventKind::ReconnectSuccess => {
-                reconnect_count += 1;
-            }
-            IngestEventKind::SequenceGap => gap_count += 1,
-            IngestEventKind::StaleSnapshotSkip => stale_snapshot_skip_count += 1,
-            IngestEventKind::SourceReset => gap_count += 1,
-        }
-    }
-
-    let validation_count = validations.len() as u32;
-    let validations_matched = validations.iter().filter(|v| v.matched).count() as u32;
-    let validations_mismatched = validation_count - validations_matched;
-
-    let has_continuity_boundaries = reconnect_count > 0 || gap_count > 0;
-    let completeness = if has_continuity_boundaries {
-        CompletenessLabel::BestEffort
-    } else {
-        CompletenessLabel::Complete
+    let validation_count = summary.validation_count as u32;
+    let validations_matched = summary.validation_match_count as u32;
+    let completeness = match summary.completeness {
+        pb_service::CompletenessLevel::Full => CompletenessLabel::Complete,
+        _ => CompletenessLabel::BestEffort,
     };
-
-    let continuity_events = window
-        .ingest_events
-        .into_iter()
-        .map(continuity_warning)
-        .collect();
 
     Ok(Json(IntegritySummaryResponse {
         asset_id: asset_id_str.clone(),
         slug: state.slug_registry.slug_for_str(&asset_id_str),
-        start_us: query.start_us,
-        end_us: query.end_us,
-        total_book_events,
-        total_ingest_events,
-        reconnect_count,
-        gap_count,
-        stale_snapshot_skip_count,
+        start_us: summary.start_us,
+        end_us: summary.end_us,
+        total_book_events: summary.book_event_count as u64,
+        total_ingest_events: summary.ingest_event_count as u64,
+        reconnect_count: summary.reconnect_count as u32,
+        gap_count: summary.gap_count as u32,
+        stale_snapshot_skip_count: summary.stale_snapshot_skip_count as u32,
         validation_count,
         validations_matched,
-        validations_mismatched,
+        validations_mismatched: validation_count - validations_matched,
         completeness,
-        continuity_events,
+        continuity_events: summary
+            .continuity_events
+            .into_iter()
+            .map(service_continuity_warning)
+            .collect(),
     }))
 }
 
@@ -345,30 +329,28 @@ async fn execution_orders(
         )));
     }
 
-    let reader = ParquetReader::new(state.config.parquet_base_path.clone());
-    let mut events = reader
-        .read_execution_events(query.order_id.as_deref(), query.start_us, query.end_us)
-        .await
-        .map_err(map_replay_error)?;
+    let asset_id = query
+        .asset_id
+        .as_ref()
+        .map(|raw| resolve_asset_id(&state, raw))
+        .map(|s| AssetId::new(s.as_str()));
+    let timeline = state
+        .execution_service
+        .timeline(
+            asset_id.as_ref(),
+            query.order_id.as_deref(),
+            query.start_us,
+            query.end_us,
+            limit,
+        )
+        .await?;
 
-    if let Some(raw_asset_filter) = &query.asset_id {
-        let asset_filter = resolve_asset_id(&state, raw_asset_filter);
-        events.retain(|e| {
-            e.asset_id
-                .as_ref()
-                .map(|id| id.as_str() == asset_filter)
-                .unwrap_or(false)
-        });
-    }
-
-    let total_count = events.len() as u64;
-    events.truncate(limit);
-
-    let views: Vec<ExecutionEventView> = events.into_iter().map(execution_event_view).collect();
+    let views: Vec<ExecutionEventView> =
+        timeline.events.into_iter().map(execution_event_view).collect();
 
     Ok(Json(ExecutionTimelineResponse {
         events: views,
-        total_count,
+        total_count: timeline.total_count as u64,
     }))
 }
 
@@ -420,23 +402,11 @@ fn parse_replay_mode(raw: &str) -> Result<ReplayMode, ApiError> {
     }
 }
 
-fn map_replay_error(error: ReplayError) -> ApiError {
-    match error {
-        ReplayError::NoSnapshotFound {
-            asset_id,
-            timestamp_us,
-        } => ApiError::NotFound(format!(
-            "no snapshot found for asset {asset_id} before timestamp {timestamp_us}"
-        )),
-        other => ApiError::Internal(other.to_string()),
-    }
-}
-
-fn continuity_warning(event: IngestEvent) -> ContinuityWarning {
+fn service_continuity_warning(event: pb_service::ContinuityEvent) -> ContinuityWarning {
     ContinuityWarning {
-        kind: event.kind.to_string(),
-        recv_timestamp_us: event.provenance.recv_timestamp_us,
-        exchange_timestamp_us: event.provenance.exchange_timestamp_us,
+        kind: event.kind,
+        recv_timestamp_us: event.recv_timestamp_us,
+        exchange_timestamp_us: event.exchange_timestamp_us,
         details: event.details,
     }
 }
@@ -484,17 +454,28 @@ mod tests {
 
     use super::*;
 
-    fn test_state(temp_path: String) -> AppState {
+    async fn test_state(temp_path: String) -> AppState {
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.mark_hydrated().await;
         AppState {
-            live: LiveReadModel::new(crate::dto::FeedMode::FixedTokens),
+            live,
             config: ApiConfig {
-                parquet_base_path: temp_path,
+                parquet_base_path: temp_path.clone(),
                 default_depth: 20,
                 max_depth: 200,
                 stale_after_secs: 60,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
+            replay_service: AnyReplayService::Parquet(
+                pb_service::ParquetReplayService::new(&temp_path),
+            ),
+            integrity_service: AnyIntegrityService::Parquet(
+                pb_service::ParquetIntegrityService::new(&temp_path),
+            ),
+            execution_service: AnyExecutionService::Parquet(
+                pb_service::ParquetExecutionService::new(&temp_path),
+            ),
         }
     }
 
@@ -508,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn orderbook_snapshot_returns_404_for_inactive_asset() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()));
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
 
         let response = app
             .oneshot(
@@ -526,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn orderbook_snapshot_returns_503_until_snapshot_group_materializes() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
         state.live.set_active_assets(vec!["tok1".to_string()]).await;
         state
             .live
@@ -564,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn live_routes_report_active_assets_and_snapshots() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
         state.live.set_active_assets(vec!["tok1".to_string()]).await;
         let provenance = EventProvenance {
             recv_timestamp_us: 100,
@@ -695,7 +676,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = router(test_state(base_path));
+        let app = router(test_state(base_path).await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -772,7 +753,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = router(test_state(base_path));
+        let app = router(test_state(base_path).await);
         let end_ts = base_ts + 1_000_000;
         let response = app
             .oneshot(
@@ -801,7 +782,7 @@ mod tests {
     #[tokio::test]
     async fn integrity_summary_returns_400_for_invalid_range() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()));
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
 
         let response = app
             .oneshot(
@@ -859,7 +840,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = router(test_state(base_path));
+        let app = router(test_state(base_path).await);
         let end_ts = base_ts + 1_000_000;
         let response = app
             .oneshot(
@@ -925,7 +906,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = router(test_state(base_path));
+        let app = router(test_state(base_path).await);
         let end_ts = base_ts + 1_000_000;
         let response = app
             .oneshot(
@@ -948,7 +929,7 @@ mod tests {
     #[tokio::test]
     async fn execution_orders_returns_400_for_invalid_limit() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()));
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
 
         let response = app
             .oneshot(
@@ -966,8 +947,10 @@ mod tests {
     #[tokio::test]
     async fn ws_orderbook_returns_404_for_inactive_asset() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string());
-        state.broadcast = Some(crate::streaming::BookBroadcast::new());
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        let broadcast = crate::streaming::PerAssetBroadcast::new();
+        broadcast.set_active_assets(&[]);
+        state.broadcast = Some(broadcast);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -998,8 +981,9 @@ mod tests {
         use futures_util::StreamExt;
 
         let tmp_dir = tempfile::tempdir().unwrap();
-        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string());
-        let broadcast = crate::streaming::BookBroadcast::new();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        let broadcast = crate::streaming::PerAssetBroadcast::new();
+        broadcast.set_active_assets(&["tok1".to_string()]);
         state.broadcast = Some(broadcast.clone());
 
         state.live.set_active_assets(vec!["tok1".to_string()]).await;
@@ -1078,7 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn orderbook_snapshot_resolves_slug() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
         state.live.set_active_assets(vec!["tok1".to_string()]).await;
         state
             .live
@@ -1146,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_endpoint_finds_registered_slug() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
         state
             .slug_registry
             .register("btc-up-5m", &AssetId::new("tok42"));
@@ -1172,7 +1156,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_endpoint_returns_not_found_for_unknown() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
 
         let app = router(state);
         let response = app

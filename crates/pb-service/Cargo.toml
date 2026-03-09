@@ -1,0 +1,24 @@
+[package]
+name = "pb-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Transport-neutral domain service layer for the poly-book workstation"
+
+[dependencies]
+pb-types = { workspace = true }
+pb-book = { workspace = true }
+pb-replay = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pb-store = { workspace = true }
+object_store = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

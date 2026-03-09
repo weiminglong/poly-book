@@ -126,6 +126,15 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         metrics: bool,
     },
+    /// Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS)
+    Serve {
+        /// Comma-separated token IDs to serve
+        #[arg(long)]
+        tokens: String,
+        /// Enable metrics server
+        #[arg(long, default_value_t = true)]
+        metrics: bool,
+    },
 }
 
 #[tokio::main]
@@ -256,6 +265,9 @@ async fn main() -> Result<()> {
                 slug_registry,
             )
             .await?;
+        }
+        Commands::Serve { tokens, metrics } => {
+            commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
         }
     }
 

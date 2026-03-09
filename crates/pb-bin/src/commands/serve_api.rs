@@ -58,23 +58,30 @@ pub async fn run(
         shutdown.child_token(),
     );
 
+    // Feed-only mode: no checkpoint/WAL hydration, mark ready immediately.
+    live.mark_hydrated().await;
+
     let runtime_handle = match mode {
         LiveMode::Fixed(token_ids) => spawn_fixed_runtime(
             settings.clone(),
             token_ids,
             event_tx.clone(),
             live.clone(),
+            broadcast.clone(),
             shutdown.child_token(),
         ),
         LiveMode::AutoRotate => spawn_auto_rotate_runtime(
             settings.clone(),
             event_tx.clone(),
             live.clone(),
+            broadcast.clone(),
             shutdown.child_token(),
             slug_registry.clone(),
         ),
     };
 
+    let (replay_service, integrity_service, execution_service) =
+        pipeline::build_services(&settings).await;
     let state = pb_api::AppState {
         live,
         config: pb_api::ApiConfig {
@@ -85,6 +92,9 @@ pub async fn run(
         },
         broadcast: Some(broadcast.clone()),
         slug_registry,
+        replay_service,
+        integrity_service,
+        execution_service,
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "api server bound");
@@ -121,9 +131,11 @@ fn spawn_fixed_runtime(
     token_ids: Vec<String>,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     live: pb_api::LiveReadModel,
+    broadcast: pb_api::PerAssetBroadcast,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        broadcast.set_active_assets(&token_ids);
         live.set_active_assets(token_ids.clone()).await;
         let ws_config = pipeline::ws_config_from_settings(&settings);
         let (raw_tx, raw_rx) = mpsc::channel::<pb_feed::FeedMessage>(2_048);
@@ -158,6 +170,7 @@ fn spawn_auto_rotate_runtime(
     settings: Config,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     live: pb_api::LiveReadModel,
+    broadcast: pb_api::PerAssetBroadcast,
     shutdown: CancellationToken,
     slug_registry: pb_types::SlugRegistry,
 ) -> tokio::task::JoinHandle<()> {
@@ -267,6 +280,7 @@ fn spawn_auto_rotate_runtime(
 
             front_token = Some(new_token);
             active_bucket = Some(target_bucket);
+            broadcast.set_active_assets(&token_ids);
             live.set_active_assets(token_ids.clone()).await;
             live.set_last_rotation_us(now_us()).await;
             pb_metrics::record_rotation();
@@ -276,6 +290,7 @@ fn spawn_auto_rotate_runtime(
         if let Some(old) = front_token.take() {
             old.cancel();
         }
+        broadcast.set_active_assets(&[]);
         live.set_active_assets(Vec::new()).await;
         pipeline::shutdown_handles(child_handles, "auto-rotate child task").await;
     })
