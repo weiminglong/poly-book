@@ -14,7 +14,10 @@ description = "Browser-facing API and live read model for the poly-book workstat
 pb-types = { workspace = true }
 pb-book = { workspace = true }
 pb-replay = { workspace = true }
+pb-wal = { workspace = true }
+pb-service = { workspace = true }
 pb-metrics = { workspace = true }
+rustc-hash = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 axum = { workspace = true }
@@ -31,3 +34,8 @@ tower = "0.5"
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 hyper = "1"
+criterion = { workspace = true }
+
+[[bench]]
+name = "read_model"
+harness = false

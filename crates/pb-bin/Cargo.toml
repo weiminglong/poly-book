@@ -22,6 +22,9 @@ pb-feed = { workspace = true }
 pb-store = { workspace = true }
 pb-replay = { workspace = true }
 pb-metrics = { workspace = true }
+pb-wal = { workspace = true }
+pb-service = { workspace = true }
+pb-grpc = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }

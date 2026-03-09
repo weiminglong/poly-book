@@ -1,17 +1,20 @@
+//! Read-only HTTP API and live read model for workstation clients. See [README](../README.md).
+
 pub mod dto;
 pub mod error;
+pub mod hydration;
 pub mod live_state;
 pub mod server;
 pub mod streaming;
 
 pub use dto::{
-    ActiveAssetSummary, ApiErrorResponse, BookUpdateMessage, CompletenessLabel, ContinuityWarning,
-    DatasetInfo, DatasetSchemaResponse, ExecutionEventView, ExecutionTimelineResponse, FeedMode,
-    FeedStatusResponse, IntegritySummaryResponse, LatencySummaryResponse, LatencyTraceView,
-    LiveOrderBookSnapshot, PriceLevelView, QueryColumn, QueryResultResponse,
-    ReplayReconstructionResponse, SessionStatus,
+    ActiveAssetSummary, ApiErrorResponse, AssetRef, AssetResolveResponse, BookUpdateMessage,
+    CompletenessLabel, ContinuityWarning, DatasetInfo, DatasetSchemaResponse, ExecutionEventView,
+    ExecutionTimelineResponse, FeedMode, FeedStatusResponse, IntegritySummaryResponse,
+    LatencySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot, PriceLevelView, QueryColumn,
+    QueryResultResponse, ReplayReconstructionResponse, SessionStatus,
 };
 pub use error::ApiError;
 pub use live_state::{LiveReadModel, SnapshotLookupError};
 pub use server::{router, serve, ApiConfig, AppState};
-pub use streaming::BookBroadcast;
+pub use streaming::{BookBroadcast, PerAssetBroadcast};

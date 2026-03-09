@@ -241,6 +241,9 @@ Polymarket WS -> pb-feed -> pb-store -> Parquet / ClickHouse
                  +-> pb-metrics
 ```
 
+For detailed data flow diagrams, crate dependency graphs, and runtime topology,
+see [docs/architecture.md](docs/architecture.md).
+
 Workspace crates:
 
 | Crate | Responsibility |

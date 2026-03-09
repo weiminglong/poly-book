@@ -1,3 +1,5 @@
+//! CLI entrypoint for the poly-book workspace. See [README](../README.md).
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
@@ -124,6 +126,15 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         metrics: bool,
     },
+    /// Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS)
+    Serve {
+        /// Comma-separated token IDs to serve
+        #[arg(long)]
+        tokens: String,
+        /// Enable metrics server
+        #[arg(long, default_value_t = true)]
+        metrics: bool,
+    },
 }
 
 #[tokio::main]
@@ -154,6 +165,9 @@ async fn main() -> Result<()> {
     };
     fmt().with_env_filter(filter).init();
 
+    // Create shared slug registry
+    let slug_registry = pb_types::SlugRegistry::new();
+
     // Create shutdown token
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
@@ -168,7 +182,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Discover { filter, limit } => {
-            commands::discover::run(settings, filter, limit).await?;
+            commands::discover::run(settings, filter, limit, slug_registry).await?;
         }
         Commands::Ingest {
             tokens,
@@ -176,7 +190,16 @@ async fn main() -> Result<()> {
             clickhouse,
             metrics,
         } => {
-            commands::ingest::run(settings, tokens, parquet, clickhouse, metrics, shutdown).await?;
+            commands::ingest::run(
+                settings,
+                tokens,
+                parquet,
+                clickhouse,
+                metrics,
+                shutdown,
+                slug_registry,
+            )
+            .await?;
         }
         Commands::Replay {
             token,
@@ -203,22 +226,48 @@ async fn main() -> Result<()> {
             interval_secs,
             duration_mins,
         } => {
-            commands::backfill::run(settings, tokens, interval_secs, duration_mins, shutdown)
-                .await?;
+            commands::backfill::run(
+                settings,
+                tokens,
+                interval_secs,
+                duration_mins,
+                shutdown,
+                slug_registry,
+            )
+            .await?;
         }
         Commands::AutoIngest {
             parquet,
             clickhouse,
             metrics,
         } => {
-            commands::auto_ingest::run(settings, parquet, clickhouse, metrics, shutdown).await?;
+            commands::auto_ingest::run(
+                settings,
+                parquet,
+                clickhouse,
+                metrics,
+                shutdown,
+                slug_registry,
+            )
+            .await?;
         }
         Commands::ServeApi {
             tokens,
             auto_rotate,
             metrics,
         } => {
-            commands::serve_api::run(settings, tokens, auto_rotate, metrics, shutdown).await?;
+            commands::serve_api::run(
+                settings,
+                tokens,
+                auto_rotate,
+                metrics,
+                shutdown,
+                slug_registry,
+            )
+            .await?;
+        }
+        Commands::Serve { tokens, metrics } => {
+            commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
         }
     }
 

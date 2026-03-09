@@ -1,3 +1,5 @@
+//! Historical replay and orderbook reconstruction engine. See [README](../README.md).
+
 pub mod backfill;
 pub mod engine;
 pub mod error;

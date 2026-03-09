@@ -148,6 +148,23 @@ pub fn start_checkpoint_producer(
     ))
 }
 
+pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
+    let base_path = settings
+        .get_string("wal.base_path")
+        .unwrap_or_else(|_| "./data/wal".to_string());
+    let segment_size_mb = settings.get_int("wal.segment_size_mb").unwrap_or(64) as u64;
+    let max_segments = settings.get_int("wal.max_segments").unwrap_or(16) as usize;
+    let max_consumer_lag_bytes = settings
+        .get_int("wal.max_consumer_lag_bytes")
+        .unwrap_or(256 * 1024 * 1024) as u64;
+    pb_wal::WalConfig {
+        base_path: std::path::PathBuf::from(base_path),
+        segment_size: segment_size_mb * 1024 * 1024,
+        max_segments,
+        max_consumer_lag_bytes,
+    }
+}
+
 pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
     pb_feed::WsConfig {
         ws_url: settings
@@ -161,6 +178,107 @@ pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
             .get_int("feed.reconnect_max_delay_ms")
             .unwrap_or(30000) as u64,
     }
+}
+
+/// Build service backends from config.
+///
+/// Reads `api.historical_backend` (default: "parquet") to select the backend.
+/// If "clickhouse" is selected but the connection cannot be established, falls
+/// back to Parquet with a warning.
+pub async fn build_services(
+    settings: &Config,
+) -> (
+    pb_service::AnyReplayService,
+    pb_service::AnyIntegrityService,
+    pb_service::AnyExecutionService,
+) {
+    let backend = settings
+        .get_string("api.historical_backend")
+        .unwrap_or_else(|_| "parquet".to_string());
+    let parquet_base_path = settings
+        .get_string("storage.parquet_base_path")
+        .unwrap_or_else(|_| "./data".to_string());
+
+    match backend.as_str() {
+        "clickhouse" => {
+            let ch_url = settings
+                .get_string("storage.clickhouse_url")
+                .unwrap_or_else(|_| "http://localhost:8123".to_string());
+            let ch_db = settings
+                .get_string("storage.clickhouse_database")
+                .unwrap_or_else(|_| "poly_book".to_string());
+
+            // Probe ClickHouse connectivity before committing to it.
+            let probe_client = clickhouse::Client::default()
+                .with_url(&ch_url)
+                .with_database(&ch_db);
+            let probe = tokio::time::timeout(
+                Duration::from_secs(3),
+                probe_client.query("SELECT 1").fetch_one::<u8>(),
+            )
+            .await;
+
+            match probe {
+                Ok(Ok(_)) => {
+                    tracing::info!(url = %ch_url, database = %ch_db, "using ClickHouse historical backend");
+                    return (
+                        pb_service::AnyReplayService::ClickHouse(
+                            pb_service::ClickHouseReplayService::new(&ch_url, &ch_db),
+                        ),
+                        pb_service::AnyIntegrityService::ClickHouse(
+                            pb_service::ClickHouseIntegrityService::new(&ch_url, &ch_db),
+                        ),
+                        pb_service::AnyExecutionService::ClickHouse(
+                            pb_service::ClickHouseExecutionService::new(&ch_url, &ch_db),
+                        ),
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = %e,
+                        url = %ch_url,
+                        "ClickHouse unavailable, falling back to Parquet"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        url = %ch_url,
+                        "ClickHouse probe timed out, falling back to Parquet"
+                    );
+                }
+            }
+        }
+        other if other != "parquet" => {
+            tracing::warn!(
+                backend = %other,
+                "unknown historical_backend, falling back to parquet"
+            );
+        }
+        _ => {}
+    }
+
+    tracing::info!(path = %parquet_base_path, "using Parquet historical backend");
+    (
+        pb_service::AnyReplayService::Parquet(
+            pb_service::ParquetReplayService::new(&parquet_base_path),
+        ),
+        pb_service::AnyIntegrityService::Parquet(
+            pb_service::ParquetIntegrityService::new(&parquet_base_path),
+        ),
+        pb_service::AnyExecutionService::Parquet(
+            pb_service::ParquetExecutionService::new(&parquet_base_path),
+        ),
+    )
+}
+
+pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
+    let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
+    let addr: SocketAddr = settings
+        .get_string("grpc.listen_addr")
+        .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
+    (enabled, addr)
 }
 
 pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {

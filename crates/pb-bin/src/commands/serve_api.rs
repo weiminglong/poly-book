@@ -6,7 +6,9 @@ use config::Config;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::market_discovery::{current_unix_secs, discover_with_retry, now_us, DiscoverOutcome};
+use super::market_discovery::{
+    current_unix_secs, discover_with_retry, now_us, populate_registry, DiscoverOutcome,
+};
 use super::pipeline;
 
 enum LiveMode {
@@ -20,6 +22,7 @@ pub async fn run(
     auto_rotate: bool,
     enable_metrics: bool,
     shutdown: CancellationToken,
+    slug_registry: pb_types::SlugRegistry,
 ) -> Result<()> {
     let mode = parse_mode(tokens, auto_rotate)?;
 
@@ -55,20 +58,47 @@ pub async fn run(
         shutdown.child_token(),
     );
 
+    // Feed-only mode: no checkpoint/WAL hydration, mark ready immediately.
+    live.mark_hydrated().await;
+
     let runtime_handle = match mode {
         LiveMode::Fixed(token_ids) => spawn_fixed_runtime(
             settings.clone(),
             token_ids,
             event_tx.clone(),
             live.clone(),
+            broadcast.clone(),
             shutdown.child_token(),
         ),
         LiveMode::AutoRotate => spawn_auto_rotate_runtime(
             settings.clone(),
             event_tx.clone(),
             live.clone(),
+            broadcast.clone(),
             shutdown.child_token(),
+            slug_registry.clone(),
         ),
+    };
+
+    let (replay_service, integrity_service, execution_service) =
+        pipeline::build_services(&settings).await;
+
+    // Optionally start gRPC server.
+    let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
+    let grpc_handle = if grpc_enabled {
+        Some(
+            pb_grpc::start_grpc_server(
+                grpc_addr,
+                replay_service.clone(),
+                integrity_service.clone(),
+                execution_service.clone(),
+                shutdown.child_token(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        )
+    } else {
+        None
     };
 
     let state = pb_api::AppState {
@@ -80,13 +110,23 @@ pub async fn run(
             stale_after_secs,
         },
         broadcast: Some(broadcast.clone()),
+        slug_registry,
+        replay_service,
+        integrity_service,
+        execution_service,
+        wal_lag_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        needs_resync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "api server bound");
 
     let serve_result = pb_api::serve(listener, state, shutdown.child_token()).await;
     drop(event_tx);
-    pipeline::shutdown_handles(vec![runtime_handle, consumer_handle], "serve-api task").await;
+    let mut handles = vec![runtime_handle, consumer_handle];
+    if let Some(h) = grpc_handle {
+        handles.push(h);
+    }
+    pipeline::shutdown_handles(handles, "serve-api task").await;
     serve_result?;
     Ok(())
 }
@@ -116,9 +156,11 @@ fn spawn_fixed_runtime(
     token_ids: Vec<String>,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     live: pb_api::LiveReadModel,
+    broadcast: pb_api::PerAssetBroadcast,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        broadcast.set_active_assets(&token_ids);
         live.set_active_assets(token_ids.clone()).await;
         let ws_config = pipeline::ws_config_from_settings(&settings);
         let (raw_tx, raw_rx) = mpsc::channel::<pb_feed::FeedMessage>(2_048);
@@ -153,7 +195,9 @@ fn spawn_auto_rotate_runtime(
     settings: Config,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     live: pb_api::LiveReadModel,
+    broadcast: pb_api::PerAssetBroadcast,
     shutdown: CancellationToken,
+    slug_registry: pb_types::SlugRegistry,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
@@ -214,11 +258,13 @@ fn spawn_auto_rotate_runtime(
             }
 
             let target_slug = format!("btc-updown-5m-{target_bucket}");
-            let token_ids = match discover_with_retry(&rest, &target_slug, &shutdown).await {
-                DiscoverOutcome::Found(ids) => ids,
+            let discovery = match discover_with_retry(&rest, &target_slug, &shutdown).await {
+                DiscoverOutcome::Found(result) => result,
                 DiscoverOutcome::Shutdown => break,
                 DiscoverOutcome::Failed => continue,
             };
+            populate_registry(&slug_registry, &discovery);
+            let token_ids = discovery.token_ids;
 
             if let Some(old) = front_token.take() {
                 old.cancel();
@@ -259,6 +305,7 @@ fn spawn_auto_rotate_runtime(
 
             front_token = Some(new_token);
             active_bucket = Some(target_bucket);
+            broadcast.set_active_assets(&token_ids);
             live.set_active_assets(token_ids.clone()).await;
             live.set_last_rotation_us(now_us()).await;
             pb_metrics::record_rotation();
@@ -268,6 +315,7 @@ fn spawn_auto_rotate_runtime(
         if let Some(old) = front_token.take() {
             old.cancel();
         }
+        broadcast.set_active_assets(&[]);
         live.set_active_assets(Vec::new()).await;
         pipeline::shutdown_handles(child_handles, "auto-rotate child task").await;
     })

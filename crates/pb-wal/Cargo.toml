@@ -1,0 +1,23 @@
+[package]
+name = "pb-wal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Embedded write-ahead log with mmap segments for durable event streaming"
+
+[dependencies]
+memmap2 = "0.9"
+crc32c = "0.6"
+bincode = { workspace = true }
+pb-types = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = { workspace = true }

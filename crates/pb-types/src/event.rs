@@ -155,6 +155,10 @@ pub struct BookCheckpoint {
     pub provenance: EventProvenance,
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
+    /// WAL global byte offset at the time this checkpoint was produced.
+    /// Used by checkpoint hydration to resume WAL tailing from this position.
+    #[serde(default)]
+    pub wal_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

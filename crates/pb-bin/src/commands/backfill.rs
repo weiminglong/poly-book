@@ -1,5 +1,6 @@
 use anyhow::Result;
 use config::Config;
+use pb_types::SlugRegistry;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -9,8 +10,18 @@ pub async fn run(
     interval_secs: u64,
     duration_mins: u64,
     shutdown: CancellationToken,
+    slug_registry: SlugRegistry,
 ) -> Result<()> {
-    let token_ids: Vec<String> = tokens.split(',').map(|s| s.trim().to_string()).collect();
+    let token_ids: Vec<String> = tokens
+        .split(',')
+        .map(|s| s.trim())
+        .map(|input| {
+            slug_registry
+                .resolve(input)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| input.to_string())
+        })
+        .collect();
 
     tracing::info!(
         tokens = ?token_ids,

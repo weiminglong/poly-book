@@ -17,6 +17,17 @@ pub enum ApiError {
     Internal(String),
 }
 
+impl From<pb_service::ServiceError> for ApiError {
+    fn from(err: pb_service::ServiceError) -> Self {
+        match err {
+            pb_service::ServiceError::NotFound(msg) => Self::NotFound(msg),
+            pb_service::ServiceError::InvalidParams(msg) => Self::BadRequest(msg),
+            pb_service::ServiceError::Unavailable(msg) => Self::ServiceUnavailable(msg),
+            pb_service::ServiceError::Internal(msg) => Self::Internal(msg),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {

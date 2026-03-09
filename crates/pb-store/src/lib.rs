@@ -1,3 +1,5 @@
+//! Parquet and ClickHouse storage sinks for persisted event records. See [README](../README.md).
+
 pub mod clickhouse_sink;
 pub mod error;
 pub mod parquet_sink;

@@ -97,6 +97,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
             source_session_id: None,
             sequence: None,
         },
+        wal_offset: None,
         bids: vec![
             PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),

@@ -1,3 +1,5 @@
+//! WebSocket ingest, REST discovery, and dispatch pipeline. See [README](../README.md).
+
 pub mod dispatcher;
 pub mod error;
 pub mod rate_limiter;

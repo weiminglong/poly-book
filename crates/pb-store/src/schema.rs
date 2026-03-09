@@ -71,6 +71,7 @@ pub fn checkpoint_schema() -> Schema {
         Field::new("source_session_id", DataType::Utf8, true),
         Field::new("bids_json", DataType::Utf8, false),
         Field::new("asks_json", DataType::Utf8, false),
+        Field::new("wal_offset", DataType::UInt64, true),
     ])
 }
 
@@ -520,6 +521,12 @@ pub fn checkpoint_refs_to_record_batch(
             .map(|e| serde_json::to_string(&e.asks))
             .collect::<Result<Vec<_>, _>>()?,
     ));
+    let wal_offsets: ArrayRef = Arc::new(UInt64Array::from(
+        checkpoints
+            .iter()
+            .map(|e| e.wal_offset)
+            .collect::<Vec<_>>(),
+    ));
 
     RecordBatch::try_new(
         schema,
@@ -533,6 +540,7 @@ pub fn checkpoint_refs_to_record_batch(
             source_session_ids,
             bids_json,
             asks_json,
+            wal_offsets,
         ],
     )
     .map_err(StoreError::from)

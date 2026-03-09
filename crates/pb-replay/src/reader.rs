@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{Array, AsArray, UInt64Array};
 use arrow::datatypes::{UInt32Type, UInt64Type};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -661,6 +661,12 @@ fn extract_checkpoints(
             },
             bids: serde_json::from_str::<Vec<PriceLevel>>(bids_col.value(i))?,
             asks: serde_json::from_str::<Vec<PriceLevel>>(asks_col.value(i))?,
+            wal_offset: batch
+                .column_by_name("wal_offset")
+                .and_then(|col| {
+                    let arr = col.as_any().downcast_ref::<UInt64Array>()?;
+                    if arr.is_null(i) { None } else { Some(arr.value(i)) }
+                }),
         });
     }
     Ok(rows)
@@ -1065,6 +1071,7 @@ struct CheckpointRow {
     source_session_id: Option<String>,
     bids_json: String,
     asks_json: String,
+    wal_offset: Option<u64>,
 }
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1236,7 +1243,7 @@ impl EventReader for ClickHouseReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<Vec<BookCheckpoint>, ReplayError> {
-        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us >= ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us";
+        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us >= ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us";
         let rows: Vec<CheckpointRow> = self
             .client
             .query(query)
@@ -1260,6 +1267,7 @@ impl EventReader for ClickHouseReader {
                     },
                     bids: serde_json::from_str(&row.bids_json)?,
                     asks: serde_json::from_str(&row.asks_json)?,
+                    wal_offset: row.wal_offset,
                 })
             })
             .collect()
@@ -1270,7 +1278,7 @@ impl EventReader for ClickHouseReader {
         asset_id: &AssetId,
         at_us: u64,
     ) -> Result<Option<BookCheckpoint>, ReplayError> {
-        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us DESC LIMIT 1";
+        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us DESC LIMIT 1";
         let row: Option<CheckpointRow> = self
             .client
             .query(query)
@@ -1292,6 +1300,7 @@ impl EventReader for ClickHouseReader {
                 },
                 bids: serde_json::from_str(&row.bids_json)?,
                 asks: serde_json::from_str(&row.asks_json)?,
+                wal_offset: row.wal_offset,
             })
         })
         .transpose()

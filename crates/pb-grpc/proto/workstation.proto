@@ -1,0 +1,104 @@
+syntax = "proto3";
+package pb.workstation.v1;
+
+service WorkstationService {
+  rpc Reconstruct(ReconstructRequest) returns (ReconstructResponse);
+  rpc IntegritySummary(IntegritySummaryRequest) returns (IntegritySummaryResponse);
+  rpc ExecutionTimeline(ExecutionTimelineRequest) returns (ExecutionTimelineResponse);
+}
+
+message ReconstructRequest {
+  string asset_id = 1;
+  uint64 at_us = 2;
+  string mode = 3;
+  optional uint32 depth = 4;
+}
+
+message ReconstructResponse {
+  string asset_id = 1;
+  uint64 timestamp_us = 2;
+  string mode = 3;
+  uint64 sequence = 4;
+  optional PriceLevel best_bid = 5;
+  optional PriceLevel best_ask = 6;
+  optional double mid_price = 7;
+  optional double spread = 8;
+  uint32 bid_depth = 9;
+  uint32 ask_depth = 10;
+  repeated PriceLevel bids = 11;
+  repeated PriceLevel asks = 12;
+  bool used_checkpoint = 13;
+  repeated ContinuityEvent continuity_events = 14;
+}
+
+message PriceLevel {
+  string price = 1;
+  string size = 2;
+}
+
+message ContinuityEvent {
+  string kind = 1;
+  uint64 recv_timestamp_us = 2;
+  uint64 exchange_timestamp_us = 3;
+  optional string details = 4;
+}
+
+message IntegritySummaryRequest {
+  string asset_id = 1;
+  uint64 start_us = 2;
+  uint64 end_us = 3;
+}
+
+message IntegritySummaryResponse {
+  string asset_id = 1;
+  uint64 start_us = 2;
+  uint64 end_us = 3;
+  uint32 book_event_count = 4;
+  uint32 trade_event_count = 5;
+  uint32 ingest_event_count = 6;
+  uint32 checkpoint_count = 7;
+  uint32 reconnect_count = 8;
+  uint32 gap_count = 9;
+  uint32 stale_snapshot_skip_count = 10;
+  uint32 validation_count = 11;
+  uint32 validation_match_count = 12;
+  string completeness = 13;
+  repeated ContinuityEvent continuity_events = 14;
+}
+
+message ExecutionTimelineRequest {
+  optional string asset_id = 1;
+  optional string order_id = 2;
+  uint64 start_us = 3;
+  uint64 end_us = 4;
+  uint32 limit = 5;
+}
+
+message ExecutionTimelineResponse {
+  repeated ExecutionEvent events = 1;
+  uint32 total_count = 2;
+}
+
+message ExecutionEvent {
+  uint64 event_timestamp_us = 1;
+  optional string asset_id = 2;
+  string order_id = 3;
+  optional string client_order_id = 4;
+  optional string venue_order_id = 5;
+  string kind = 6;
+  optional string side = 7;
+  optional string price = 8;
+  optional string size = 9;
+  optional string status = 10;
+  optional string reason = 11;
+  LatencyTrace latency = 12;
+}
+
+message LatencyTrace {
+  optional uint64 market_data_recv_us = 1;
+  optional uint64 normalization_done_us = 2;
+  optional uint64 strategy_decision_us = 3;
+  optional uint64 order_submit_us = 4;
+  optional uint64 exchange_ack_us = 5;
+  optional uint64 exchange_fill_us = 6;
+}

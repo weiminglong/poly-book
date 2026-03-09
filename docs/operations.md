@@ -44,6 +44,17 @@ listen_addr = "0.0.0.0:3000"
 default_depth = 20
 max_depth = 200
 stale_after_secs = 15
+historical_backend = "parquet"  # or "clickhouse"
+
+[wal]
+base_path = "./data/wal"
+segment_size_mb = 64
+max_segments = 16
+max_consumer_lag_bytes = 268435456  # 256 MB
+
+[grpc]
+enabled = false
+listen_addr = "0.0.0.0:50051"
 
 [logging]
 level = "info"
@@ -82,6 +93,21 @@ Primary datasets:
 - `book_checkpoints`
 - `replay_validations`
 - `execution_events`
+
+### WAL Layout
+
+WAL segments are stored under `data/wal/` (configurable via `wal.base_path`):
+
+```text
+data/wal/
+├── segment_000000000000.wal
+├── segment_000000000001.wal
+├── consumer_serve-live.pos    # reader position file
+└── ...
+```
+
+Each segment is a mmap'd file with length-prefix + CRC32C framing. Records use
+a version-byte prefix for forward-compatible deserialization (`pb_wal::codec`).
 
 ## CI
 
@@ -175,33 +201,86 @@ just parquet-stats
 
 ## Workstation API
 
-Current local API workflows:
+### Combined Mode (single process)
 
 ```bash
-# Serve fixed token IDs
+# Serve fixed token IDs (feed + API in one process)
 cargo run -- serve-api --tokens <TOKEN_ID>
 
 # Follow the rotating BTC 5-minute market
 cargo run -- serve-api --auto-rotate
 ```
 
-Port defaults:
+### Separated Mode (two processes)
 
-- API: `3000`
-- Metrics: `9090`
+```bash
+# Terminal 1 — ingest process (feed + WAL + storage sinks)
+cargo run -- ingest --tokens <TOKEN_ID>
 
-Current `serve-api` scope:
+# Terminal 2 — serve process (checkpoint hydration + WAL tail + API)
+cargo run -- serve --tokens <TOKEN_ID>
+```
 
-- read-only HTTP and WebSocket API
+The `serve` process hydrates from the latest `BookCheckpoint`, replays WAL
+records from that offset, then live-tails the WAL. It can be killed and
+restarted without data loss.
+
+### Historical Backend Selection
+
+Set `api.historical_backend` to choose the query backend for replay, integrity,
+and execution routes:
+
+```bash
+PB__API__HISTORICAL_BACKEND=clickhouse cargo run -- serve-api --auto-rotate
+```
+
+If ClickHouse is configured but unreachable at startup, the system falls back to
+Parquet with a warning.
+
+### gRPC Surface
+
+Enable the gRPC read surface for programmatic access to historical queries:
+
+```bash
+PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
+```
+
+The gRPC server listens on `0.0.0.0:50051` by default and exposes `Reconstruct`,
+`IntegritySummary`, and `ExecutionTimeline` RPCs via the `WorkstationService`.
+
+### Health Endpoint
+
+The `serve` process exposes `GET /api/v1/health` for liveness and readiness
+checks:
+
+```bash
+curl http://localhost:3000/api/v1/health
+# {"ready":true,"hydrated":true,"wal_lag_bytes":0,"needs_resync":false}
+```
+
+Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
+and requires a fresh checkpoint hydration.
+
+### Port Defaults
+
+| Service | Port  |
+|---------|-------|
+| API     | 3000  |
+| Metrics | 9090  |
+| gRPC    | 50051 |
+
+### Current Scope
+
+- read-only HTTP, WebSocket, and gRPC API
 - live feed status and active asset visibility
-- live in-memory order book snapshots and streaming updates
-- Parquet-backed replay reconstruction
-- Parquet-backed integrity summaries
-- Parquet-backed execution timeline inspection
+- live in-memory order book snapshots and per-asset WS streaming
+- configurable Parquet or ClickHouse historical backend
+- replay reconstruction, integrity summaries, execution timeline inspection
+- WAL gap detection, lag tracking, and backpressure-aware pruning
+- health endpoint with hydration and WAL status
 
-Current `serve-api` does not yet provide:
+### Not Yet Provided
 
-- ClickHouse-backed API reads
 - SQL workbench endpoints
 - latency summary endpoints
 

@@ -58,9 +58,9 @@
 
 The detailed step plan below captures the implementation order used for the
 Phase 3-5 workstation rollout. The checklist sections above are the source of
-truth for what has shipped; the remaining open work is query adapters, latency
-and query surfaces, ClickHouse-backed reads, and the Phase 6 clean-slate
-serving split.
+truth for what has shipped; the remaining open work is query adapters (3.4),
+gRPC transport, and multi-replica coordination. Phase 6 clean-slate serving
+architecture is complete (see `openspec/changes/clean-slate-serving-architecture/`).
 
 ### Dependency graph
 
@@ -107,22 +107,22 @@ Phase 5.3 (deployment packaging) ── independent, last
 
 ## Phase 6: Clean-Slate Serving Architecture
 
-- [ ] Define a separate ingest runtime and serve runtime boundary for the
-  workstation platform
-- [ ] Define durable live-state hydration from checkpoints plus ordered update
-  streams rather than direct venue sockets in serving processes
-- [ ] Add a transport-neutral service layer that can back browser HTTP/WS and
-  internal gRPC interfaces
-- [ ] Add a gRPC read surface for internal workstation consumers without
-  replacing browser transports
-- [ ] Move interactive replay, integrity, execution, and query reads onto a
-  serving-oriented backend such as ClickHouse
-- [ ] Keep Parquet as the audit and replay-truth source for validation,
-  reproducibility, and recovery
-- [ ] Define readiness, resync, and backpressure behavior for stateless serving
-  replicas
-- [ ] Document the clean-slate serving topology as a future replacement for the
-  current in-process `serve-api` runtime
+- [x] Define a separate ingest runtime and serve runtime boundary for the
+  workstation platform (pb-bin ingest/serve subcommands, shared WAL directory)
+- [x] Define durable live-state hydration from checkpoints plus ordered update
+  streams rather than direct venue sockets in serving processes (pb-api hydration module, WAL tail)
+- [x] Add a transport-neutral service layer that can back browser HTTP/WS and
+  internal gRPC interfaces (pb-service crate with ReplayService, IntegrityService, ExecutionService traits)
+- [x] Add a gRPC read surface for internal workstation consumers without
+  replacing browser transports (pb-grpc crate with tonic, configurable via grpc.enabled)
+- [x] Move interactive replay, integrity, execution, and query reads onto a
+  serving-oriented backend such as ClickHouse (ClickHouse service implementations with Parquet fallback)
+- [x] Keep Parquet as the audit and replay-truth source for validation,
+  reproducibility, and recovery (maintained — Parquet remains primary, ClickHouse is interactive overlay)
+- [x] Define readiness, resync, and backpressure behavior for stateless serving
+  replicas (WAL gap detection, lag tracking, backpressure pruning, /api/v1/health endpoint)
+- [x] Document the clean-slate serving topology as a future replacement for the
+  current in-process `serve-api` runtime (docs/architecture.md, docs/serve-api.md, docs/operations.md updated)
 
 ---
 

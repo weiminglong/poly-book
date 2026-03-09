@@ -82,6 +82,7 @@ fn checkpoint_and_validation_records(asset_id: &str, base_ts: u64) -> Vec<Persis
                 source_session_id: None,
                 sequence: None,
             },
+            wal_offset: None,
             bids: vec![PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),
                 size: FixedSize::from_f64(100.0).unwrap(),

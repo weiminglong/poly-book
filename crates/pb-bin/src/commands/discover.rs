@@ -2,6 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use config::Config;
+use pb_types::SlugRegistry;
+
+use super::market_discovery::{extract_discovery, populate_registry};
 
 /// Compute the slug for the current live BTC 5-minute market.
 /// These markets use slug `btc-updown-5m-{ts}` where `ts` is the current
@@ -15,7 +18,10 @@ fn current_btc_5m_slug() -> String {
     format!("btc-updown-5m-{bucket}")
 }
 
-fn print_events(events: &[pb_types::wire::GammaEvent]) -> u64 {
+fn print_events(events: &[pb_types::wire::GammaEvent], registry: &SlugRegistry) -> u64 {
+    let discovery = extract_discovery(events);
+    populate_registry(registry, &discovery);
+
     let mut found = 0u64;
     for event in events {
         let title = event.title.as_deref().unwrap_or("");
@@ -24,8 +30,12 @@ fn print_events(events: &[pb_types::wire::GammaEvent]) -> u64 {
             for market in markets {
                 let question = market.question.as_deref().unwrap_or("N/A");
                 let token_ids = market.clob_token_ids.as_deref().unwrap_or("N/A");
+                let slug = market.slug.as_deref().or(event.slug.as_deref());
                 let active = market.active.unwrap_or(false);
                 println!("  Market: {question}");
+                if let Some(slug) = slug {
+                    println!("    Slug: {slug}");
+                }
                 println!("    Token IDs: {token_ids}");
                 println!("    Active: {active}");
             }
@@ -35,7 +45,12 @@ fn print_events(events: &[pb_types::wire::GammaEvent]) -> u64 {
     found
 }
 
-pub async fn run(settings: Config, filter: Option<String>, limit: u64) -> Result<()> {
+pub async fn run(
+    settings: Config,
+    filter: Option<String>,
+    limit: u64,
+    slug_registry: SlugRegistry,
+) -> Result<()> {
     tracing::info!(limit, "Discovering active BTC 5-minute markets...");
 
     let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
@@ -63,7 +78,7 @@ pub async fn run(settings: Config, filter: Option<String>, limit: u64) -> Result
         let events = rest.discover_by_slug(&slug).await?;
         if !events.is_empty() {
             println!("--- Live BTC 5-minute market ---");
-            print_events(&events);
+            print_events(&events, &slug_registry);
             println!();
         } else {
             tracing::warn!(slug, "no live BTC 5-minute market found for current window");
@@ -85,6 +100,10 @@ pub async fn run(settings: Config, filter: Option<String>, limit: u64) -> Result
         let page_count = events.len() as u64;
 
         tracing::debug!(offset, page_count, "fetched event page");
+
+        // Populate registry from this page
+        let page_discovery = extract_discovery(&events);
+        populate_registry(&slug_registry, &page_discovery);
 
         for event in &events {
             let title = event.title.as_deref().unwrap_or("");
@@ -109,8 +128,12 @@ pub async fn run(settings: Config, filter: Option<String>, limit: u64) -> Result
                 for market in markets {
                     let question = market.question.as_deref().unwrap_or("N/A");
                     let token_ids = market.clob_token_ids.as_deref().unwrap_or("N/A");
+                    let slug = market.slug.as_deref().or(event.slug.as_deref());
                     let active = market.active.unwrap_or(false);
                     println!("  Market: {question}");
+                    if let Some(slug) = slug {
+                        println!("    Slug: {slug}");
+                    }
                     println!("    Token IDs: {token_ids}");
                     println!("    Active: {active}");
                 }
