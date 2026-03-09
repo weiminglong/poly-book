@@ -1,11 +1,25 @@
 use std::time::Duration;
 
+use pb_types::{AssetId, SlugRegistry};
 use tokio_util::sync::CancellationToken;
 
 pub enum DiscoverOutcome {
-    Found(Vec<String>),
+    Found(DiscoveryResult),
     Shutdown,
     Failed,
+}
+
+/// Result from market discovery, including token IDs and slug mappings.
+pub struct DiscoveryResult {
+    pub token_ids: Vec<String>,
+    pub slug_mappings: Vec<SlugMapping>,
+}
+
+/// A slug-to-token-IDs mapping extracted from Gamma API market data.
+pub struct SlugMapping {
+    pub slug: String,
+    pub token_ids: Vec<String>,
+    pub label: Option<String>,
 }
 
 pub fn current_unix_secs() -> u64 {
@@ -22,26 +36,52 @@ pub fn now_us() -> u64 {
         .as_micros() as u64
 }
 
-pub fn extract_token_ids(events: &[pb_types::wire::GammaEvent]) -> Vec<String> {
-    let mut ids = Vec::new();
+/// Extract token IDs and slug mappings from Gamma API events.
+pub fn extract_discovery(events: &[pb_types::wire::GammaEvent]) -> DiscoveryResult {
+    let mut token_ids = Vec::new();
+    let mut slug_mappings = Vec::new();
+
     for event in events {
         let markets = match &event.markets {
             Some(m) => m,
             None => continue,
         };
+        // Use event-level slug as fallback for market-level slug
+        let event_slug = event.slug.as_deref();
+
         for market in markets {
             let raw = match &market.clob_token_ids {
                 Some(s) => s,
                 None => continue,
             };
-            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw) {
-                ids.extend(parsed);
-            } else {
-                ids.extend(raw.split(',').map(|s| s.trim().to_string()));
+            let market_token_ids: Vec<String> =
+                if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw) {
+                    parsed
+                } else {
+                    raw.split(',').map(|s| s.trim().to_string()).collect()
+                };
+
+            token_ids.extend(market_token_ids.clone());
+
+            // Build slug mapping from market or event slug
+            let slug = market
+                .slug
+                .as_deref()
+                .or(event_slug);
+            if let Some(slug) = slug {
+                slug_mappings.push(SlugMapping {
+                    slug: slug.to_string(),
+                    token_ids: market_token_ids,
+                    label: market.question.clone(),
+                });
             }
         }
     }
-    ids
+
+    DiscoveryResult {
+        token_ids,
+        slug_mappings,
+    }
 }
 
 pub async fn discover_with_retry(
@@ -56,9 +96,9 @@ pub async fn discover_with_retry(
         }
         match rest.discover_by_slug(slug).await {
             Ok(events) => {
-                let ids = extract_token_ids(&events);
-                if !ids.is_empty() {
-                    return DiscoverOutcome::Found(ids);
+                let result = extract_discovery(&events);
+                if !result.token_ids.is_empty() {
+                    return DiscoverOutcome::Found(result);
                 }
                 tracing::warn!(slug, attempt, "slug returned no token IDs, retrying");
             }
@@ -77,4 +117,17 @@ pub async fn discover_with_retry(
     }
     tracing::error!(slug, "discovery failed after 5 attempts, skipping window");
     DiscoverOutcome::Failed
+}
+
+/// Populate a `SlugRegistry` from discovery results.
+pub fn populate_registry(registry: &SlugRegistry, result: &DiscoveryResult) {
+    for mapping in &result.slug_mappings {
+        registry.register_market(&mapping.slug, &mapping.token_ids);
+        // Register labels for each token
+        if let Some(label) = &mapping.label {
+            for token_id in &mapping.token_ids {
+                registry.register_label(&AssetId::new(token_id.as_str()), label);
+            }
+        }
+    }
 }

@@ -90,12 +90,29 @@ Rotation behavior:
 - rotated-out assets are evicted from the live read model
 - snapshot requests for inactive assets return `404`
 
+## Slug Resolution
+
+All API routes that accept `asset_id` support human-readable slugs as an
+alternative to full 70+ digit Polymarket token IDs. Slugs are populated
+automatically from Gamma API metadata during market discovery.
+
+- In **auto-rotate** mode, slugs are populated on each rotation cycle
+- In **fixed tokens** mode, slugs are available only if the token IDs were
+  passed as slugs that resolve through the registry (e.g., after a prior
+  discovery)
+- The `/api/v1/assets/resolve?q=...` endpoint allows explicit slug-to-token-ID
+  lookup
+
+For BTC 5-minute markets, slugs follow the pattern
+`btc-updown-5m-{timestamp}-yes` / `btc-updown-5m-{timestamp}-no`.
+
 ## Current Route Surface
 
 The current implementation exposes:
 
 - `GET /api/v1/feed/status`
 - `GET /api/v1/assets/active`
+- `GET /api/v1/assets/resolve`
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`

@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    ActiveAssetSummary, BookUpdateMessage, ContinuityWarning, FeedMode, FeedStatusResponse,
-    LiveOrderBookSnapshot, PriceLevelView, SessionStatus,
+    ActiveAssetSummary, AssetRef, BookUpdateMessage, ContinuityWarning, FeedMode,
+    FeedStatusResponse, LiveOrderBookSnapshot, PriceLevelView, SessionStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,14 +373,21 @@ impl LiveReadModel {
         state.last_rotation_us = Some(timestamp_us);
     }
 
-    pub async fn feed_status(&self) -> FeedStatusResponse {
+    pub async fn feed_status_raw(&self) -> FeedStatusResponse {
         let state = self.inner.read().await;
         FeedStatusResponse {
             mode: state.mode,
             session_status: state.session_status,
             current_session_id: state.current_session_id.clone(),
             active_asset_count: state.active_assets.len(),
-            active_assets: state.active_assets.clone(),
+            active_assets: state
+                .active_assets
+                .iter()
+                .map(|id| AssetRef {
+                    asset_id: id.clone(),
+                    slug: None,
+                })
+                .collect(),
             last_rotation_us: state.last_rotation_us,
             latest_global_warning: state.latest_global_warning.clone(),
         }
@@ -397,6 +404,8 @@ impl LiveReadModel {
                 let last_recv = asset_state.and_then(|state| state.last_recv_timestamp_us);
                 ActiveAssetSummary {
                     asset_id: asset_id.clone(),
+                    slug: None,
+                    label: None,
                     last_recv_timestamp_us: last_recv,
                     last_exchange_timestamp_us: asset_state
                         .and_then(|state| state.last_exchange_timestamp_us),
@@ -507,6 +516,7 @@ fn build_live_snapshot(
 ) -> LiveOrderBookSnapshot {
     LiveOrderBookSnapshot {
         asset_id: asset_id.to_string(),
+        slug: None,
         sequence: asset_state.book.sequence.raw(),
         last_update_us: asset_state.book.last_update_us,
         best_bid: level_pair(asset_state.book.best_bid()),
@@ -535,6 +545,7 @@ fn build_live_snapshot(
 fn build_book_update(asset_id: &str, asset_state: &AssetState, depth: usize) -> BookUpdateMessage {
     BookUpdateMessage {
         asset_id: asset_id.to_string(),
+        slug: None,
         sequence: asset_state.book.sequence.raw(),
         last_update_us: asset_state.book.last_update_us,
         bids: asset_state

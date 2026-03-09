@@ -96,6 +96,7 @@ async fn handle_ws_session(
         Ok(snapshot) => {
             let init_msg = BookUpdateMessage {
                 asset_id: snapshot.asset_id.clone(),
+                slug: snapshot.slug.clone(),
                 sequence: snapshot.sequence,
                 last_update_us: snapshot.last_update_us,
                 bids: snapshot.bids,
@@ -131,6 +132,7 @@ async fn handle_ws_session(
                         if let Ok(snapshot) = live.snapshot(&asset_id, depth, stale_after_secs).await {
                             let resync = BookUpdateMessage {
                                 asset_id: snapshot.asset_id.clone(),
+                                slug: snapshot.slug.clone(),
                                 sequence: snapshot.sequence,
                                 last_update_us: snapshot.last_update_us,
                                 bids: snapshot.bids,

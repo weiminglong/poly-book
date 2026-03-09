@@ -25,19 +25,39 @@ pub struct ContinuityWarning {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetRef {
+    pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeedStatusResponse {
     pub mode: FeedMode,
     pub session_status: SessionStatus,
     pub current_session_id: Option<String>,
     pub active_asset_count: usize,
-    pub active_assets: Vec<String>,
+    pub active_assets: Vec<AssetRef>,
     pub last_rotation_us: Option<u64>,
     pub latest_global_warning: Option<ContinuityWarning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetResolveResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveAssetSummary {
     pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub last_recv_timestamp_us: Option<u64>,
     pub last_exchange_timestamp_us: Option<u64>,
     pub stale: bool,
@@ -53,6 +73,8 @@ pub struct PriceLevelView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveOrderBookSnapshot {
     pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub sequence: u64,
     pub last_update_us: u64,
     pub best_bid: Option<PriceLevelView>,
@@ -70,6 +92,8 @@ pub struct LiveOrderBookSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplayReconstructionResponse {
     pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub mode: String,
     pub used_checkpoint: bool,
     pub sequence: u64,
@@ -102,6 +126,8 @@ pub enum CompletenessLabel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntegritySummaryResponse {
     pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub start_us: u64,
     pub end_us: u64,
     pub total_book_events: u64,
@@ -199,6 +225,8 @@ pub struct DatasetSchemaResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookUpdateMessage {
     pub asset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub sequence: u64,
     pub last_update_us: u64,
     pub bids: Vec<PriceLevelView>,

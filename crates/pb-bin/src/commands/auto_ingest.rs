@@ -3,7 +3,9 @@ use config::Config;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::market_discovery::{current_unix_secs, discover_with_retry, DiscoverOutcome};
+use super::market_discovery::{
+    current_unix_secs, discover_with_retry, populate_registry, DiscoverOutcome,
+};
 use super::pipeline;
 
 async fn fanout_event(
@@ -43,6 +45,7 @@ pub async fn run(
     enable_clickhouse: bool,
     enable_metrics: bool,
     shutdown: CancellationToken,
+    slug_registry: pb_types::SlugRegistry,
 ) -> Result<()> {
     tracing::info!("starting auto-ingest with automatic market rotation");
 
@@ -180,11 +183,13 @@ pub async fn run(
 
         let target_slug = format!("btc-updown-5m-{target_bucket}");
 
-        let token_ids = match discover_with_retry(&rest, &target_slug, &shutdown).await {
-            DiscoverOutcome::Found(ids) => ids,
+        let discovery = match discover_with_retry(&rest, &target_slug, &shutdown).await {
+            DiscoverOutcome::Found(result) => result,
             DiscoverOutcome::Shutdown => break,
             DiscoverOutcome::Failed => continue,
         };
+        populate_registry(&slug_registry, &discovery);
+        let token_ids = discovery.token_ids;
 
         if let Some(old) = front_token.take() {
             old.cancel();

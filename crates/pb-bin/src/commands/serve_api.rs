@@ -6,7 +6,9 @@ use config::Config;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::market_discovery::{current_unix_secs, discover_with_retry, now_us, DiscoverOutcome};
+use super::market_discovery::{
+    current_unix_secs, discover_with_retry, now_us, populate_registry, DiscoverOutcome,
+};
 use super::pipeline;
 
 enum LiveMode {
@@ -20,6 +22,7 @@ pub async fn run(
     auto_rotate: bool,
     enable_metrics: bool,
     shutdown: CancellationToken,
+    slug_registry: pb_types::SlugRegistry,
 ) -> Result<()> {
     let mode = parse_mode(tokens, auto_rotate)?;
 
@@ -68,6 +71,7 @@ pub async fn run(
             event_tx.clone(),
             live.clone(),
             shutdown.child_token(),
+            slug_registry.clone(),
         ),
     };
 
@@ -80,6 +84,7 @@ pub async fn run(
             stale_after_secs,
         },
         broadcast: Some(broadcast.clone()),
+        slug_registry,
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
     tracing::info!(%api_listen_addr, "api server bound");
@@ -154,6 +159,7 @@ fn spawn_auto_rotate_runtime(
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     live: pb_api::LiveReadModel,
     shutdown: CancellationToken,
+    slug_registry: pb_types::SlugRegistry,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
@@ -214,11 +220,13 @@ fn spawn_auto_rotate_runtime(
             }
 
             let target_slug = format!("btc-updown-5m-{target_bucket}");
-            let token_ids = match discover_with_retry(&rest, &target_slug, &shutdown).await {
-                DiscoverOutcome::Found(ids) => ids,
+            let discovery = match discover_with_retry(&rest, &target_slug, &shutdown).await {
+                DiscoverOutcome::Found(result) => result,
                 DiscoverOutcome::Shutdown => break,
                 DiscoverOutcome::Failed => continue,
             };
+            populate_registry(&slug_registry, &discovery);
+            let token_ids = discovery.token_ids;
 
             if let Some(old) = front_token.take() {
                 old.cancel();

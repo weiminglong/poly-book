@@ -18,6 +18,22 @@ The current SPA consumes these shipped surfaces:
 
 Latency and Query Workbench surfaces remain deferred.
 
+## Slug Resolution
+
+All API endpoints that accept an `asset_id` (path parameter or query parameter)
+support human-readable slugs as an alternative to the full 70+ digit token ID.
+If the input matches a registered slug, the server resolves it to the canonical
+token ID before processing. Raw token IDs continue to work unchanged.
+
+Slugs are populated automatically from Gamma API metadata during `discover` and
+`auto-ingest` / `serve-api --auto-rotate`. For BTC 5-minute markets with YES/NO
+token pairs, slugs use `-yes` / `-no` suffixes (e.g.
+`btc-updown-5m-1741500000-yes`).
+
+Response DTOs that include `asset_id` also include an optional `slug` field when
+a slug mapping is known. The `active_assets` list in feed status returns
+`{ asset_id, slug }` objects.
+
 ## Encoding Notes
 
 - prices and sizes serialize as fixed-point strings, not floating-point JSON
@@ -44,6 +60,8 @@ Returns:
 Returns one summary per currently active asset:
 
 - `asset_id`
+- `slug` (optional, from slug registry)
+- `label` (optional, human-readable market description)
 - `last_recv_timestamp_us`
 - `last_exchange_timestamp_us`
 - `stale`
@@ -188,6 +206,21 @@ Behavior:
 - handles ping/pong and graceful close
 - slow consumers that fall behind the broadcast buffer receive a fresh full
   snapshot to re-sync
+
+### `GET /api/v1/assets/resolve`
+
+Query params:
+
+- `q`
+  - required; a slug or raw token ID to resolve
+
+Returns:
+
+- `found`: boolean indicating whether the input resolved to a known asset
+- `asset_id`: the canonical token ID (present when `found` is `true`)
+- `slug`: the slug for this asset (present when a slug mapping exists)
+
+This endpoint always returns 200. Use `found` to check resolution status.
 
 ## Deferred Endpoints
 

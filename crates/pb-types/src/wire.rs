@@ -97,6 +97,7 @@ pub struct GammaMarket {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
     pub question: Option<String>,
+    pub slug: Option<String>,
     #[serde(rename = "tokenId")]
     pub token_id: Option<String>,
     /// Clob token IDs - typically [yes_token, no_token]

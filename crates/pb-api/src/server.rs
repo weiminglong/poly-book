@@ -13,9 +13,9 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    CompletenessLabel, ContinuityWarning, ExecutionEventView, ExecutionTimelineResponse,
-    FeedStatusResponse, IntegritySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot,
-    ReplayReconstructionResponse,
+    AssetRef, AssetResolveResponse, CompletenessLabel, ContinuityWarning, ExecutionEventView,
+    ExecutionTimelineResponse, FeedStatusResponse, IntegritySummaryResponse, LatencyTraceView,
+    LiveOrderBookSnapshot, ReplayReconstructionResponse,
 };
 use crate::error::ApiError;
 use crate::live_state::{LiveReadModel, SnapshotLookupError};
@@ -33,6 +33,7 @@ pub struct AppState {
     pub live: LiveReadModel,
     pub config: ApiConfig,
     pub broadcast: Option<crate::streaming::BookBroadcast>,
+    pub slug_registry: pb_types::SlugRegistry,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +66,27 @@ struct ExecutionQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ResolveQuery {
+    q: String,
+}
+
+/// Resolve a slug or token ID to the canonical token ID string.
+/// If the input matches a registered slug, returns the mapped token ID.
+/// Otherwise, passes the input through unchanged (it may be a raw token ID).
+fn resolve_asset_id(state: &AppState, input: &str) -> String {
+    match state.slug_registry.resolve(input) {
+        Some(id) => {
+            let resolved = id.to_string();
+            if resolved != input {
+                tracing::debug!(slug = input, asset_id = %resolved, "resolved slug");
+            }
+            resolved
+        }
+        None => input.to_string(),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     use axum::routing::any;
 
@@ -76,6 +98,7 @@ pub fn router(state: AppState) -> Router {
             get(orderbook_snapshot),
         )
         .route("/api/v1/replay/reconstruct", get(replay_reconstruct))
+        .route("/api/v1/assets/resolve", get(asset_resolve))
         .route("/api/v1/integrity/summary", get(integrity_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
         .route(
@@ -99,23 +122,36 @@ pub async fn serve(
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
-    Json(state.live.feed_status().await)
+    let mut status = state.live.feed_status_raw().await;
+    status.active_assets = status
+        .active_assets
+        .into_iter()
+        .map(|asset_ref| AssetRef {
+            slug: state.slug_registry.slug_for_str(&asset_ref.asset_id),
+            ..asset_ref
+        })
+        .collect();
+    Json(status)
 }
 
 async fn active_assets(State(state): State<AppState>) -> Json<Vec<crate::dto::ActiveAssetSummary>> {
-    Json(
-        state
-            .live
-            .active_assets(state.config.stale_after_secs)
-            .await,
-    )
+    let mut assets = state
+        .live
+        .active_assets(state.config.stale_after_secs)
+        .await;
+    for asset in &mut assets {
+        asset.slug = state.slug_registry.slug_for_str(&asset.asset_id);
+        asset.label = state.slug_registry.label_for_str(&asset.asset_id);
+    }
+    Json(assets)
 }
 
 async fn orderbook_snapshot(
     State(state): State<AppState>,
-    Path(asset_id): Path<String>,
+    Path(raw_asset_id): Path<String>,
     Query(query): Query<DepthQuery>,
 ) -> Result<Json<LiveOrderBookSnapshot>, ApiError> {
+    let asset_id = resolve_asset_id(&state, &raw_asset_id);
     let depth = validate_depth(
         query.depth.unwrap_or(state.config.default_depth),
         state.config.max_depth,
@@ -125,12 +161,15 @@ async fn orderbook_snapshot(
         .snapshot(&asset_id, depth, state.config.stale_after_secs)
         .await
     {
-        Ok(snapshot) => Ok(Json(snapshot)),
+        Ok(mut snapshot) => {
+            snapshot.slug = state.slug_registry.slug_for_str(&asset_id);
+            Ok(Json(snapshot))
+        }
         Err(SnapshotLookupError::AssetNotActive) => {
-            Err(ApiError::NotFound(format!("asset not active: {asset_id}")))
+            Err(ApiError::NotFound(format!("asset not active: {raw_asset_id}")))
         }
         Err(SnapshotLookupError::SnapshotNotReady) => Err(ApiError::ServiceUnavailable(format!(
-            "snapshot not ready for asset: {asset_id}"
+            "snapshot not ready for asset: {raw_asset_id}"
         ))),
     }
 }
@@ -139,6 +178,7 @@ async fn replay_reconstruct(
     State(state): State<AppState>,
     Query(query): Query<ReplayQuery>,
 ) -> Result<Json<ReplayReconstructionResponse>, ApiError> {
+    let asset_id_str = resolve_asset_id(&state, &query.asset_id);
     let depth = validate_depth(
         query.depth.unwrap_or(state.config.default_depth),
         state.config.max_depth,
@@ -152,7 +192,7 @@ async fn replay_reconstruct(
     let mode = parse_replay_mode(&query.mode)?;
     let reader = ParquetReader::new(state.config.parquet_base_path.clone());
     let engine = ReplayEngine::new(reader);
-    let asset_id = AssetId::new(query.asset_id.clone());
+    let asset_id = AssetId::new(asset_id_str.clone());
     let replay = engine
         .reconstruct_at(&asset_id, query.at_us, mode)
         .await
@@ -160,7 +200,8 @@ async fn replay_reconstruct(
     let book = replay.book;
 
     Ok(Json(ReplayReconstructionResponse {
-        asset_id: query.asset_id,
+        asset_id: asset_id_str.clone(),
+        slug: state.slug_registry.slug_for_str(&asset_id_str),
         mode: mode.to_string(),
         used_checkpoint: replay.used_checkpoint,
         sequence: book.sequence.raw(),
@@ -179,6 +220,27 @@ async fn replay_reconstruct(
             .map(continuity_warning)
             .collect(),
     }))
+}
+
+async fn asset_resolve(
+    State(state): State<AppState>,
+    Query(query): Query<ResolveQuery>,
+) -> Json<AssetResolveResponse> {
+    match state.slug_registry.resolve(&query.q) {
+        Some(asset_id) => {
+            let asset_id_str = asset_id.to_string();
+            Json(AssetResolveResponse {
+                found: true,
+                slug: state.slug_registry.slug_for_str(&asset_id_str),
+                asset_id: Some(asset_id_str),
+            })
+        }
+        None => Json(AssetResolveResponse {
+            found: false,
+            asset_id: None,
+            slug: None,
+        }),
+    }
 }
 
 const EXECUTION_DEFAULT_LIMIT: usize = 100;
@@ -204,9 +266,10 @@ async fn integrity_summary(
     State(state): State<AppState>,
     Query(query): Query<IntegrityQuery>,
 ) -> Result<Json<IntegritySummaryResponse>, ApiError> {
+    let asset_id_str = resolve_asset_id(&state, &query.asset_id);
     validate_time_window(query.start_us, query.end_us)?;
     let reader = ParquetReader::new(state.config.parquet_base_path.clone());
-    let asset_id = AssetId::new(query.asset_id.clone());
+    let asset_id = AssetId::new(asset_id_str.clone());
 
     let window = reader
         .read_market_data(&asset_id, query.start_us, query.end_us)
@@ -253,7 +316,8 @@ async fn integrity_summary(
         .collect();
 
     Ok(Json(IntegritySummaryResponse {
-        asset_id: query.asset_id,
+        asset_id: asset_id_str.clone(),
+        slug: state.slug_registry.slug_for_str(&asset_id_str),
         start_us: query.start_us,
         end_us: query.end_us,
         total_book_events,
@@ -287,7 +351,8 @@ async fn execution_orders(
         .await
         .map_err(map_replay_error)?;
 
-    if let Some(asset_filter) = &query.asset_id {
+    if let Some(raw_asset_filter) = &query.asset_id {
+        let asset_filter = resolve_asset_id(&state, raw_asset_filter);
         events.retain(|e| {
             e.asset_id
                 .as_ref()
@@ -429,6 +494,7 @@ mod tests {
                 stale_after_secs: 60,
             },
             broadcast: None,
+            slug_registry: pb_types::SlugRegistry::new(),
         }
     }
 
@@ -1007,5 +1073,121 @@ mod tests {
         let _ = ws.close(None).await;
         shutdown.cancel();
         let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn orderbook_snapshot_resolves_slug() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Bid,
+                price: FixedPrice::from_f64(0.50).unwrap(),
+                size: FixedSize::from_f64(10.0).unwrap(),
+                provenance: test_provenance(100, 0),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Ask,
+                price: FixedPrice::from_f64(0.60).unwrap(),
+                size: FixedSize::from_f64(20.0).unwrap(),
+                provenance: test_provenance(100, 1),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Ingest(pb_types::IngestEvent {
+                asset_id: None,
+                kind: pb_types::IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        // Register a slug for tok1
+        state
+            .slug_registry
+            .register("my-market-yes", &AssetId::new("tok1"));
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbooks/my-market-yes/snapshot?depth=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot: crate::dto::LiveOrderBookSnapshot = response_json(response).await;
+        assert_eq!(snapshot.asset_id, "tok1");
+        assert_eq!(snapshot.slug.as_deref(), Some("my-market-yes"));
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoint_finds_registered_slug() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+        state
+            .slug_registry
+            .register("btc-up-5m", &AssetId::new("tok42"));
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/assets/resolve?q=btc-up-5m")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: crate::dto::AssetResolveResponse = response_json(response).await;
+        assert!(result.found);
+        assert_eq!(result.asset_id.as_deref(), Some("tok42"));
+        assert_eq!(result.slug.as_deref(), Some("btc-up-5m"));
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoint_returns_not_found_for_unknown() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string());
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/assets/resolve?q=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: crate::dto::AssetResolveResponse = response_json(response).await;
+        assert!(!result.found);
+        assert!(result.asset_id.is_none());
     }
 }

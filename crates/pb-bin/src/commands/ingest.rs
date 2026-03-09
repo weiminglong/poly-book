@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use config::Config;
+use pb_types::SlugRegistry;
 use tokio_util::sync::CancellationToken;
 
 use super::pipeline;
@@ -11,11 +12,21 @@ pub async fn run(
     enable_clickhouse: bool,
     enable_metrics: bool,
     shutdown: CancellationToken,
+    slug_registry: SlugRegistry,
 ) -> Result<()> {
-    let token_ids: Vec<String> = match tokens {
+    let raw_inputs: Vec<String> = match tokens {
         Some(t) => t.split(',').map(|s| s.trim().to_string()).collect(),
         None => bail!("--tokens is required. Use 'discover' command to find token IDs."),
     };
+    let token_ids: Vec<String> = raw_inputs
+        .into_iter()
+        .map(|input| {
+            slug_registry
+                .resolve(&input)
+                .map(|id| id.to_string())
+                .unwrap_or(input)
+        })
+        .collect();
 
     if token_ids.is_empty() {
         bail!("No token IDs provided");
