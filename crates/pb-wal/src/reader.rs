@@ -50,6 +50,7 @@ impl WalReader {
     /// Read the next record, or `None` if no more records are available.
     /// Automatically advances across segment boundaries.
     /// Skips corrupt records (CRC mismatch) with a warning log.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Vec<u8>>, WalError> {
         loop {
             if let Some(data) = &self.current_data {
@@ -166,8 +167,7 @@ impl WalReader {
         if !path.exists() {
             return Ok(None);
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| WalError::io(&path, e))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| WalError::io(&path, e))?;
         let trimmed = content.trim();
         if let Some((seg_str, off_str)) = trimmed.split_once(':') {
             if let (Ok(seg), Ok(off)) = (seg_str.parse::<u64>(), off_str.parse::<usize>()) {

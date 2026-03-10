@@ -34,17 +34,20 @@ Full system diagram, crate dependency graph, and runtime topology:
 - **pb-store**: `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ClickHouseSink` (1s batch, `ReplacingMergeTree`).
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-wal**: Embedded write-ahead log. Mmap'd segments with length-prefix + CRC32C framing. `WalWriter` appends and rotates, `WalReader` tails with independent consumer positions, `WalPruner` reclaims. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
-- **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, etc.) for configurable backend selection.
+- **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService`, `QueryService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, `AnyIntegrityService`, `AnyExecutionService`, `AnyQueryService`) for configurable backend selection.
 - **pb-grpc**: gRPC read surface using tonic. Exposes `WorkstationService` with `Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs. Delegates to `pb-service` traits. Configurable via `[grpc]` config section (disabled by default, port 50051).
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
-- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `serve-api`, `serve`, and `all`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `all` (combined). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
+- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, and `serve`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
-design notes, and a **Docs to Update After Changes** table. Before modifying a
-crate, read its README. After making changes, check the update table and
-propagate changes to all listed targets (docs/, config, other crates, OpenSpec
-artifacts, web/).
+design notes, and a **Docs to Update After Changes** table.
+
+**MANDATORY**: Before modifying a crate, read its README. After making changes:
+1. Update the crate's own README if you changed its public API, types, or behavior
+2. Check the **Docs to Update After Changes** table and propagate to every listed
+   target (docs/, config, CLAUDE.md, other crate READMEs, web/)
+3. Do not consider a task complete until doc propagation is done
 
 ## Conventions
 - Fixed-point over floating-point for prices and sizes — never use `f64` for orderbook state
@@ -60,7 +63,7 @@ artifacts, web/).
 - ADRs in `docs/adr/` document key architectural decisions
 
 ## Config
-`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[api]`, `[wal]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
+`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
 
 ## Read This First
 If you are working on the workstation API, frontend, or runtime boundaries, read
@@ -69,7 +72,7 @@ these in order:
 1. `docs/serve-api.md` — current runtime purpose, constraints, and deferred scope
 2. `docs/api.md` — current route contract and error semantics
 3. `docs/operations.md` — config, ports, and local run commands
-4. `openspec/changes/2026-03-07-quant-workstation-platform/` — source of truth for current workstation scope and future module boundaries
+4. `openspec/changes/archive/2026-03-07-quant-workstation-platform/` — archived workstation scope and future module boundaries
 
 If you are changing replay, storage, or integrity semantics, also read:
 
@@ -85,7 +88,7 @@ When you change the workstation/API/runtime scope:
 - update `docs/api.md` for route shape and error semantics
 - update `docs/operations.md` for commands, config, and ports
 - update `README.md` if contributor discovery changes
-- update the active OpenSpec change under `openspec/changes/2026-03-07-quant-workstation-platform/`
+- update the archived OpenSpec change under `openspec/changes/archive/2026-03-07-quant-workstation-platform/` if scope boundaries change
 
 When you implement only part of a planned capability, explicitly document what
 shipped and what remains deferred. Keep the docs and OpenSpec honest about
@@ -96,7 +99,7 @@ The workstation backend is read-only with process separation:
 
 - `ingest` process: feed → dispatcher → WAL + storage sinks (Parquet, ClickHouse)
 - `serve` process: checkpoint hydration → WAL tail → watch-based read model → HTTP/WS
-- `serve-api` / `all`: combined mode (backward compatible, no WAL)
+- `serve-api`: combined mode (feed + API in one process, no WAL)
 - configurable backend: `api.historical_backend = "parquet" | "clickhouse"` with auto-fallback
 - optional gRPC surface: `grpc.enabled = true` exposes WorkstationService on port 50051
 - WAL coordination: gap detection, lag tracking, backpressure pruning for multi-replica setups
@@ -108,14 +111,14 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/replay/reconstruct`
   - `GET /api/v1/integrity/summary`
   - `GET /api/v1/execution/orders`
-  - `GET /api/v1/health`
+  - `GET /health`
+  - `GET /api/v1/query/datasets`
+  - `POST /api/v1/query/sql`
   - `WS /api/v1/streams/orderbook?asset_id=...`
 
 Deferred for later phases:
 
-- SQL workbench routes
 - latency summary routes
-- frontend SPA implementation
 
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)
@@ -130,6 +133,6 @@ Spec-driven development artifacts live under `openspec/changes/`.
 - Archived changes live under `openspec/changes/archive/`
 - Each change has: `proposal.md`, `design.md`, `specs/*/spec.md`, `tasks.md`
 
-For workstation work, prefer the active change
-`openspec/changes/2026-03-07-quant-workstation-platform/` rather than only the
-archive.
+For workstation work, refer to the archived change
+`openspec/changes/archive/2026-03-07-quant-workstation-platform/` for scope and
+module boundary definitions.

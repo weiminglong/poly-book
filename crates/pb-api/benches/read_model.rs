@@ -17,13 +17,7 @@ fn provenance(seq: u64) -> EventProvenance {
     }
 }
 
-fn snapshot_record(
-    asset_id: &str,
-    side: Side,
-    price: f64,
-    size: f64,
-    seq: u64,
-) -> PersistedRecord {
+fn snapshot_record(asset_id: &str, side: Side, price: f64, size: f64, seq: u64) -> PersistedRecord {
     PersistedRecord::Book(BookEvent {
         asset_id: AssetId::new(asset_id),
         kind: BookEventKind::Snapshot,
@@ -52,13 +46,25 @@ fn bench_snapshot_read(c: &mut Criterion) {
         for i in 0..50 {
             let bid_price = 0.50 - (i as f64 * 0.001);
             let ask_price = 0.51 + (i as f64 * 0.001);
-            tx.send(snapshot_record(asset_id, Side::Bid, bid_price, 100.0 + i as f64, seq))
-                .await
-                .unwrap();
+            tx.send(snapshot_record(
+                asset_id,
+                Side::Bid,
+                bid_price,
+                100.0 + i as f64,
+                seq,
+            ))
+            .await
+            .unwrap();
             seq += 1;
-            tx.send(snapshot_record(asset_id, Side::Ask, ask_price, 100.0 + i as f64, seq))
-                .await
-                .unwrap();
+            tx.send(snapshot_record(
+                asset_id,
+                Side::Ask,
+                ask_price,
+                100.0 + i as f64,
+                seq,
+            ))
+            .await
+            .unwrap();
             seq += 1;
         }
         // Delta triggers snapshot group materialization.

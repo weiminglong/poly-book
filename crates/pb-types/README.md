@@ -39,7 +39,10 @@ pb-types ◄── pb-feed    (wire deserialization)
          ◄── pb-book    (FixedPrice, FixedSize, Side)
          ◄── pb-store   (Arrow schemas, record batches)
          ◄── pb-replay  (event reading, replay results)
+         ◄── pb-wal     (codec serialization of PersistedRecord)
+         ◄── pb-service (domain service types)
          ◄── pb-api     (DTOs, response types)
+         ◄── pb-grpc    (gRPC message conversion)
          ◄── pb-bin     (CLI arg types)
 ```
 

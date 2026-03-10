@@ -89,6 +89,8 @@ pub async fn run(
     // Build and start HTTP/WS server.
     let (replay_service, integrity_service, execution_service) =
         pipeline::build_services(&settings).await;
+    let query_service = pipeline::build_query_service(&settings).await;
+    let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
 
     // Optionally start gRPC server.
     let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
@@ -115,12 +117,15 @@ pub async fn run(
             default_depth,
             max_depth,
             stale_after_secs,
+            query_max_rows,
+            query_timeout_secs,
         },
         broadcast: Some(broadcast),
         slug_registry,
         replay_service,
         integrity_service,
         execution_service,
+        query_service,
         wal_lag_bytes,
         needs_resync,
     };
@@ -140,6 +145,7 @@ pub async fn run(
 /// Spawn a background task that continuously tails the WAL for new records
 /// and feeds them through the projector. Updates health atomics for the
 /// `/health` endpoint.
+#[allow(clippy::too_many_arguments)]
 fn spawn_wal_tailer(
     config: pb_wal::WalConfig,
     live: pb_api::LiveReadModel,

@@ -64,10 +64,7 @@ pub fn extract_discovery(events: &[pb_types::wire::GammaEvent]) -> DiscoveryResu
             token_ids.extend(market_token_ids.clone());
 
             // Build slug mapping from market or event slug
-            let slug = market
-                .slug
-                .as_deref()
-                .or(event_slug);
+            let slug = market.slug.as_deref().or(event_slug);
             if let Some(slug) = slug {
                 slug_mappings.push(SlugMapping {
                     slug: slug.to_string(),

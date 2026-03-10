@@ -36,6 +36,10 @@ max_depth = 200
 stale_after_secs = 15
 # Backend for historical queries: "parquet" or "clickhouse"
 historical_backend = "parquet"
+# Query workbench (requires clickhouse backend)
+query_workbench_enabled = false
+query_max_rows = 10000
+query_timeout_secs = 30
 
 [grpc]
 enabled = false

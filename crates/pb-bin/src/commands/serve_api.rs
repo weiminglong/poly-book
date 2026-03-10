@@ -82,6 +82,8 @@ pub async fn run(
 
     let (replay_service, integrity_service, execution_service) =
         pipeline::build_services(&settings).await;
+    let query_service = pipeline::build_query_service(&settings).await;
+    let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
 
     // Optionally start gRPC server.
     let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
@@ -108,12 +110,15 @@ pub async fn run(
             default_depth,
             max_depth,
             stale_after_secs,
+            query_max_rows,
+            query_timeout_secs,
         },
         broadcast: Some(broadcast.clone()),
         slug_registry,
         replay_service,
         integrity_service,
         execution_service,
+        query_service,
         wal_lag_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         needs_resync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
