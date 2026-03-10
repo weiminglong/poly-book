@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tracing::{info, warn};
 
 use crate::error::WalError;
@@ -82,8 +80,7 @@ impl WalWriter {
             if id < min_consumed {
                 let path = segment::segment_path(&self.config.base_path, id);
                 if path.exists() {
-                    std::fs::remove_file(&path)
-                        .map_err(|e| WalError::io(&path, e))?;
+                    std::fs::remove_file(&path).map_err(|e| WalError::io(&path, e))?;
                     info!(segment_id = id, "pruned WAL segment");
                 }
             }
@@ -111,9 +108,7 @@ impl WalWriter {
                 continue;
             }
             let path = segment::segment_path(&self.config.base_path, id);
-            let file_size = std::fs::metadata(&path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             retained_bytes += file_size;
             if retained_bytes <= self.config.max_consumer_lag_bytes {
                 retention_cutoff_id = id;
@@ -134,15 +129,13 @@ impl WalWriter {
             if id < min_consumed {
                 let path = segment::segment_path(&self.config.base_path, id);
                 if path.exists() {
-                    std::fs::remove_file(&path)
-                        .map_err(|e| WalError::io(&path, e))?;
+                    std::fs::remove_file(&path).map_err(|e| WalError::io(&path, e))?;
                     info!(segment_id = id, "pruned WAL segment (backpressure-aware)");
                 }
             } else {
                 warn!(
                     segment_id = id,
-                    min_consumed,
-                    "skipping prune: consumer has not advanced past segment"
+                    min_consumed, "skipping prune: consumer has not advanced past segment"
                 );
             }
         }
@@ -173,8 +166,8 @@ impl WalWriter {
                 // Consumer hasn't committed yet — treat as position 0.
                 return Ok(0);
             }
-            let content = std::fs::read_to_string(pos_file)
-                .map_err(|e| WalError::io(pos_file, e))?;
+            let content =
+                std::fs::read_to_string(pos_file).map_err(|e| WalError::io(pos_file, e))?;
             // Format: "segment_id:offset"
             if let Some((seg_str, _)) = content.trim().split_once(':') {
                 if let Ok(seg_id) = seg_str.parse::<u64>() {
@@ -198,19 +191,4 @@ impl std::fmt::Debug for WalWriter {
             .field("write_offset", &self.active.write_offset)
             .finish()
     }
-}
-
-/// Helper to find all consumer position files in a WAL directory.
-pub fn consumer_position_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, WalError> {
-    let mut files = Vec::new();
-    let entries = std::fs::read_dir(dir).map_err(|e| WalError::io(dir, e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| WalError::io(dir, e))?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("consumer_") && name.ends_with(".pos") {
-            files.push(entry.path());
-        }
-    }
-    Ok(files)
 }

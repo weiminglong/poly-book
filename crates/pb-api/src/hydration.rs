@@ -91,8 +91,7 @@ pub async fn hydrate<R: pb_replay::EventReader>(
     // Phase 2: Replay WAL tail from the minimum checkpoint offset.
     if let Some(wal_dir) = wal_path {
         if wal_dir.exists() {
-            result.wal_records_replayed =
-                replay_wal_tail(model, wal_dir, min_wal_offset).await;
+            result.wal_records_replayed = replay_wal_tail(model, wal_dir, min_wal_offset).await;
             result.wal_resume_offset = min_wal_offset;
         } else {
             info!(path = %wal_dir.display(), "WAL directory not found, skipping WAL replay");
@@ -145,8 +144,7 @@ async fn replay_wal_tail(
             Ok(Some(payload)) => {
                 // Compute current global offset for skip comparison.
                 let (seg_id, seg_offset) = reader.position();
-                let current_global =
-                    seg_id * config.segment_size + seg_offset as u64;
+                let current_global = seg_id * config.segment_size + seg_offset as u64;
 
                 // Skip records that are before the checkpoint offset.
                 if current_global <= skip_to && from_global_offset.is_some() {

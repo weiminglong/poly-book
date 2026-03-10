@@ -267,8 +267,14 @@ impl ExecutionService for AnyExecutionService {
         limit: usize,
     ) -> Result<ExecutionTimeline, ServiceError> {
         match self {
-            Self::Parquet(s) => s.timeline(asset_id, order_id, start_us, end_us, limit).await,
-            Self::ClickHouse(s) => s.timeline(asset_id, order_id, start_us, end_us, limit).await,
+            Self::Parquet(s) => {
+                s.timeline(asset_id, order_id, start_us, end_us, limit)
+                    .await
+            }
+            Self::ClickHouse(s) => {
+                s.timeline(asset_id, order_id, start_us, end_us, limit)
+                    .await
+            }
         }
     }
 }

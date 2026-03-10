@@ -522,10 +522,7 @@ pub fn checkpoint_refs_to_record_batch(
             .collect::<Result<Vec<_>, _>>()?,
     ));
     let wal_offsets: ArrayRef = Arc::new(UInt64Array::from(
-        checkpoints
-            .iter()
-            .map(|e| e.wal_offset)
-            .collect::<Vec<_>>(),
+        checkpoints.iter().map(|e| e.wal_offset).collect::<Vec<_>>(),
     ));
 
     RecordBatch::try_new(

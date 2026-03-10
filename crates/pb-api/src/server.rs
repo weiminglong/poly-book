@@ -9,8 +9,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use pb_service::{
-    AnyExecutionService, AnyIntegrityService, AnyQueryService, AnyReplayService,
-    ExecutionService, IntegrityService, QueryService, ReplayService,
+    AnyExecutionService, AnyIntegrityService, AnyQueryService, AnyReplayService, ExecutionService,
+    IntegrityService, QueryService, ReplayService,
 };
 use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
@@ -202,9 +202,9 @@ async fn orderbook_snapshot(
             snapshot.slug = state.slug_registry.slug_for_str(&asset_id);
             Ok(Json(snapshot))
         }
-        Err(SnapshotLookupError::AssetNotActive) => {
-            Err(ApiError::NotFound(format!("asset not active: {raw_asset_id}")))
-        }
+        Err(SnapshotLookupError::AssetNotActive) => Err(ApiError::NotFound(format!(
+            "asset not active: {raw_asset_id}"
+        ))),
         Err(SnapshotLookupError::SnapshotNotReady) => Err(ApiError::ServiceUnavailable(format!(
             "snapshot not ready for asset: {raw_asset_id}"
         ))),
@@ -365,8 +365,11 @@ async fn execution_orders(
         )
         .await?;
 
-    let views: Vec<ExecutionEventView> =
-        timeline.events.into_iter().map(execution_event_view).collect();
+    let views: Vec<ExecutionEventView> = timeline
+        .events
+        .into_iter()
+        .map(execution_event_view)
+        .collect();
 
     Ok(Json(ExecutionTimelineResponse {
         events: views,
@@ -546,9 +549,9 @@ mod tests {
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
-            replay_service: AnyReplayService::Parquet(
-                pb_service::ParquetReplayService::new(&temp_path),
-            ),
+            replay_service: AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
+                &temp_path,
+            )),
             integrity_service: AnyIntegrityService::Parquet(
                 pb_service::ParquetIntegrityService::new(&temp_path),
             ),

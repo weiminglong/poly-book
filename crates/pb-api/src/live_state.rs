@@ -281,16 +281,10 @@ impl LiveState {
     fn apply_checkpoint(&mut self, checkpoint: &BookCheckpoint) {
         let asset_id = checkpoint.asset_id.as_str();
         let state = self.ensure_asset(asset_id);
-        let bids: Vec<(FixedPrice, FixedSize)> = checkpoint
-            .bids
-            .iter()
-            .map(|l| (l.price, l.size))
-            .collect();
-        let asks: Vec<(FixedPrice, FixedSize)> = checkpoint
-            .asks
-            .iter()
-            .map(|l| (l.price, l.size))
-            .collect();
+        let bids: Vec<(FixedPrice, FixedSize)> =
+            checkpoint.bids.iter().map(|l| (l.price, l.size)).collect();
+        let asks: Vec<(FixedPrice, FixedSize)> =
+            checkpoint.asks.iter().map(|l| (l.price, l.size)).collect();
         state.book.apply_snapshot(
             &bids,
             &asks,
@@ -519,11 +513,7 @@ impl Projector {
         let _ = self.watch_tx.send(snapshot);
     }
 
-    async fn run(
-        mut self,
-        mut cmd_rx: mpsc::Receiver<ProjectorCommand>,
-        token: CancellationToken,
-    ) {
+    async fn run(mut self, mut cmd_rx: mpsc::Receiver<ProjectorCommand>, token: CancellationToken) {
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
@@ -742,12 +732,9 @@ impl LiveReadModel {
                     slug: None,
                     label: None,
                     last_recv_timestamp_us: last_recv,
-                    last_exchange_timestamp_us: asset
-                        .and_then(|a| a.last_exchange_timestamp_us),
+                    last_exchange_timestamp_us: asset.and_then(|a| a.last_exchange_timestamp_us),
                     stale: is_stale(last_recv, stale_after_secs, now_us),
-                    has_book: asset
-                        .map(|a| a.initialized_from_snapshot)
-                        .unwrap_or(false),
+                    has_book: asset.map(|a| a.initialized_from_snapshot).unwrap_or(false),
                 }
             })
             .collect()
@@ -1004,10 +991,7 @@ mod tests {
         // Multiple concurrent readers should all see the same consistent state.
         let m1 = model.clone();
         let m2 = model.clone();
-        let (s1, s2) = tokio::join!(
-            m1.snapshot("tok1", 5, 100),
-            m2.snapshot("tok1", 5, 100),
-        );
+        let (s1, s2) = tokio::join!(m1.snapshot("tok1", 5, 100), m2.snapshot("tok1", 5, 100),);
         let s1 = s1.unwrap();
         let s2 = s2.unwrap();
         assert_eq!(s1.sequence, s2.sequence);

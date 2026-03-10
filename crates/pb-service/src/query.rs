@@ -47,8 +47,8 @@ pub struct DatasetSchema {
 
 /// Write keywords rejected by the query guard.
 const WRITE_KEYWORDS: &[&str] = &[
-    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
-    "RENAME", "GRANT", "REVOKE", "ATTACH", "DETACH",
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "RENAME", "GRANT",
+    "REVOKE", "ATTACH", "DETACH",
 ];
 
 /// Validate that SQL is read-only.
@@ -150,10 +150,7 @@ impl QueryService for ClickHouseQueryService {
         let start = Instant::now();
         let resp: reqwest::Response = tokio::time::timeout(
             std::time::Duration::from_secs(guard.timeout_secs),
-            self.client
-                .post(&self.query_url)
-                .body(guarded_sql)
-                .send(),
+            self.client.post(&self.query_url).body(guarded_sql).send(),
         )
         .await
         .map_err(|_| ServiceError::Internal("query timed out".to_string()))?
@@ -166,12 +163,9 @@ impl QueryService for ClickHouseQueryService {
             )));
         }
 
-        let result: ClickHouseJsonCompact = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
-            })?;
+        let result: ClickHouseJsonCompact = resp.json().await.map_err(|e| {
+            ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
+        })?;
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
         let row_count = result.data.len();
@@ -220,9 +214,7 @@ impl QueryService for ClickHouseQueryService {
         let result: ClickHouseJsonCompact = resp
             .json()
             .await
-            .map_err(|e| {
-                ServiceError::Internal(format!("failed to parse schema response: {e}"))
-            })?;
+            .map_err(|e| ServiceError::Internal(format!("failed to parse schema response: {e}")))?;
 
         // Group columns by table name.
         let mut datasets: Vec<DatasetSchema> = Vec::new();

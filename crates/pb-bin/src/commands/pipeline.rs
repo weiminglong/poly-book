@@ -259,24 +259,22 @@ pub async fn build_services(
 
     tracing::info!(path = %parquet_base_path, "using Parquet historical backend");
     (
-        pb_service::AnyReplayService::Parquet(
-            pb_service::ParquetReplayService::new(&parquet_base_path),
-        ),
-        pb_service::AnyIntegrityService::Parquet(
-            pb_service::ParquetIntegrityService::new(&parquet_base_path),
-        ),
-        pb_service::AnyExecutionService::Parquet(
-            pb_service::ParquetExecutionService::new(&parquet_base_path),
-        ),
+        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
+            &parquet_base_path,
+        )),
+        pb_service::AnyIntegrityService::Parquet(pb_service::ParquetIntegrityService::new(
+            &parquet_base_path,
+        )),
+        pb_service::AnyExecutionService::Parquet(pb_service::ParquetExecutionService::new(
+            &parquet_base_path,
+        )),
     )
 }
 
 /// Build the query service from config.
 ///
 /// Returns `None` if `api.query_workbench_enabled` is not set to `true`.
-pub async fn build_query_service(
-    settings: &Config,
-) -> Option<pb_service::AnyQueryService> {
+pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQueryService> {
     let enabled = settings
         .get_bool("api.query_workbench_enabled")
         .unwrap_or(false);
@@ -303,7 +301,9 @@ pub async fn build_query_service(
             ))
         }
         _ => {
-            tracing::warn!("query workbench requires clickhouse backend, currently using {backend}");
+            tracing::warn!(
+                "query workbench requires clickhouse backend, currently using {backend}"
+            );
             None
         }
     }
@@ -311,12 +311,8 @@ pub async fn build_query_service(
 
 /// Read query guard settings from config.
 pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
-    let max_rows = settings
-        .get_int("api.query_max_rows")
-        .unwrap_or(10_000) as usize;
-    let timeout_secs = settings
-        .get_int("api.query_timeout_secs")
-        .unwrap_or(30) as u64;
+    let max_rows = settings.get_int("api.query_max_rows").unwrap_or(10_000) as usize;
+    let timeout_secs = settings.get_int("api.query_timeout_secs").unwrap_or(30) as u64;
     (max_rows, timeout_secs)
 }
 

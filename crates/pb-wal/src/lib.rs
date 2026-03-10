@@ -161,8 +161,7 @@ mod tests {
         let seg_path = segment_files[0].path();
         let mut data = std::fs::read(&seg_path).unwrap();
         // The first record starts at offset 0: 4-byte len + 4-byte crc + payload.
-        let first_payload_len =
-            u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let first_payload_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
         let second_record_start = FRAME_HEADER_LEN + first_payload_len;
         let second_payload_start = second_record_start + FRAME_HEADER_LEN;
         // Flip a byte in the second record's payload.
@@ -252,7 +251,9 @@ mod tests {
         reader.commit_position().unwrap();
 
         // Prune.
-        writer.prune(&[dir.path().join("consumer_sole-consumer.pos")]).unwrap();
+        writer
+            .prune(&[dir.path().join("consumer_sole-consumer.pos")])
+            .unwrap();
         let after_prune = count_wal_files(dir.path());
         // Active segment is always retained; sealed ones consumed by all should be pruned.
         assert!(

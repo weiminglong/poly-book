@@ -50,10 +50,7 @@ impl Segment {
             .read(true)
             .open(&path)
             .map_err(|e| WalError::io(&path, e))?;
-        let write_offset = file
-            .metadata()
-            .map_err(|e| WalError::io(&path, e))?
-            .len();
+        let write_offset = file.metadata().map_err(|e| WalError::io(&path, e))?.len();
         Ok(Self {
             id,
             path,
@@ -119,10 +116,8 @@ pub fn read_record_at(
         return Ok(None);
     }
 
-    let len =
-        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-    let stored_crc =
-        u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+    let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let stored_crc = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
 
     if len == 0 {
         // Zero-length record marks end of written data (unused space in segment).
