@@ -41,10 +41,13 @@ Full system diagram, crate dependency graph, and runtime topology:
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
-design notes, and a **Docs to Update After Changes** table. Before modifying a
-crate, read its README. After making changes, check the update table and
-propagate changes to all listed targets (docs/, config, other crates, OpenSpec
-artifacts, web/).
+design notes, and a **Docs to Update After Changes** table.
+
+**MANDATORY**: Before modifying a crate, read its README. After making changes:
+1. Update the crate's own README if you changed its public API, types, or behavior
+2. Check the **Docs to Update After Changes** table and propagate to every listed
+   target (docs/, config, CLAUDE.md, other crate READMEs, web/)
+3. Do not consider a task complete until doc propagation is done
 
 ## Conventions
 - Fixed-point over floating-point for prices and sizes — never use `f64` for orderbook state
