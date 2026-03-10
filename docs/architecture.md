@@ -85,6 +85,9 @@ pb-bin (CLI entrypoint)
 │   └── pb-store (test fixtures)
 │       ├── pb-types
 │       └── pb-metrics
+├── pb-grpc
+│   ├── pb-types
+│   └── pb-service
 ├── pb-feed
 │   ├── pb-types
 │   └── pb-metrics
