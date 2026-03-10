@@ -39,6 +39,20 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: './src/test-setup.ts',
       exclude: ['e2e/**', 'node_modules/**'],
+      coverage: {
+        provider: 'v8',
+        reporter: ['text', 'lcov'],
+        reportsDirectory: './coverage',
+        exclude: [
+          'e2e/**',
+          '**/__tests__/**',
+          '**/*.test.{ts,tsx}',
+          '**/*.d.ts',
+          'src/test-setup.ts',
+          'vite.config.ts',
+          'playwright.config.ts',
+        ],
+      },
     },
   }
 })

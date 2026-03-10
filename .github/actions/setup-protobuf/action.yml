@@ -1,0 +1,9 @@
+name: Setup Protobuf Compiler
+description: Install protobuf-compiler for gRPC codegen
+
+runs:
+  using: composite
+  steps:
+    - name: Install protobuf-compiler
+      shell: bash
+      run: sudo apt-get install -y protobuf-compiler

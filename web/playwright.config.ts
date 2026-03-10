@@ -18,7 +18,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
+    command: process.env.CI ? 'npx vite preview' : 'npm run dev',
     url: 'http://localhost:4173',
     reuseExistingServer: !process.env.CI,
   },

@@ -13,6 +13,7 @@
     "lint:fix": "biome check --write .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -42,6 +43,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitest/coverage-v8": "^4.0.18",
     "jsdom": "^28.1.0",
     "tailwindcss": "^4.2.1",
     "typescript": "~5.9.3",
