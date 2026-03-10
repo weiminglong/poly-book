@@ -2,8 +2,8 @@
 
 use std::net::SocketAddr;
 
-use tonic::{Request, Response, Status};
 use tokio_util::sync::CancellationToken;
+use tonic::{Request, Response, Status};
 use tracing::info;
 
 /// Generated protobuf types and service traits.
@@ -11,12 +11,12 @@ pub mod proto {
     tonic::include_proto!("pb.workstation.v1");
 }
 
-use proto::workstation_service_server::{WorkstationService, WorkstationServiceServer};
 use pb_service::{
     AnyExecutionService, AnyIntegrityService, AnyReplayService, CompletenessLevel,
     ExecutionService, IntegrityService, ReplayService, ServiceError,
 };
 use pb_types::event::ReplayMode;
+use proto::workstation_service_server::{WorkstationService, WorkstationServiceServer};
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -35,7 +35,10 @@ fn service_error_to_status(err: ServiceError) -> Status {
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-fn price_level_to_proto(price: pb_types::FixedPrice, size: pb_types::FixedSize) -> proto::PriceLevel {
+fn price_level_to_proto(
+    price: pb_types::FixedPrice,
+    size: pb_types::FixedSize,
+) -> proto::PriceLevel {
     proto::PriceLevel {
         price: price.to_string(),
         size: size.to_string(),
@@ -117,12 +120,8 @@ impl WorkstationService for GrpcWorkstationService {
             timestamp_us: result.timestamp_us,
             mode: result.mode.to_string(),
             sequence: result.sequence,
-            best_bid: result
-                .best_bid
-                .map(|(p, s)| price_level_to_proto(p, s)),
-            best_ask: result
-                .best_ask
-                .map(|(p, s)| price_level_to_proto(p, s)),
+            best_bid: result.best_bid.map(|(p, s)| price_level_to_proto(p, s)),
+            best_ask: result.best_ask.map(|(p, s)| price_level_to_proto(p, s)),
             mid_price: result.mid_price,
             spread: result.spread,
             bid_depth: result.bid_depth as u32,
@@ -253,8 +252,8 @@ pub async fn start_grpc_server(
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let service = GrpcWorkstationService::new(replay, integrity, execution);
-    let server = tonic::transport::Server::builder()
-        .add_service(WorkstationServiceServer::new(service));
+    let server =
+        tonic::transport::Server::builder().add_service(WorkstationServiceServer::new(service));
 
     info!(%addr, "gRPC server bound");
 
@@ -371,10 +370,9 @@ mod tests {
         // Give the server a moment to bind.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let mut client =
-            WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
 
         let resp = client
             .reconstruct(proto::ReconstructRequest {
@@ -412,10 +410,9 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let mut client =
-            WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
 
         let resp = client
             .integrity_summary(proto::IntegritySummaryRequest {
@@ -450,10 +447,9 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let mut client =
-            WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
 
         let resp = client
             .execution_timeline(proto::ExecutionTimelineRequest {
@@ -491,10 +487,9 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let mut client =
-            WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
-                .await
-                .unwrap();
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
 
         let result = client
             .reconstruct(proto::ReconstructRequest {

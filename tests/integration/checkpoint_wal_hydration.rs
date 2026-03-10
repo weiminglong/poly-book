@@ -137,7 +137,10 @@ async fn hydrate_from_checkpoint_and_wal() {
     // Step 4: Verify hydration result and book state.
     // -----------------------------------------------------------------------
     assert_eq!(result.checkpoints_loaded, 1, "should load one checkpoint");
-    assert_eq!(result.wal_records_replayed, 2, "should replay two WAL records");
+    assert_eq!(
+        result.wal_records_replayed, 2,
+        "should replay two WAL records"
+    );
 
     // Log cold-start time for observability. In release builds, checkpoint
     // hydration + 2 WAL records should complete well under 100ms. Debug builds

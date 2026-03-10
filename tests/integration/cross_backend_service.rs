@@ -397,14 +397,20 @@ async fn cross_backend_execution_equivalence() {
     assert_eq!(pq_timeline.total_count, 4);
 
     // Compare order IDs and kinds in order.
-    let pq_ids: Vec<&str> = pq_timeline.events.iter().map(|e| e.order_id.as_str()).collect();
-    let ch_ids: Vec<&str> = ch_timeline.events.iter().map(|e| e.order_id.as_str()).collect();
+    let pq_ids: Vec<&str> = pq_timeline
+        .events
+        .iter()
+        .map(|e| e.order_id.as_str())
+        .collect();
+    let ch_ids: Vec<&str> = ch_timeline
+        .events
+        .iter()
+        .map(|e| e.order_id.as_str())
+        .collect();
     assert_eq!(pq_ids, ch_ids, "order_ids mismatch (unfiltered)");
 
-    let pq_kinds: Vec<ExecutionEventKind> =
-        pq_timeline.events.iter().map(|e| e.kind.clone()).collect();
-    let ch_kinds: Vec<ExecutionEventKind> =
-        ch_timeline.events.iter().map(|e| e.kind.clone()).collect();
+    let pq_kinds: Vec<ExecutionEventKind> = pq_timeline.events.iter().map(|e| e.kind).collect();
+    let ch_kinds: Vec<ExecutionEventKind> = ch_timeline.events.iter().map(|e| e.kind).collect();
     assert_eq!(pq_kinds, ch_kinds, "event kinds mismatch (unfiltered)");
 
     // --- Filter by asset_id ---

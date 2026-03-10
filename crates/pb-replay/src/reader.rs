@@ -661,12 +661,14 @@ fn extract_checkpoints(
             },
             bids: serde_json::from_str::<Vec<PriceLevel>>(bids_col.value(i))?,
             asks: serde_json::from_str::<Vec<PriceLevel>>(asks_col.value(i))?,
-            wal_offset: batch
-                .column_by_name("wal_offset")
-                .and_then(|col| {
-                    let arr = col.as_any().downcast_ref::<UInt64Array>()?;
-                    if arr.is_null(i) { None } else { Some(arr.value(i)) }
-                }),
+            wal_offset: batch.column_by_name("wal_offset").and_then(|col| {
+                let arr = col.as_any().downcast_ref::<UInt64Array>()?;
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i))
+                }
+            }),
         });
     }
     Ok(rows)

@@ -145,6 +145,7 @@ pub async fn run(
 /// Spawn a background task that continuously tails the WAL for new records
 /// and feeds them through the projector. Updates health atomics for the
 /// `/health` endpoint.
+#[allow(clippy::too_many_arguments)]
 fn spawn_wal_tailer(
     config: pb_wal::WalConfig,
     live: pb_api::LiveReadModel,

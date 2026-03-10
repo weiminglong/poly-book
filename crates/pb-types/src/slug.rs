@@ -143,7 +143,8 @@ mod tests {
     #[test]
     fn raw_token_id_passthrough() {
         let registry = SlugRegistry::new();
-        let long_id = "21742633143463801764263866138596936600980228888098934498299596572218858267895";
+        let long_id =
+            "21742633143463801764263866138596936600980228888098934498299596572218858267895";
         let resolved = registry.resolve(long_id).unwrap();
         assert_eq!(resolved.as_str(), long_id);
     }

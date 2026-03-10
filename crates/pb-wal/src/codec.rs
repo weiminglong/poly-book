@@ -18,8 +18,7 @@ const CURRENT_VERSION: u8 = 1;
 
 /// Encode a `PersistedRecord` into a versioned byte buffer.
 pub fn encode(record: &PersistedRecord) -> Result<Vec<u8>, WalError> {
-    let bincode_bytes =
-        bincode::serialize(record).map_err(|e| WalError::Codec(e.to_string()))?;
+    let bincode_bytes = bincode::serialize(record).map_err(|e| WalError::Codec(e.to_string()))?;
     let mut buf = Vec::with_capacity(1 + bincode_bytes.len());
     buf.push(CURRENT_VERSION);
     buf.extend_from_slice(&bincode_bytes);
