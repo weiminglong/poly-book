@@ -13,6 +13,15 @@ import type {
 } from '../../types'
 import { buildUrl, fetchAndValidate, getApiBaseUrl, postAndValidate } from './client'
 import {
+  getDemoActiveAssets,
+  getDemoDatasets,
+  getDemoExecution,
+  getDemoFeedStatus,
+  getDemoIntegrity,
+  getDemoReplay,
+  getDemoSnapshot,
+} from './demo'
+import {
   activeAssetsResponseSchema,
   datasetSchemaResponseSchema,
   executionTimelineResponseSchema,
@@ -22,6 +31,7 @@ import {
   queryResultResponseSchema,
   replayReconstructionResponseSchema,
 } from './schemas'
+import { useSourceModeContext } from '../hooks/use-source-mode'
 
 // --- Constants ---
 
@@ -44,27 +54,37 @@ export const queryKeys = {
 // --- Query hooks ---
 
 export function useFeedStatus(opts?: Partial<UseQueryOptions<FeedStatusResponse>>) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: queryKeys.feedStatus,
-    queryFn: ({ signal }) =>
-      fetchAndValidate(feedStatusResponseSchema, buildUrl(base, '/api/v1/feed/status'), { signal }),
-    refetchInterval: FOREGROUND_INTERVAL_MS,
-    staleTime: FOREGROUND_INTERVAL_MS,
+    queryFn: isDemo
+      ? () => getDemoFeedStatus()
+      : ({ signal }) =>
+          fetchAndValidate(feedStatusResponseSchema, buildUrl(base, '/api/v1/feed/status'), {
+            signal,
+          }),
+    refetchInterval: isDemo ? false : FOREGROUND_INTERVAL_MS,
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : FOREGROUND_INTERVAL_MS,
     ...opts,
   })
 }
 
 export function useActiveAssets(opts?: Partial<UseQueryOptions<ActiveAssetSummary[]>>) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: queryKeys.activeAssets,
-    queryFn: ({ signal }) =>
-      fetchAndValidate(activeAssetsResponseSchema, buildUrl(base, '/api/v1/assets/active'), {
-        signal,
-      }),
-    refetchInterval: FOREGROUND_INTERVAL_MS,
-    staleTime: FOREGROUND_INTERVAL_MS,
+    queryFn: isDemo
+      ? () => getDemoActiveAssets()
+      : ({ signal }) =>
+          fetchAndValidate(activeAssetsResponseSchema, buildUrl(base, '/api/v1/assets/active'), {
+            signal,
+          }),
+    refetchInterval: isDemo ? false : FOREGROUND_INTERVAL_MS,
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : FOREGROUND_INTERVAL_MS,
     ...opts,
   })
 }
@@ -74,20 +94,24 @@ export function useOrderBookSnapshot(
   depth: number,
   opts?: Partial<UseQueryOptions<LiveOrderBookSnapshot>>,
 ) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: queryKeys.orderbook(assetId, depth),
-    queryFn: ({ signal }) =>
-      fetchAndValidate(
-        liveOrderBookSnapshotSchema,
-        buildUrl(base, `/api/v1/orderbooks/${encodeURIComponent(assetId)}/snapshot`, {
-          depth: String(depth),
-        }),
-        { signal },
-      ),
+    queryFn: isDemo
+      ? () => getDemoSnapshot(assetId, depth)
+      : ({ signal }) =>
+          fetchAndValidate(
+            liveOrderBookSnapshotSchema,
+            buildUrl(base, `/api/v1/orderbooks/${encodeURIComponent(assetId)}/snapshot`, {
+              depth: String(depth),
+            }),
+            { signal },
+          ),
     enabled: Boolean(assetId),
-    refetchInterval: FOREGROUND_INTERVAL_MS,
-    staleTime: FOREGROUND_INTERVAL_MS,
+    refetchInterval: isDemo ? false : FOREGROUND_INTERVAL_MS,
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : FOREGROUND_INTERVAL_MS,
     ...opts,
   })
 }
@@ -96,23 +120,30 @@ export function useReplayReconstruction(
   request: ReplayRequest | null,
   opts?: Partial<UseQueryOptions<ReplayReconstructionResponse>>,
 ) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: request ? queryKeys.replay(request) : ['replay-disabled'],
-    queryFn: ({ signal }) => {
-      if (!request) throw new Error('No replay request')
-      return fetchAndValidate(
-        replayReconstructionResponseSchema,
-        buildUrl(base, '/api/v1/replay/reconstruct', {
-          asset_id: request.assetId,
-          at_us: String(request.atUs),
-          mode: request.mode,
-          source: 'parquet',
-          depth: String(request.depth),
-        }),
-        { signal },
-      )
-    },
+    queryFn: isDemo
+      ? () => {
+          if (!request) throw new Error('No replay request')
+          return getDemoReplay(request.assetId, request.mode, request.depth)
+        }
+      : ({ signal }) => {
+          if (!request) throw new Error('No replay request')
+          return fetchAndValidate(
+            replayReconstructionResponseSchema,
+            buildUrl(base, '/api/v1/replay/reconstruct', {
+              asset_id: request.assetId,
+              at_us: String(request.atUs),
+              mode: request.mode,
+              source: 'parquet',
+              depth: String(request.depth),
+            }),
+            { signal },
+          )
+        },
     enabled: Boolean(request),
     staleTime: Number.POSITIVE_INFINITY,
     ...opts,
@@ -123,23 +154,27 @@ export function useIntegritySummary(
   request: IntegrityRequest | null,
   opts?: Partial<UseQueryOptions<IntegritySummaryResponse>>,
 ) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: request ? queryKeys.integrity(request) : ['integrity-disabled'],
-    queryFn: ({ signal }) => {
-      if (!request) throw new Error('No integrity request')
-      return fetchAndValidate(
-        integritySummaryResponseSchema,
-        buildUrl(base, '/api/v1/integrity/summary', {
-          asset_id: request.assetId,
-          start_us: String(request.startUs),
-          end_us: String(request.endUs),
-        }),
-        { signal },
-      )
-    },
-    enabled: Boolean(request),
-    staleTime: BACKGROUND_INTERVAL_MS,
+    queryFn: isDemo
+      ? () => getDemoIntegrity()
+      : ({ signal }) => {
+          if (!request) throw new Error('No integrity request')
+          return fetchAndValidate(
+            integritySummaryResponseSchema,
+            buildUrl(base, '/api/v1/integrity/summary', {
+              asset_id: request.assetId,
+              start_us: String(request.startUs),
+              end_us: String(request.endUs),
+            }),
+            { signal },
+          )
+        },
+    enabled: isDemo || Boolean(request),
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : BACKGROUND_INTERVAL_MS,
     ...opts,
   })
 }
@@ -148,39 +183,47 @@ export function useExecutionTimeline(
   request: ExecutionRequest | null,
   opts?: Partial<UseQueryOptions<ExecutionTimelineResponse>>,
 ) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: request ? queryKeys.execution(request) : ['execution-disabled'],
-    queryFn: ({ signal }) => {
-      if (!request) throw new Error('No execution request')
-      const params: Record<string, string> = {
-        start_us: String(request.startUs),
-        end_us: String(request.endUs),
-      }
-      if (request.orderId) params.order_id = request.orderId
-      if (request.assetId) params.asset_id = request.assetId
-      if (request.limit !== undefined) params.limit = String(request.limit)
-      return fetchAndValidate(
-        executionTimelineResponseSchema,
-        buildUrl(base, '/api/v1/execution/orders', params),
-        { signal },
-      )
-    },
-    enabled: Boolean(request),
-    staleTime: BACKGROUND_INTERVAL_MS,
+    queryFn: isDemo
+      ? () => getDemoExecution()
+      : ({ signal }) => {
+          if (!request) throw new Error('No execution request')
+          const params: Record<string, string> = {
+            start_us: String(request.startUs),
+            end_us: String(request.endUs),
+          }
+          if (request.orderId) params.order_id = request.orderId
+          if (request.assetId) params.asset_id = request.assetId
+          if (request.limit !== undefined) params.limit = String(request.limit)
+          return fetchAndValidate(
+            executionTimelineResponseSchema,
+            buildUrl(base, '/api/v1/execution/orders', params),
+            { signal },
+          )
+        },
+    enabled: isDemo || Boolean(request),
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : BACKGROUND_INTERVAL_MS,
     ...opts,
   })
 }
 
 export function useDatasets(opts?: Partial<UseQueryOptions<DatasetSchemaResponse>>) {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
+  const isDemo = sourceMode === 'demo'
   return useQuery({
     queryKey: queryKeys.datasets,
-    queryFn: ({ signal }) =>
-      fetchAndValidate(datasetSchemaResponseSchema, buildUrl(base, '/api/v1/query/datasets'), {
-        signal,
-      }),
-    staleTime: 60_000,
+    queryFn: isDemo
+      ? () => getDemoDatasets()
+      : ({ signal }) =>
+          fetchAndValidate(datasetSchemaResponseSchema, buildUrl(base, '/api/v1/query/datasets'), {
+            signal,
+          }),
+    staleTime: isDemo ? Number.POSITIVE_INFINITY : 60_000,
     ...opts,
   })
 }

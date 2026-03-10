@@ -11,8 +11,8 @@ test.describe('Live Feed page', () => {
     await expect(page.getByText('Feed mode')).toBeVisible()
     await expect(page.getByText('Active assets').first()).toBeVisible()
 
-    // Asset list renders
-    await expect(page.getByText('btc-5m-yes')).toBeVisible()
+    // Asset list renders (use .first() because asset IDs appear in both list and Quick View)
+    await expect(page.getByText('btc-5m-yes').first()).toBeVisible()
     await expect(page.getByText('btc-5m-no')).toBeVisible()
 
     // Click an asset to select it

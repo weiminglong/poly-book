@@ -5,7 +5,7 @@ import { CommandPalette } from '../shared/components/command-palette'
 import { ShortcutHelp } from '../shared/components/shortcut-help'
 import { useFocusOnNavigate } from '../shared/hooks/use-focus-on-navigate'
 import { useKeyboardShortcut } from '../shared/hooks/use-keyboard-shortcut'
-import { useSourceMode } from '../shared/hooks/use-source-mode'
+import { SourceModeContext, useSourceMode } from '../shared/hooks/use-source-mode'
 import type { Density, Theme } from '../shared/hooks/use-theme'
 import { useTheme } from '../shared/hooks/use-theme'
 import { APP_VERSION_LABEL } from '../shared/lib/constants'
@@ -65,64 +65,68 @@ function AppShell() {
     handler: () => setShortcutHelpOpen((prev) => !prev),
   })
 
+  const sourceModeValue = { sourceMode }
+
   return (
-    <div className="mx-auto max-w-[1600px] p-8">
-      <Header
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        density={density}
-        onDensityChange={setDensity}
-        sourceMode={sourceMode}
-        onSourceModeChange={setSourceMode}
-      />
+    <SourceModeContext value={sourceModeValue}>
+      <div className="mx-auto max-w-[1600px] p-8">
+        <Header
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          density={density}
+          onDensityChange={setDensity}
+          sourceMode={sourceMode}
+          onSourceModeChange={setSourceMode}
+        />
 
-      <nav className="mb-6 flex flex-wrap gap-2" aria-label="primary">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) =>
-              `rounded-full border px-4 py-2.5 text-sm transition-colors ${
-                isActive
-                  ? 'border-ring bg-accent/18 text-foreground'
-                  : 'border-card-border text-muted-foreground hover:border-ring/50 hover:text-foreground'
-              }`
-            }
-            onMouseEnter={() => void item.preload()}
-            onFocus={() => void item.preload()}
-          >
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
+        <nav className="mb-6 flex flex-wrap gap-2" aria-label="primary">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                `rounded-full border px-4 py-2.5 text-sm transition-colors ${
+                  isActive
+                    ? 'border-ring bg-accent/18 text-foreground'
+                    : 'border-card-border text-muted-foreground hover:border-ring/50 hover:text-foreground'
+                }`
+              }
+              onMouseEnter={() => void item.preload()}
+              onFocus={() => void item.preload()}
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
 
-      <main id="main-content">
-        <ErrorBoundary level="route">
-          <Suspense fallback={<RouteLoadingSkeleton />}>
-            <Routes>
-              <Route path="/" element={<Navigate replace to="/live-feed" />} />
-              <Route path="/live-feed" element={<LiveFeedPage />} />
-              <Route path="/orderbook" element={<OrderbookPage />} />
-              <Route path="/replay" element={<ReplayPage />} />
-              <Route path="/execution" element={<ExecutionPage />} />
-              <Route path="/integrity" element={<IntegrityPage />} />
-              <Route path="/query" element={<QueryPage />} />
-            </Routes>
-          </Suspense>
-        </ErrorBoundary>
-      </main>
+        <main id="main-content">
+          <ErrorBoundary level="route">
+            <Suspense fallback={<RouteLoadingSkeleton />}>
+              <Routes>
+                <Route path="/" element={<Navigate replace to="/live-feed" />} />
+                <Route path="/live-feed" element={<LiveFeedPage />} />
+                <Route path="/orderbook" element={<OrderbookPage />} />
+                <Route path="/replay" element={<ReplayPage />} />
+                <Route path="/execution" element={<ExecutionPage />} />
+                <Route path="/integrity" element={<IntegrityPage />} />
+                <Route path="/query" element={<QueryPage />} />
+              </Routes>
+            </Suspense>
+          </ErrorBoundary>
+        </main>
 
-      <CommandPalette
-        onToggleTheme={toggleTheme}
-        onSetDensity={setDensity}
-        onSetSource={setSourceMode}
-      />
-      <ShortcutHelp
-        open={shortcutHelpOpen}
-        onOpenChange={setShortcutHelpOpen}
-        shortcuts={GLOBAL_SHORTCUTS}
-      />
-    </div>
+        <CommandPalette
+          onToggleTheme={toggleTheme}
+          onSetDensity={setDensity}
+          onSetSource={setSourceMode}
+        />
+        <ShortcutHelp
+          open={shortcutHelpOpen}
+          onOpenChange={setShortcutHelpOpen}
+          shortcuts={GLOBAL_SHORTCUTS}
+        />
+      </div>
+    </SourceModeContext>
   )
 }
 
