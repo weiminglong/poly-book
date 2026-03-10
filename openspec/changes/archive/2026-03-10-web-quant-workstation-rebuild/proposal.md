@@ -1,6 +1,6 @@
 ## Why
 
-The current web frontend is a functional prototype with 4 pages, 417 lines of global CSS, manual fetch/setState loops, no error boundaries, and no runtime API validation. It works for demo screenshots but falls short of what an institutional quant workstation demands: dense data rendering, sub-second feedback loops, keyboard-driven workflows, and the kind of reliability where a malformed API response doesn't crash the entire app. Rebuilding it as a clean-slate, modern platform establishes the patterns used at firms like Jane Street and Citadel — type-safe data boundaries, component isolation, deterministic styling, and aggressive testing — while the domain surface (orderbook, replay, execution, integrity) is still small enough to rebuild without migration headaches.
+The current web frontend is a functional prototype with 4 pages, 417 lines of global CSS, manual fetch/setState loops, no error boundaries, and no runtime API validation. It works for demo screenshots but falls short of what an institutional quant workstation demands: dense data rendering, sub-second feedback loops, keyboard-driven workflows, and the kind of reliability where a malformed API response doesn't crash the entire app. Rebuilding it as a clean-slate, modern platform establishes institutional-grade patterns — type-safe data boundaries, component isolation, deterministic styling, and aggressive testing — while the domain surface (orderbook, replay, execution, integrity) is still small enough to rebuild without migration headaches.
 
 ## What Changes
 
