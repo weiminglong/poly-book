@@ -1,71 +1,107 @@
-# Workstation SPA
+# Quant Workstation SPA
 
-This app is the Phase 4 workstation frontend scaffold for `poly-book`.
+Read-only quant workstation frontend for `poly-book`. Built with React 19, Vite 7,
+TypeScript 5.9 (strict), Tailwind CSS v4, and TanStack Query v5.
 
-Current shipped routes:
+## Routes
 
-- `Live Feed`
-- `Replay Lab`
-- `Integrity`
-- `Execution Timeline`
+| Route | Page | Purpose |
+|-------|------|---------|
+| `/live-feed` | Live Feed | Ops dashboard — feed health, asset grid, connection status |
+| `/orderbook` | Orderbook | Price ladder + depth chart with WebSocket streaming |
+| `/replay` | Replay | Reconstruct orderbooks at any historical timestamp |
+| `/execution` | Execution | Inspect execution orders with latency waterfall |
+| `/integrity` | Integrity | Data completeness and continuity analysis |
+| `/query` | Query | SQL workbench over split datasets |
 
-Current Phase 4.5 hardening in the web client:
+## Project structure
 
-- adaptive live polling (`1s` foreground / `5s` background)
-- abortable API requests with a client timeout
-- lazy-loaded route bundles for current shipped routes
-- WebSocket order book streaming with HTTP fallback
-- virtualized order book rendering with throttled stream updates
+```
+src/
+  app/           App shell, providers, error boundaries, routing
+  features/      Feature modules (one directory per page)
+    live-feed/
+    orderbook/
+    replay/
+    execution/
+    integrity/
+    query/
+  shared/
+    api/         Zod schemas, fetch client, TanStack Query hooks, demo fixtures
+    components/  Reusable UI components (Card, Badge, Button, DataTable, etc.)
+    hooks/       Shared hooks (theme, source mode, keyboard shortcuts, WS stream)
+    lib/         Formatters, constants
+    styles/      Tailwind v4 theme tokens and base styles
+  types/         TypeScript types derived from Zod schemas via z.infer
+```
 
-Deferred UI surfaces:
+## Tech stack
 
-- Latency
-- Query Workbench
+- **React 19** + **Vite 7** — lazy-loaded route bundles, <200KB initial JS gzipped
+- **TypeScript 5.9** — strict mode with `noUnusedLocals`, `noUnusedParameters`
+- **Tailwind CSS v4** — CSS-first `@theme` configuration, dark/light themes, density modes
+- **TanStack Query v5** — all server state, polling, caching, mutations
+- **TanStack Table v8** — sortable, paginated data tables
+- **Zod** — runtime API response validation at fetch boundary
+- **Radix UI** — accessible dialog, tooltip, select, popover primitives
+- **cmdk** — Cmd+K command palette
+- **Biome** — linting and formatting (replaces ESLint + Prettier)
+- **Vitest** — unit and component tests
+- **Playwright** — end-to-end tests
 
 ## Local development
 
-The workstation SPA requires Node `24.13.1` or newer. Use the checked-in
-[`web/.nvmrc`](./.nvmrc) as the source of truth for local and CI runs.
+Requires Node 24.13.1+ (see `.nvmrc`).
 
 ```bash
-# from the repo root
+# Start the backend
 cargo run -- serve-api --auto-rotate
 
-# in another terminal
+# Start the frontend
 cd web
 nvm use
 npm ci
 npm run dev
 ```
 
-The Vite server runs on `http://127.0.0.1:4173` and proxies `/api` to
-`http://127.0.0.1:3000` by default.
-
-Useful overrides:
+Vite dev server runs on `http://localhost:4173` and proxies `/api` to the backend.
 
 ```bash
+# Override the API proxy target
 VITE_DEV_API_PROXY_TARGET=http://127.0.0.1:3100 npm run dev
+
+# Override the API base URL directly
 VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 ```
 
 ## Demo mode
 
-The SPA includes seeded sample responses so it can be reviewed without live API
-or Parquet infrastructure. Open `http://127.0.0.1:4173/?source=demo` or use the
-in-app data-source toggle.
+The SPA includes seeded sample responses for review without live infrastructure.
+Open `http://localhost:4173/?source=demo` or use the in-app data source toggle.
 
-## Current transport notes
+Demo data is lazy-loaded via dynamic `import()` to keep the initial bundle small.
 
-`Live Feed` uses the backend WebSocket book stream when available and falls back
-to adaptive HTTP polling if the stream cannot be established. Feed status and
-active asset summaries still use adaptive foreground/background polling.
-
-## Validation
+## Scripts
 
 ```bash
-nvm use
-npm run lint
-npx tsc -b
-npm run test
-npm run build
+npm run dev        # Start Vite dev server
+npm run build      # Type-check + production build
+npm run preview    # Preview production build locally
+npm run lint       # Biome check (lint + format)
+npm run lint:fix   # Biome auto-fix
+npm run test       # Run Vitest unit/component tests
+npm run test:e2e   # Run Playwright E2E tests
 ```
+
+## Transport
+
+The Orderbook page uses WebSocket streaming when available and falls back to HTTP
+polling. A transport badge in the header shows the active mode. Feed status and
+asset summaries use foreground (1s) / background (5s) adaptive polling via
+TanStack Query `refetchInterval`.
+
+## Keyboard shortcuts
+
+- **Cmd+K** — Command palette (page navigation, theme, density, source)
+- **?** — Shortcut help overlay
+- **1-6** — Depth presets on Orderbook page
