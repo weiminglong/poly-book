@@ -9,6 +9,7 @@ ingest internals.
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| GET | `/health` | Health check |
 | GET | `/api/v1/feed/status` | Feed health, session state, active assets |
 | GET | `/api/v1/assets/active` | Currently tracked assets with metadata |
 | GET | `/api/v1/assets/resolve` | Resolve a slug or condition ID to an asset ID |
@@ -16,6 +17,8 @@ ingest internals.
 | GET | `/api/v1/replay/reconstruct` | Point-in-time book reconstruction |
 | GET | `/api/v1/integrity/summary` | Dataset continuity and validation metrics |
 | GET | `/api/v1/execution/orders` | Order lifecycle timeline |
+| GET | `/api/v1/query/datasets` | Available datasets and column schemas |
+| POST | `/api/v1/query/sql` | Execute guarded read-only SQL query |
 | WS | `/api/v1/streams/orderbook` | Live book streaming via WebSocket |
 
 Full route contracts and error semantics: [docs/api.md](../../docs/api.md).
@@ -26,13 +29,14 @@ Full route contracts and error semantics: [docs/api.md](../../docs/api.md).
 |------|-------------|
 | `LiveReadModel` | Server-side book state maintained from the ingest channel. Groups snapshots for connected assets. |
 | `BookBroadcast` | `tokio::sync::broadcast` channel for WebSocket incremental updates. |
-| `AppState` | Shared axum state holding the reader, live model, broadcast, and config. |
-| `ApiConfig` | API server configuration (port, depth limits, etc.). |
+| `AppState` | Shared axum state holding the live model, broadcast, slug registry, service backends, WAL lag tracking, and config. |
+| `ApiConfig` | API server configuration (depth limits, stale thresholds, query guard settings). |
 | `ApiError` | Structured error type mapped to HTTP status codes. |
 
 DTOs in `dto.rs`: `FeedStatusResponse`, `LiveOrderBookSnapshot`,
 `ReplayReconstructionResponse`, `IntegritySummaryResponse`,
-`ExecutionTimelineResponse`, `BookUpdateMessage`, and others.
+`ExecutionTimelineResponse`, `BookUpdateMessage`, `QueryResultResponse`,
+`QueryColumn`, `DatasetSchemaResponse`, `DatasetInfo`, and others.
 
 ## Data Flow
 
@@ -40,7 +44,8 @@ DTOs in `dto.rs`: `FeedStatusResponse`, `LiveOrderBookSnapshot`,
 PersistedRecord channel ──▶ LiveReadModel ──┬──▶ REST handlers
                                             └──▶ BookBroadcast ──▶ WS clients
 
-ParquetReader ──▶ ReplayEngine ──▶ replay/integrity/execution handlers
+AnyReplayService ──▶ replay/integrity/execution handlers
+AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 ```
 
 ## Design Notes
@@ -51,7 +56,8 @@ ParquetReader ──▶ ReplayEngine ──▶ replay/integrity/execution handle
   book state without persisting to disk.
 - WebSocket streaming uses a broadcast channel with capacity 256. Slow consumers
   that fall behind receive a fresh full snapshot to re-sync.
-- Parquet-first for historical reads. ClickHouse-backed reads are deferred.
+- Historical reads use configurable backend (Parquet or ClickHouse) via `pb-service` enum dispatch.
+- Query workbench (`/query/datasets`, `/query/sql`) is ClickHouse-only and optional (`query_service: Option<AnyQueryService>`).
 
 ## Docs to Update After Changes
 

@@ -45,6 +45,9 @@ default_depth = 20
 max_depth = 200
 stale_after_secs = 15
 historical_backend = "parquet"  # or "clickhouse"
+query_workbench_enabled = false
+query_max_rows = 10000
+query_timeout_secs = 30
 
 [wal]
 base_path = "./data/wal"
@@ -113,11 +116,13 @@ a version-byte prefix for forward-compatible deserialization (`pb_wal::codec`).
 
 GitHub Actions runs the following checks on pushes and pull requests to `main`:
 
-- `cargo check --all-targets`
-- `cargo test --workspace --exclude pb-integration-tests`
-- `cargo clippy --all-targets -- -D warnings`
+- `cargo check --all-targets` (requires `protobuf-compiler`)
+- `cargo test --workspace --exclude pb-integration-tests` (requires `protobuf-compiler`)
+- `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
+- Web CI — `eslint`, `tsc -b`, `vitest run`, `vite build` in `web/`
+- Fuzz smoke test — `fuzz_wal_corruption` and `fuzz_book_delta` (30s each, nightly)
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
 
 Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
@@ -379,4 +384,4 @@ VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 ### Deferred from the Current SPA Pass
 
 - Latency (reserved for metrics-backed summaries)
-- Query Workbench (backend route pending)
+- Query Workbench SPA view (backend routes are implemented and opt-in)

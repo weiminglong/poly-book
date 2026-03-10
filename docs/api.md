@@ -223,7 +223,7 @@ Returns:
 
 This endpoint always returns 200. Use `found` to check resolution status.
 
-### `GET /api/v1/health`
+### `GET /health`
 
 Returns operational status:
 

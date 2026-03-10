@@ -9,13 +9,15 @@ weighted mid, depth queries, integrity checks).
 | Type | Description |
 |------|-------------|
 | `L2Book` | The order book. Bids: `BTreeMap<Reverse<FixedPrice>, FixedSize>` (best-first). Asks: `BTreeMap<FixedPrice, FixedSize>` (best-first). |
+| `BookSide` | Type alias: `Vec<(FixedPrice, FixedSize)>` for one side of the book. |
 | `BookError` | Error type for book operations (sequence gaps, integrity violations). |
 
 ## Methods
 
 `apply_snapshot`, `apply_delta`, `best_bid`, `best_ask`, `mid_price`, `spread`,
 `weighted_mid_price`, `total_bid_size`, `total_ask_size`, `top_bids`, `top_asks`,
-`check_integrity`, `check_sequence`.
+`bids_sorted`, `asks_sorted`, `bid_depth`, `ask_depth`, `check_integrity`,
+`check_sequence`.
 
 ## Data Flow
 
@@ -33,8 +35,8 @@ pb-book (L2Book)
 
 - `Reverse<FixedPrice>` on the bid side ensures `BTreeMap` iteration yields
   best bid first without extra sorting. See [ADR-0002](../../docs/adr/0002-btreemap-orderbook.md).
-- `check_integrity` verifies: no negative sizes, no zero-size levels, and flags
-  crossed books (best bid >= best ask).
+- `check_integrity` detects crossed books (best bid >= best ask). Zero-size
+  levels are prevented at insertion time by `apply_snapshot` and `apply_delta`.
 - `check_sequence` enforces monotonic sequence numbers and detects gaps.
 - `proptest` suites verify ordering, spread, snapshot idempotency, and crossed-book
   detection.

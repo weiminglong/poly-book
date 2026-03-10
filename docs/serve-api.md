@@ -24,7 +24,7 @@ It is not meant for:
 
 ## Runtime Topology
 
-### Combined Mode (`serve-api` / `all`)
+### Combined Mode (`serve-api`)
 
 ```text
 WsClient -> Dispatcher -> PersistedRecord fanout -> LiveReadModel -> pb-api routes
@@ -78,7 +78,7 @@ connectivity with a 3-second timeout and falls back to Parquet with a warning.
 
 The serving runtime supports two operational modes:
 
-### Combined (`serve-api` / `all`)
+### Combined (`serve-api`)
 
 Runs feed connectivity and API in a single process. No WAL involvement. The live
 read model is fed directly from the dispatcher channel.
@@ -150,7 +150,7 @@ The current implementation exposes:
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`
 - `GET /api/v1/execution/orders`
-- `GET /api/v1/health`
+- `GET /health`
 - `GET /api/v1/query/datasets`
 - `POST /api/v1/query/sql`
 - `WS /api/v1/streams/orderbook?asset_id=...`

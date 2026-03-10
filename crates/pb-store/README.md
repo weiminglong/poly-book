@@ -8,7 +8,7 @@ ingest channel and writes them to durable storage in split-dataset format.
 | Type | Description |
 |------|-------------|
 | `ParquetSink` | Batches events and flushes to Parquet files every 5 minutes with Zstd compression. Uses `object_store` (local FS / S3 / GCS). |
-| `ClickHouseSink` | Batches events and inserts to ClickHouse every 1 second using `ReplacingMergeTree` for deduplication. |
+| `ClickHouseSink` | Batches events and inserts to ClickHouse every 1 second (or when batch reaches 10,000 rows). Uses `MergeTree` engine partitioned by date. |
 | `ParquetRecordWriter` | Low-level writer for individual Parquet files. |
 | `ClickHouseRecordWriter` | Low-level writer for ClickHouse batch inserts. |
 | `StoreError` | Error type for storage operations. |
@@ -45,7 +45,8 @@ PersistedRecord channel
   local disk, S3, and GCS without code changes.
 - Parquet files are partitioned by event type and time window. The flush interval
   (5 minutes) balances write amplification against data freshness for replay.
-- ClickHouse uses `ReplacingMergeTree` to handle duplicate inserts from reconnects.
+- ClickHouse uses `MergeTree` engine with date partitioning and composite ORDER BY
+  keys for efficient range queries. Tables are created via `ensure_tables()`.
 
 ## Docs to Update After Changes
 

@@ -34,10 +34,10 @@ Full system diagram, crate dependency graph, and runtime topology:
 - **pb-store**: `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ClickHouseSink` (1s batch, `ReplacingMergeTree`).
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-wal**: Embedded write-ahead log. Mmap'd segments with length-prefix + CRC32C framing. `WalWriter` appends and rotates, `WalReader` tails with independent consumer positions, `WalPruner` reclaims. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
-- **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, etc.) for configurable backend selection.
+- **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService`, `QueryService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, `AnyIntegrityService`, `AnyExecutionService`, `AnyQueryService`) for configurable backend selection.
 - **pb-grpc**: gRPC read surface using tonic. Exposes `WorkstationService` with `Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs. Delegates to `pb-service` traits. Configurable via `[grpc]` config section (disabled by default, port 50051).
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
-- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `serve-api`, `serve`, and `all`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `all` (combined). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
+- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, and `serve`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
@@ -60,7 +60,7 @@ artifacts, web/).
 - ADRs in `docs/adr/` document key architectural decisions
 
 ## Config
-`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[api]`, `[wal]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
+`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
 
 ## Read This First
 If you are working on the workstation API, frontend, or runtime boundaries, read
@@ -96,7 +96,7 @@ The workstation backend is read-only with process separation:
 
 - `ingest` process: feed → dispatcher → WAL + storage sinks (Parquet, ClickHouse)
 - `serve` process: checkpoint hydration → WAL tail → watch-based read model → HTTP/WS
-- `serve-api` / `all`: combined mode (backward compatible, no WAL)
+- `serve-api`: combined mode (feed + API in one process, no WAL)
 - configurable backend: `api.historical_backend = "parquet" | "clickhouse"` with auto-fallback
 - optional gRPC surface: `grpc.enabled = true` exposes WorkstationService on port 50051
 - WAL coordination: gap detection, lag tracking, backpressure pruning for multi-replica setups
@@ -108,7 +108,7 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/replay/reconstruct`
   - `GET /api/v1/integrity/summary`
   - `GET /api/v1/execution/orders`
-  - `GET /api/v1/health`
+  - `GET /health`
   - `GET /api/v1/query/datasets`
   - `POST /api/v1/query/sql`
   - `WS /api/v1/streams/orderbook?asset_id=...`
@@ -116,7 +116,6 @@ The workstation backend is read-only with process separation:
 Deferred for later phases:
 
 - latency summary routes
-- frontend SPA implementation
 
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)

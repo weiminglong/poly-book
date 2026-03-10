@@ -16,6 +16,7 @@ to the appropriate subsystem.
 | `execution-append` | Append execution events to storage from flags or JSON input. |
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
+| `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
 
 ## Config Layering
 
@@ -23,7 +24,7 @@ to the appropriate subsystem.
 config/default.toml  →  env vars (PB__ prefix)  →  CLI flags
 ```
 
-Sections: `[feed]`, `[storage]`, `[metrics]`, `[api]`, `[logging]`.
+Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`.
 
 Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
 

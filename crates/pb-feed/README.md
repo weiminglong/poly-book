@@ -9,8 +9,12 @@ Polymarket venue, receives raw messages, and normalizes them into split
 | Type | Description |
 |------|-------------|
 | `WsClient` | WebSocket client with automatic reconnect (exponential backoff + jitter). |
-| `WsConfig` | Connection settings: URL, subscription topics, reconnect params. |
+| `WsConfig` | Connection settings: URL, ping interval, reconnect params. |
+| `WsRawMessage` | Raw text message with receive timestamp from the WebSocket stream. |
+| `FeedMessage` | Enum wrapping `WsRawMessage` and `WsLifecycleEvent` for the ingest channel. |
+| `WsLifecycleEvent` | Reconnect lifecycle event with session ID and details. |
 | `RestClient` | HTTP client for REST API discovery and snapshot fetching. |
+| `RestConfig` | REST endpoint URLs (CLOB base, Gamma base). |
 | `RateLimiter` | Token-bucket rate limiter wrapping `governor`. |
 | `Dispatcher` | Deserializes raw WS messages and normalizes into `PersistedRecord` events. |
 | `FeedError` | Error type for feed operations. |
@@ -25,10 +29,13 @@ Polymarket REST ──▶ RestClient ─────┘
 Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel)
 ```
 
-- `WsClient` sends raw `WsRawMessage` on a `tokio::mpsc` channel.
-- `Dispatcher` receives raw messages, deserializes, and emits `PersistedRecord`
-  events on an outbound channel.
-- `RestClient` is used independently for market discovery and snapshot backfill.
+- `WsClient` sends `FeedMessage` values (wrapping `WsRawMessage` and
+  `WsLifecycleEvent`) on a `tokio::mpsc` channel.
+- `Dispatcher` receives `FeedMessage` values, deserializes raw messages, maps
+  lifecycle events to `IngestEvent` records, and emits `PersistedRecord` events
+  on an outbound channel.
+- `RestClient` is used independently for market discovery (`discover_markets`,
+  `discover_by_slug`) and snapshot backfill (`fetch_book`).
 
 ## Design Notes
 

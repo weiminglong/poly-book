@@ -143,8 +143,8 @@ npm run dev
 
 By default the Vite dev server runs on `:4173` and proxies `/api` requests to
 `http://127.0.0.1:3000`, so you can run it alongside `cargo run -- serve-api
---auto-rotate`. The shipped SPA currently includes only `Live Feed` and
-`Replay Lab`; the other planned workstation surfaces remain deferred. Append
+--auto-rotate`. The shipped SPA currently includes `Live Feed`, `Replay Lab`, `Integrity`,
+and `Execution Timeline`. Append
 `?source=demo` to the URL or use the in-app toggle to review seeded sample data
 without a running backend. The SPA uses a newer Node runtime than the Rust-only
 workspace commands; see [`web/README.md`](web/README.md) for the exact supported
@@ -231,10 +231,10 @@ The project demonstrates a specific style of trading-infrastructure design:
 ## Architecture
 
 ```text
-Polymarket WS -> pb-feed -> pb-store -> Parquet / ClickHouse
-                 |                     ^
-                 v                     |
-              pb-api <---- pb-replay --+
+Polymarket WS -> pb-feed -> pb-wal -> pb-store -> Parquet / ClickHouse
+                 |            |                    ^
+                 v            v                    |
+              pb-api <---- pb-service <-- pb-replay --+
                  |
                  +-> workstation clients
                  |
@@ -254,6 +254,9 @@ Workspace crates:
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
 | `pb-store` | Parquet and ClickHouse sinks |
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
+| `pb-wal` | Embedded write-ahead log with mmap'd segments and CRC32C framing |
+| `pb-service` | Transport-neutral domain service layer with configurable backends |
+| `pb-grpc` | gRPC read surface using tonic (optional, delegates to pb-service) |
 | `pb-metrics` | Prometheus metrics endpoint |
 | `pb-bin` | CLI entrypoint |
 
