@@ -1,11 +1,12 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary } from '../error-boundary'
 
 afterEach(cleanup)
 
-function ThrowingComponent({ message }: { message: string }) {
+function ThrowingComponent({ message }: { message: string }): React.ReactNode {
   throw new Error(message)
 }
 
@@ -67,7 +68,7 @@ describe('ErrorBoundary', () => {
     const user = userEvent.setup()
     let shouldThrow = true
 
-    function MaybeThrow() {
+    function MaybeThrow(): React.ReactNode {
       if (shouldThrow) throw new Error('recoverable')
       return <p>Recovered</p>
     }
@@ -88,7 +89,7 @@ describe('ErrorBoundary', () => {
   })
 
   it('shows generic message when error has empty message', () => {
-    function ThrowEmpty() {
+    function ThrowEmpty(): React.ReactNode {
       throw new Error()
     }
 

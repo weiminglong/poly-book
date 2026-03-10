@@ -35,7 +35,8 @@ function queryResult<T>(
     fetchStatus: 'idle' as const,
     refetch: vi.fn(),
     ...overrides,
-  } as ReturnType<typeof useDatasets>
+    // biome-ignore lint/suspicious/noExplicitAny: test mock helper
+  } as any
 }
 
 function mutationResult(

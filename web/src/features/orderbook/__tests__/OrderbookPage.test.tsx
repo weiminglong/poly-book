@@ -45,7 +45,8 @@ function queryResult<T>(
     status: 'success' as const,
     fetchStatus: 'idle' as const,
     ...overrides,
-  } as ReturnType<typeof useActiveAssets>
+    // biome-ignore lint/suspicious/noExplicitAny: test mock helper
+  } as any
 }
 
 function setupDefaultMocks(snapshotOverrides?: Parameters<typeof queryResult>[0]) {

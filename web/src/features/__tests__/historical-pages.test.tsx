@@ -48,7 +48,8 @@ function queryResult<T>(
     status: 'success' as const,
     fetchStatus: 'idle' as const,
     ...overrides,
-  } as unknown as ReturnType<typeof useActiveAssets>
+    // biome-ignore lint/suspicious/noExplicitAny: test mock helper
+  } as any
 }
 
 // ---------------------------------------------------------------------------

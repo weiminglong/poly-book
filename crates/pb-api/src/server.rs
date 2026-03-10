@@ -1315,9 +1315,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(
-                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=bogus",
-                    )
+                    .uri("/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=bogus")
                     .body(Body::empty())
                     .unwrap(),
             )
