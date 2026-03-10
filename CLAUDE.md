@@ -120,6 +120,21 @@ Deferred for later phases:
 
 - latency summary routes
 
+## CI Required Checks
+The following jobs in `.github/workflows/ci.yml` should pass before merging:
+
+- `check` — `cargo check --all-targets`
+- `test` — `cargo test --workspace --exclude pb-integration-tests`
+- `clippy` — `cargo clippy --all-targets -- -D warnings`
+- `fmt` — `cargo fmt --all -- --check`
+- `audit` — rustsec dependency vulnerability scan
+- `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
+- `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
+- `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta)
+- `miri` — undefined behavior checks on pb-types, pb-book
+
+Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny).
+
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)
 - **Commit**: imperative sentence, PR number suffix (e.g. `Fix discover command ... (#6)`)

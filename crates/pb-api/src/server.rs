@@ -1285,6 +1285,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_status_returns_200_with_valid_response() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let status: crate::dto::FeedStatusResponse = response_json(response).await;
+        assert_eq!(status.active_asset_count, 1);
+        assert!(!status.active_assets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_returns_400_for_invalid_mode() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=bogus")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn replay_returns_400_for_zero_depth() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=recv_time&depth=0",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_sql_returns_503_when_disabled() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/query/sql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"SELECT 1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn query_datasets_returns_503_when_disabled() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/query/datasets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn health_reports_not_ready_when_resync_needed() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;

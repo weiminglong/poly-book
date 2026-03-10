@@ -16,7 +16,7 @@ capabilities visible to operators, researchers, or reviewers. A frontend added
 without clear boundaries would risk looking like a generic dashboard project.
 
 The better direction is a read-only workstation that highlights the qualities
-top quant firms care about:
+institutional-grade trading systems care about:
 
 - determinism
 - observability

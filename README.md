@@ -59,6 +59,16 @@ This runs formatting, Clippy, and the full test suite. The integration package
 includes ClickHouse round-trip coverage through `testcontainers`, so Docker must
 be available.
 
+### Integration Tests
+
+Integration tests live in `pb-integration-tests` and require Docker (for
+ClickHouse via testcontainers). They are excluded from the default test run:
+
+```bash
+# Run integration tests locally (requires Docker)
+cargo test -p pb-integration-tests -- --test-threads=1
+```
+
 ### Copy-Paste Demo
 
 ```bash
