@@ -9,7 +9,7 @@ test.describe('Live Feed page', () => {
 
     // Feed status metrics render
     await expect(page.getByText('Feed mode')).toBeVisible()
-    await expect(page.getByText('Active assets')).toBeVisible()
+    await expect(page.getByText('Active assets').first()).toBeVisible()
 
     // Asset list renders
     await expect(page.getByText('btc-5m-yes')).toBeVisible()
