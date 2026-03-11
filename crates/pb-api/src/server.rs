@@ -1800,8 +1800,8 @@ mod tests {
 
     #[test]
     fn api_error_status_codes() {
-        use axum::response::IntoResponse;
         use crate::error::ApiError;
+        use axum::response::IntoResponse;
 
         let resp = ApiError::BadRequest("x".into()).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);

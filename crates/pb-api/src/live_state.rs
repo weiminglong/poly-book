@@ -1035,9 +1035,7 @@ mod tests {
             .await;
 
         // Rotate to only tok2
-        model
-            .set_active_assets(vec!["tok2".to_string()])
-            .await;
+        model.set_active_assets(vec!["tok2".to_string()]).await;
 
         assert!(!model.is_asset_active("tok1").await);
         assert!(model.is_asset_active("tok2").await);

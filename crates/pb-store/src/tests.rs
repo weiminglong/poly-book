@@ -409,10 +409,9 @@ async fn writer_zstd_compression_applied() {
         .bytes()
         .await
         .unwrap();
-    let reader = parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(
-        data.to_vec(),
-    ))
-    .unwrap();
+    let reader =
+        parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+            .unwrap();
     let row_group = reader.metadata().row_group(0);
     let has_zstd = (0..row_group.num_columns())
         .any(|i| matches!(row_group.column(i).compression(), Compression::ZSTD(_)));
@@ -478,10 +477,9 @@ async fn writer_all_record_types_produce_valid_parquet() {
             .bytes()
             .await
             .unwrap();
-        let reader = parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(
-            data.to_vec(),
-        ))
-        .unwrap();
+        let reader =
+            parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+                .unwrap();
         assert!(reader.metadata().num_row_groups() > 0);
     }
 }
@@ -532,10 +530,9 @@ async fn writer_checkpoint_schema_has_bids_asks_json() {
         .bytes()
         .await
         .unwrap();
-    let reader = parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(
-        data.to_vec(),
-    ))
-    .unwrap();
+    let reader =
+        parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+            .unwrap();
     let schema = reader.metadata().file_metadata().schema_descr();
     let col_names: Vec<_> = schema.columns().iter().map(|c| c.name()).collect();
     assert!(col_names.contains(&"bids_json"));
@@ -569,10 +566,9 @@ async fn writer_parquet_row_count_matches_input() {
         .bytes()
         .await
         .unwrap();
-    let reader = parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(
-        data.to_vec(),
-    ))
-    .unwrap();
+    let reader =
+        parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+            .unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), n as i64);
 }
 

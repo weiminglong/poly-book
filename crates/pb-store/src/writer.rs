@@ -190,10 +190,7 @@ impl ParquetRecordWriter {
                     ZstdLevel::try_new(3).expect("valid zstd level"),
                 ))
                 .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-                .set_column_encoding(
-                    "recv_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
+                .set_column_encoding("recv_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
                 .set_column_encoding(
                     "exchange_timestamp_us".into(),
                     Encoding::DELTA_BINARY_PACKED,
@@ -202,10 +199,7 @@ impl ParquetRecordWriter {
                     "checkpoint_timestamp_us".into(),
                     Encoding::DELTA_BINARY_PACKED,
                 )
-                .set_column_encoding(
-                    "event_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
+                .set_column_encoding("event_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
                 .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
                 .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
                 .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)

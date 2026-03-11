@@ -21,8 +21,8 @@ const CURRENT_VERSION: u8 = 1;
 /// Serializes directly into a single pre-allocated buffer (version byte +
 /// bincode payload) to avoid a double-allocation.
 pub fn encode(record: &PersistedRecord) -> Result<Vec<u8>, WalError> {
-    let size_estimate = bincode::serialized_size(record)
-        .map_err(|e| WalError::Codec(e.to_string()))? as usize;
+    let size_estimate =
+        bincode::serialized_size(record).map_err(|e| WalError::Codec(e.to_string()))? as usize;
     let mut buf = Vec::with_capacity(1 + size_estimate);
     buf.push(CURRENT_VERSION);
     bincode::serialize_into(&mut buf, record).map_err(|e| WalError::Codec(e.to_string()))?;

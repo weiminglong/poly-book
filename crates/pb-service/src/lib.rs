@@ -552,8 +552,7 @@ mod tests {
     #[test]
     fn build_integrity_summary_empty_window() {
         let window = make_window(0, vec![]);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.completeness, CompletenessLevel::Empty);
         assert_eq!(summary.book_event_count, 0);
         assert_eq!(summary.ingest_event_count, 0);
@@ -565,8 +564,7 @@ mod tests {
     #[test]
     fn build_integrity_summary_full_completeness() {
         let window = make_window(5, vec![]);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.completeness, CompletenessLevel::Full);
         assert_eq!(summary.book_event_count, 5);
     }
@@ -578,8 +576,7 @@ mod tests {
             test_ingest_event(IngestEventKind::SourceReset, None),
         ];
         let window = make_window(3, ingest);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.completeness, CompletenessLevel::Partial);
         assert_eq!(summary.gap_count, 2);
         assert_eq!(summary.reconnect_count, 0);
@@ -592,8 +589,7 @@ mod tests {
             test_ingest_event(IngestEventKind::ReconnectSuccess, None),
         ];
         let window = make_window(2, ingest);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.completeness, CompletenessLevel::Partial);
         assert_eq!(summary.reconnect_count, 2);
         assert_eq!(summary.gap_count, 0);
@@ -606,8 +602,7 @@ mod tests {
             test_ingest_event(IngestEventKind::StaleSnapshotSkip, None),
         ];
         let window = make_window(1, ingest);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.stale_snapshot_skip_count, 2);
         // StaleSnapshotSkip does not count as gap/reconnect
         assert_eq!(summary.completeness, CompletenessLevel::Full);
@@ -637,8 +632,7 @@ mod tests {
             },
         ];
         let window = make_window(1, vec![]);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, validations);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, validations);
         assert_eq!(summary.validation_count, 2);
         assert_eq!(summary.validation_match_count, 1);
     }
@@ -651,8 +645,7 @@ mod tests {
             test_ingest_event(IngestEventKind::StaleSnapshotSkip, None),
         ];
         let window = make_window(10, ingest);
-        let summary =
-            build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
+        let summary = build_integrity_summary(&AssetId::new("tok1"), 100, 200, window, vec![]);
         assert_eq!(summary.book_event_count, 10);
         assert_eq!(summary.ingest_event_count, 3);
         assert_eq!(summary.reconnect_count, 1);
@@ -666,7 +659,10 @@ mod tests {
     // build_execution_timeline
     // -----------------------------------------------------------------------
 
-    fn make_execution_events(count: usize, asset_id: Option<&str>) -> Vec<pb_types::ExecutionEvent> {
+    fn make_execution_events(
+        count: usize,
+        asset_id: Option<&str>,
+    ) -> Vec<pb_types::ExecutionEvent> {
         use pb_types::event::{ExecutionEventKind, LatencyTrace, Side};
         (0..count)
             .map(|i| pb_types::ExecutionEvent {
@@ -708,7 +704,10 @@ mod tests {
         let filter_id = AssetId::new("tok1");
         let timeline = build_execution_timeline(events, Some(&filter_id), 100);
         assert_eq!(timeline.total_count, 3);
-        assert!(timeline.events.iter().all(|e| e.asset_id.as_ref().unwrap().as_str() == "tok1"));
+        assert!(timeline
+            .events
+            .iter()
+            .all(|e| e.asset_id.as_ref().unwrap().as_str() == "tok1"));
     }
 
     #[test]

@@ -107,9 +107,7 @@ impl Segment {
     /// Flush buffered writes to the OS page cache.
     pub fn flush(&mut self) -> Result<(), WalError> {
         use std::io::Write;
-        self.writer
-            .flush()
-            .map_err(|e| WalError::io(&self.path, e))
+        self.writer.flush().map_err(|e| WalError::io(&self.path, e))
     }
 
     /// Flush and fsync to guarantee durability on disk.
@@ -303,10 +301,7 @@ mod tests {
 
         let err = read_record_at(&data, 0, 7).unwrap_err();
         match err {
-            WalError::TruncatedRecord {
-                segment_id,
-                offset,
-            } => {
+            WalError::TruncatedRecord { segment_id, offset } => {
                 assert_eq!(segment_id, 7);
                 assert_eq!(offset, 0);
             }

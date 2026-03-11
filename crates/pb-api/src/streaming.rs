@@ -327,7 +327,7 @@ mod tests {
         b.set_active_assets(&["tok1".to_string()]);
         let mut rx = b.subscribe("tok1").unwrap();
         b.set_active_assets(&[]); // removes tok1
-        // Channel should now be closed
+                                  // Channel should now be closed
         assert!(rx.try_recv().is_err());
     }
 }

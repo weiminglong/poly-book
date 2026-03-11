@@ -53,7 +53,11 @@ fn make_delta_event(recv_ts: u64, side: Side, price: u32, size: u64, seq: u64) -
     }
 }
 
-fn make_checkpoint(checkpoint_ts: u64, bids: Vec<(u32, u64)>, asks: Vec<(u32, u64)>) -> BookCheckpoint {
+fn make_checkpoint(
+    checkpoint_ts: u64,
+    bids: Vec<(u32, u64)>,
+    asks: Vec<(u32, u64)>,
+) -> BookCheckpoint {
     BookCheckpoint {
         asset_id: test_asset_id(),
         checkpoint_timestamp_us: checkpoint_ts,
@@ -515,7 +519,10 @@ fn hour_paths_midnight_crossing() {
     assert!(paths.len() >= 2, "should cross midnight boundary");
 
     // Verify the paths contain different day patterns
-    let path_strs: Vec<String> = paths.iter().map(|p| p.to_str().unwrap().to_string()).collect();
+    let path_strs: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_str().unwrap().to_string())
+        .collect();
     // At least one path should contain /23 (hour 23)
     assert!(
         path_strs.iter().any(|p| p.contains("/23")),
@@ -538,10 +545,7 @@ fn hour_paths_empty_range_returns_single() {
 
 /// Helper: write records to parquet files using pb-store, then read them
 /// back with pb-replay's ParquetReader.
-async fn write_parquet_records(
-    base_path: &std::path::Path,
-    records: &[pb_types::PersistedRecord],
-) {
+async fn write_parquet_records(base_path: &std::path::Path, records: &[pb_types::PersistedRecord]) {
     use object_store::local::LocalFileSystem;
     use pb_store::writer::ParquetRecordWriter;
 
@@ -603,10 +607,7 @@ async fn parquet_reader_reads_trade_events() {
         .unwrap();
 
     assert_eq!(window.trade_events.len(), 1);
-    assert_eq!(
-        window.trade_events[0].price,
-        FixedPrice::new(5050).unwrap()
-    );
+    assert_eq!(window.trade_events[0].price, FixedPrice::new(5050).unwrap());
     assert_eq!(window.trade_events[0].fidelity, TradeFidelity::Full);
 }
 
@@ -759,13 +760,7 @@ async fn end_to_end_write_and_reconstruct() {
     let records = vec![
         pb_types::PersistedRecord::Book(make_snapshot_event(t0, Side::Bid, 5000, 1_000_000, 1)),
         pb_types::PersistedRecord::Book(make_snapshot_event(t0, Side::Ask, 5100, 2_000_000, 1)),
-        pb_types::PersistedRecord::Book(make_delta_event(
-            t0 + 1000,
-            Side::Bid,
-            4900,
-            500_000,
-            2,
-        )),
+        pb_types::PersistedRecord::Book(make_delta_event(t0 + 1000, Side::Bid, 4900, 500_000, 2)),
     ];
     write_parquet_records(base_path, &records).await;
 

@@ -364,9 +364,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Ingest {
-                tokens,
-                clickhouse,
-                ..
+                tokens, clickhouse, ..
             } => {
                 assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
                 assert!(clickhouse);
@@ -477,9 +475,14 @@ mod tests {
 
     #[test]
     fn parse_serve_api() {
-        let cli =
-            Cli::try_parse_from(["poly-book", "serve-api", "--tokens", "tok1", "--auto-rotate"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "serve-api",
+            "--tokens",
+            "tok1",
+            "--auto-rotate",
+        ])
+        .unwrap();
         match cli.command {
             Commands::ServeApi {
                 tokens,
@@ -495,8 +498,7 @@ mod tests {
 
     #[test]
     fn parse_serve() {
-        let cli =
-            Cli::try_parse_from(["poly-book", "serve", "--tokens", "tok1,tok2"]).unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "serve", "--tokens", "tok1,tok2"]).unwrap();
         match cli.command {
             Commands::Serve { tokens, metrics } => {
                 assert_eq!(tokens, "tok1,tok2");
@@ -550,8 +552,7 @@ mod tests {
 
     #[test]
     fn parse_global_log_level_flag() {
-        let cli =
-            Cli::try_parse_from(["poly-book", "--log-level", "debug", "discover"]).unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "--log-level", "debug", "discover"]).unwrap();
         assert_eq!(cli.log_level, "debug");
     }
 

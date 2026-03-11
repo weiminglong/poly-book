@@ -332,10 +332,7 @@ mod tests {
     fn validate_read_only_rejects_all_write_keywords() {
         for kw in WRITE_KEYWORDS {
             let sql = format!("{kw} something");
-            assert!(
-                validate_read_only(&sql).is_err(),
-                "should reject {kw}"
-            );
+            assert!(validate_read_only(&sql).is_err(), "should reject {kw}");
         }
     }
 

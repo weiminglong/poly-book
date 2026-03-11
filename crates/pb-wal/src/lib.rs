@@ -797,9 +797,7 @@ mod tests {
 
     #[test]
     fn codec_through_wal_roundtrip() {
-        use pb_types::event::{
-            BookEvent, BookEventKind, DataSource, EventProvenance, Side,
-        };
+        use pb_types::event::{BookEvent, BookEventKind, DataSource, EventProvenance, Side};
         use pb_types::{AssetId, FixedPrice, FixedSize, Sequence};
 
         let dir = tempfile::tempdir().unwrap();
