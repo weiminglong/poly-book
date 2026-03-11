@@ -54,12 +54,12 @@ fn continuity_to_proto(event: &pb_service::ContinuityEvent) -> proto::Continuity
     }
 }
 
-fn completeness_to_string(level: CompletenessLevel) -> String {
+fn completeness_to_str(level: CompletenessLevel) -> &'static str {
     match level {
-        CompletenessLevel::Full => "full".to_string(),
-        CompletenessLevel::Partial => "partial".to_string(),
-        CompletenessLevel::Sparse => "sparse".to_string(),
-        CompletenessLevel::Empty => "empty".to_string(),
+        CompletenessLevel::Full => "full",
+        CompletenessLevel::Partial => "partial",
+        CompletenessLevel::Sparse => "sparse",
+        CompletenessLevel::Empty => "empty",
     }
 }
 
@@ -173,7 +173,7 @@ impl WorkstationService for GrpcWorkstationService {
             stale_snapshot_skip_count: summary.stale_snapshot_skip_count as u32,
             validation_count: summary.validation_count as u32,
             validation_match_count: summary.validation_match_count as u32,
-            completeness: completeness_to_string(summary.completeness),
+            completeness: completeness_to_str(summary.completeness).into(),
             continuity_events: summary
                 .continuity_events
                 .iter()
@@ -503,6 +503,350 @@ mod tests {
         assert!(result.is_err());
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests for conversion helpers (no server needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn completeness_to_str_all_variants() {
+        assert_eq!(completeness_to_str(CompletenessLevel::Full), "full");
+        assert_eq!(completeness_to_str(CompletenessLevel::Partial), "partial");
+        assert_eq!(completeness_to_str(CompletenessLevel::Sparse), "sparse");
+        assert_eq!(completeness_to_str(CompletenessLevel::Empty), "empty");
+    }
+
+    #[test]
+    fn parse_replay_mode_valid() {
+        assert_eq!(
+            parse_replay_mode("recv_time").unwrap(),
+            ReplayMode::RecvTime
+        );
+        assert_eq!(
+            parse_replay_mode("exchange_time").unwrap(),
+            ReplayMode::ExchangeTime
+        );
+    }
+
+    #[test]
+    fn parse_replay_mode_invalid() {
+        let err = parse_replay_mode("bad").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("bad"));
+    }
+
+    #[test]
+    fn parse_replay_mode_empty() {
+        let err = parse_replay_mode("").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn price_level_to_proto_formats_correctly() {
+        let price = pb_types::FixedPrice::from_f64(0.55).unwrap();
+        let size = pb_types::FixedSize::from_f64(100.0).unwrap();
+        let level = price_level_to_proto(price, size);
+        assert_eq!(level.price, price.to_string());
+        assert_eq!(level.size, size.to_string());
+    }
+
+    #[test]
+    fn continuity_to_proto_maps_all_fields() {
+        let event = pb_service::ContinuityEvent {
+            kind: "sequence_gap".to_string(),
+            recv_timestamp_us: 1000,
+            exchange_timestamp_us: 900,
+            details: Some("gap detail".to_string()),
+        };
+        let proto = continuity_to_proto(&event);
+        assert_eq!(proto.kind, "sequence_gap");
+        assert_eq!(proto.recv_timestamp_us, 1000);
+        assert_eq!(proto.exchange_timestamp_us, 900);
+        assert_eq!(proto.details.as_deref(), Some("gap detail"));
+    }
+
+    #[test]
+    fn continuity_to_proto_with_none_details() {
+        let event = pb_service::ContinuityEvent {
+            kind: "reconnect_start".to_string(),
+            recv_timestamp_us: 500,
+            exchange_timestamp_us: 400,
+            details: None,
+        };
+        let proto = continuity_to_proto(&event);
+        assert!(proto.details.is_none());
+    }
+
+    #[test]
+    fn service_error_to_status_not_found() {
+        let err = ServiceError::NotFound("thing missing".into());
+        let status = service_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("thing missing"));
+    }
+
+    #[test]
+    fn service_error_to_status_invalid_argument() {
+        let err = ServiceError::InvalidParams("bad param".into());
+        let status = service_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn service_error_to_status_unavailable() {
+        let err = ServiceError::Unavailable("down".into());
+        let status = service_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn service_error_to_status_internal() {
+        let err = ServiceError::Internal("oops".into());
+        let status = service_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional RPC tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_reconstruct_with_depth_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        write_test_data(base).await;
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let resp = client
+            .reconstruct(proto::ReconstructRequest {
+                asset_id: "test-asset".into(),
+                at_us: 1_700_000_000_000_000 + 1,
+                mode: "recv_time".into(),
+                depth: Some(1),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.asset_id, "test-asset");
+        assert!(resp.bids.len() <= 1);
+        assert!(resp.asks.len() <= 1);
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_reconstruct_not_found_for_missing_asset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        // No test data written
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let result = client
+            .reconstruct(proto::ReconstructRequest {
+                asset_id: "nonexistent".into(),
+                at_us: 1_000_000,
+                mode: "recv_time".into(),
+                depth: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_reconstruct_exchange_time_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        write_test_data(base).await;
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let resp = client
+            .reconstruct(proto::ReconstructRequest {
+                asset_id: "test-asset".into(),
+                at_us: 1_700_000_000_000_000 + 1,
+                mode: "exchange_time".into(),
+                depth: None,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.asset_id, "test-asset");
+        assert_eq!(resp.mode, "exchange_time");
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_integrity_summary_response_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        write_test_data(base).await;
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let start_us = 1_700_000_000_000_000 - 1;
+        let end_us = 1_700_000_000_000_000 + 1_000_000;
+        let resp = client
+            .integrity_summary(proto::IntegritySummaryRequest {
+                asset_id: "test-asset".into(),
+                start_us,
+                end_us,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.asset_id, "test-asset");
+        assert_eq!(resp.start_us, start_us);
+        assert_eq!(resp.end_us, end_us);
+        // completeness should be a valid string
+        assert!(["full", "partial", "sparse", "empty"].contains(&resp.completeness.as_str()));
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_execution_timeline_with_asset_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let resp = client
+            .execution_timeline(proto::ExecutionTimelineRequest {
+                asset_id: Some("test-asset".into()),
+                order_id: None,
+                start_us: 0,
+                end_us: u64::MAX,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        // No execution data, but no error
+        assert_eq!(resp.total_count, 0);
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_execution_timeline_with_order_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let resp = client
+            .execution_timeline(proto::ExecutionTimelineRequest {
+                asset_id: None,
+                order_id: Some("order-xyz".into()),
+                start_us: 0,
+                end_us: u64::MAX,
+                limit: 50,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.total_count, 0);
+        assert!(resp.events.is_empty());
 
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;

@@ -109,8 +109,9 @@ data/wal/
 └── ...
 ```
 
-Each segment is a mmap'd file with length-prefix + CRC32C framing. Records use
-a version-byte prefix for forward-compatible deserialization (`pb_wal::codec`).
+Each segment is a BufWriter-wrapped append-only file with length-prefix + CRC32C
+framing. Records use a version-byte prefix for forward-compatible deserialization
+(`pb_wal::codec`).
 
 ## CI
 
@@ -278,11 +279,10 @@ when disabled (the default).
 
 ### Health Endpoint
 
-The `serve` process exposes `GET /api/v1/health` for liveness and readiness
-checks:
+The `serve` process exposes `GET /health` for liveness and readiness checks:
 
 ```bash
-curl http://localhost:3000/api/v1/health
+curl http://localhost:3000/health
 # {"ready":true,"hydrated":true,"wal_lag_bytes":0,"needs_resync":false}
 ```
 

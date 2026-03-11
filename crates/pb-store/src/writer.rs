@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{Datelike, Timelike};
 use clickhouse::Client;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use object_store::PutPayload;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 
@@ -159,11 +160,11 @@ impl ParquetRecordWriter {
                 chrono::DateTime::from_timestamp_micros(record.partition_timestamp_us() as i64)
                     .unwrap_or_default();
             let hour_key = format!(
-                "{}/{:02}/{:02}/{:02}",
-                dt.format("%Y"),
-                dt.format("%m"),
-                dt.format("%d"),
-                dt.format("%H"),
+                "{:04}/{:02}/{:02}/{:02}",
+                dt.date_naive().year(),
+                dt.date_naive().month(),
+                dt.date_naive().day(),
+                dt.time().hour(),
             );
             groups
                 .entry((
@@ -185,11 +186,32 @@ impl ParquetRecordWriter {
             let batch = records_to_record_batch(records)?;
             let schema = Arc::new(schema_for_record(records[0]));
             let props = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(Default::default()))
+                .set_compression(Compression::ZSTD(
+                    ZstdLevel::try_new(3).expect("valid zstd level"),
+                ))
                 .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+                .set_column_encoding(
+                    "recv_timestamp_us".into(),
+                    Encoding::DELTA_BINARY_PACKED,
+                )
+                .set_column_encoding(
+                    "exchange_timestamp_us".into(),
+                    Encoding::DELTA_BINARY_PACKED,
+                )
+                .set_column_encoding(
+                    "checkpoint_timestamp_us".into(),
+                    Encoding::DELTA_BINARY_PACKED,
+                )
+                .set_column_encoding(
+                    "event_timestamp_us".into(),
+                    Encoding::DELTA_BINARY_PACKED,
+                )
+                .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
+                .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
+                .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)
                 .build();
 
-            let mut buf = Vec::new();
+            let mut buf = Vec::with_capacity(256 * 1024);
             let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
             writer.write(&batch)?;
             writer.close()?;
@@ -349,18 +371,58 @@ impl ClickHouseRecordWriter {
         }
 
         let flush_start = std::time::Instant::now();
-        let mut book_insert: clickhouse::insert::Insert<BookEventRow> =
-            self.client.insert("book_events").await?;
-        let mut trade_insert: clickhouse::insert::Insert<TradeEventRow> =
-            self.client.insert("trade_events").await?;
-        let mut ingest_insert: clickhouse::insert::Insert<IngestEventRow> =
-            self.client.insert("ingest_events").await?;
-        let mut checkpoint_insert: clickhouse::insert::Insert<CheckpointRow> =
-            self.client.insert("book_checkpoints").await?;
-        let mut validation_insert: clickhouse::insert::Insert<ReplayValidationRow> =
-            self.client.insert("replay_validations").await?;
-        let mut execution_insert: clickhouse::insert::Insert<ExecutionEventRow> =
-            self.client.insert("execution_events").await?;
+
+        // Check which event types are present to avoid opening unused insert handles.
+        let mut has_book = false;
+        let mut has_trade = false;
+        let mut has_ingest = false;
+        let mut has_checkpoint = false;
+        let mut has_validation = false;
+        let mut has_execution = false;
+        for record in records {
+            match record {
+                PersistedRecord::Book(_) => has_book = true,
+                PersistedRecord::Trade(_) => has_trade = true,
+                PersistedRecord::Ingest(_) => has_ingest = true,
+                PersistedRecord::Checkpoint(_) => has_checkpoint = true,
+                PersistedRecord::Validation(_) => has_validation = true,
+                PersistedRecord::Execution(_) => has_execution = true,
+            }
+        }
+
+        let mut book_insert: Option<clickhouse::insert::Insert<BookEventRow>> = if has_book {
+            Some(self.client.insert("book_events").await?)
+        } else {
+            None
+        };
+        let mut trade_insert: Option<clickhouse::insert::Insert<TradeEventRow>> = if has_trade {
+            Some(self.client.insert("trade_events").await?)
+        } else {
+            None
+        };
+        let mut ingest_insert: Option<clickhouse::insert::Insert<IngestEventRow>> = if has_ingest {
+            Some(self.client.insert("ingest_events").await?)
+        } else {
+            None
+        };
+        let mut checkpoint_insert: Option<clickhouse::insert::Insert<CheckpointRow>> =
+            if has_checkpoint {
+                Some(self.client.insert("book_checkpoints").await?)
+            } else {
+                None
+            };
+        let mut validation_insert: Option<clickhouse::insert::Insert<ReplayValidationRow>> =
+            if has_validation {
+                Some(self.client.insert("replay_validations").await?)
+            } else {
+                None
+            };
+        let mut execution_insert: Option<clickhouse::insert::Insert<ExecutionEventRow>> =
+            if has_execution {
+                Some(self.client.insert("execution_events").await?)
+            } else {
+                None
+            };
 
         for record in records {
             match record {
@@ -384,7 +446,7 @@ impl ClickHouseRecordWriter {
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
                     };
-                    book_insert.write(&row).await?;
+                    book_insert.as_mut().unwrap().write(&row).await?;
                 }
                 PersistedRecord::Trade(event) => {
                     let row = TradeEventRow {
@@ -401,7 +463,7 @@ impl ClickHouseRecordWriter {
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
                     };
-                    trade_insert.write(&row).await?;
+                    trade_insert.as_mut().unwrap().write(&row).await?;
                 }
                 PersistedRecord::Ingest(event) => {
                     let row = IngestEventRow {
@@ -417,7 +479,7 @@ impl ClickHouseRecordWriter {
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
                     };
-                    ingest_insert.write(&row).await?;
+                    ingest_insert.as_mut().unwrap().write(&row).await?;
                 }
                 PersistedRecord::Checkpoint(event) => {
                     let row = CheckpointRow {
@@ -432,7 +494,7 @@ impl ClickHouseRecordWriter {
                         asks_json: serde_json::to_string(&event.asks)?,
                         wal_offset: event.wal_offset,
                     };
-                    checkpoint_insert.write(&row).await?;
+                    checkpoint_insert.as_mut().unwrap().write(&row).await?;
                 }
                 PersistedRecord::Validation(event) => {
                     let row = ReplayValidationRow {
@@ -444,7 +506,7 @@ impl ClickHouseRecordWriter {
                         mismatch_summary: event.mismatch_summary.clone(),
                         persisted_at_us: event.persisted_at_us,
                     };
-                    validation_insert.write(&row).await?;
+                    validation_insert.as_mut().unwrap().write(&row).await?;
                 }
                 PersistedRecord::Execution(event) => {
                     let row = ExecutionEventRow {
@@ -470,17 +532,29 @@ impl ClickHouseRecordWriter {
                         reason: event.reason.clone(),
                         latency_json: serde_json::to_string(&event.latency)?,
                     };
-                    execution_insert.write(&row).await?;
+                    execution_insert.as_mut().unwrap().write(&row).await?;
                 }
             }
         }
 
-        book_insert.end().await?;
-        trade_insert.end().await?;
-        ingest_insert.end().await?;
-        checkpoint_insert.end().await?;
-        validation_insert.end().await?;
-        execution_insert.end().await?;
+        if let Some(insert) = book_insert {
+            insert.end().await?;
+        }
+        if let Some(insert) = trade_insert {
+            insert.end().await?;
+        }
+        if let Some(insert) = ingest_insert {
+            insert.end().await?;
+        }
+        if let Some(insert) = checkpoint_insert {
+            insert.end().await?;
+        }
+        if let Some(insert) = validation_insert {
+            insert.end().await?;
+        }
+        if let Some(insert) = execution_insert {
+            insert.end().await?;
+        }
 
         pb_metrics::record_storage_flush("clickhouse");
         pb_metrics::record_flush_duration_ms(flush_start.elapsed().as_millis() as f64);

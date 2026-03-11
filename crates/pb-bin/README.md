@@ -35,6 +35,13 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
 - `anyhow` is used for error handling here (the only crate that uses it);
   library crates use `thiserror`.
 - Graceful shutdown via `CancellationToken` propagated to all subsystems.
+  Both SIGINT and SIGTERM are handled for container/production environments.
+- WAL writer is owned directly on the single-threaded event loop (no
+  `Arc<Mutex<_>>` overhead).
+- `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic
+  shared between `ingest` and `auto_ingest`.
+- Forwarder tasks use idiomatic `while let` receive loops instead of
+  `tokio::select!` patterns.
 
 ## Docs to Update After Changes
 

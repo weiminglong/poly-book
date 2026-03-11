@@ -334,3 +334,173 @@ pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
         }
     }
 }
+
+/// Fan out a persisted record to sink channels. Returns `true` if all sends
+/// succeeded, `false` if any channel closed (caller should stop).
+pub async fn fanout_event(
+    event: pb_types::PersistedRecord,
+    fanout_txs: &[mpsc::Sender<pb_types::PersistedRecord>],
+) -> bool {
+    match fanout_txs {
+        [] => true,
+        [a] => {
+            if let Err(e) = a.send(event).await {
+                tracing::warn!("fan-out channel closed: {e}");
+                return false;
+            }
+            true
+        }
+        [a, b] => {
+            let ev_a = event.clone();
+            let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
+            if ra.is_err() || rb.is_err() {
+                if let Err(e) = ra {
+                    tracing::warn!("fan-out channel 0 closed: {e}");
+                }
+                if let Err(e) = rb {
+                    tracing::warn!("fan-out channel 1 closed: {e}");
+                }
+                return false;
+            }
+            true
+        }
+        _ => unreachable!("at most 2 sinks"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_config() -> Config {
+        Config::builder().build().unwrap()
+    }
+
+    fn config_with(key: &str, value: &str) -> Config {
+        Config::builder()
+            .set_override(key, value)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    // --- wal_config_from_settings ---
+
+    #[test]
+    fn wal_config_defaults() {
+        let cfg = wal_config_from_settings(&empty_config());
+        assert_eq!(cfg.base_path, std::path::PathBuf::from("./data/wal"));
+        assert_eq!(cfg.segment_size, 64 * 1024 * 1024);
+        assert_eq!(cfg.max_segments, 16);
+        assert_eq!(cfg.max_consumer_lag_bytes, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn wal_config_overrides() {
+        let settings = Config::builder()
+            .set_override("wal.base_path", "/tmp/wal")
+            .unwrap()
+            .set_override("wal.segment_size_mb", 32)
+            .unwrap()
+            .set_override("wal.max_segments", 8)
+            .unwrap()
+            .build()
+            .unwrap();
+        let cfg = wal_config_from_settings(&settings);
+        assert_eq!(cfg.base_path, std::path::PathBuf::from("/tmp/wal"));
+        assert_eq!(cfg.segment_size, 32 * 1024 * 1024);
+        assert_eq!(cfg.max_segments, 8);
+    }
+
+    // --- ws_config_from_settings ---
+
+    #[test]
+    fn ws_config_defaults() {
+        let cfg = ws_config_from_settings(&empty_config());
+        let default = pb_feed::WsConfig::default();
+        assert_eq!(cfg.ws_url, default.ws_url);
+        assert_eq!(cfg.ping_interval_secs, 10);
+        assert_eq!(cfg.reconnect_base_delay_ms, 100);
+        assert_eq!(cfg.reconnect_max_delay_ms, 30000);
+    }
+
+    #[test]
+    fn ws_config_overrides() {
+        let settings = Config::builder()
+            .set_override("feed.ping_interval_secs", 20)
+            .unwrap()
+            .set_override("feed.reconnect_base_delay_ms", 500)
+            .unwrap()
+            .set_override("feed.reconnect_max_delay_ms", 60000)
+            .unwrap()
+            .build()
+            .unwrap();
+        let cfg = ws_config_from_settings(&settings);
+        assert_eq!(cfg.ping_interval_secs, 20);
+        assert_eq!(cfg.reconnect_base_delay_ms, 500);
+        assert_eq!(cfg.reconnect_max_delay_ms, 60000);
+    }
+
+    // --- query_config_from_settings ---
+
+    #[test]
+    fn query_config_defaults() {
+        let (max_rows, timeout) = query_config_from_settings(&empty_config());
+        assert_eq!(max_rows, 10_000);
+        assert_eq!(timeout, 30);
+    }
+
+    #[test]
+    fn query_config_overrides() {
+        let settings = Config::builder()
+            .set_override("api.query_max_rows", 5000)
+            .unwrap()
+            .set_override("api.query_timeout_secs", 60)
+            .unwrap()
+            .build()
+            .unwrap();
+        let (max_rows, timeout) = query_config_from_settings(&settings);
+        assert_eq!(max_rows, 5000);
+        assert_eq!(timeout, 60);
+    }
+
+    // --- grpc_config_from_settings ---
+
+    #[test]
+    fn grpc_config_defaults() {
+        let (enabled, addr) = grpc_config_from_settings(&empty_config());
+        assert!(!enabled);
+        assert_eq!(addr, "0.0.0.0:50051".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn grpc_config_enabled_with_custom_addr() {
+        let settings = Config::builder()
+            .set_override("grpc.enabled", true)
+            .unwrap()
+            .set_override("grpc.listen_addr", "127.0.0.1:9999")
+            .unwrap()
+            .build()
+            .unwrap();
+        let (enabled, addr) = grpc_config_from_settings(&settings);
+        assert!(enabled);
+        assert_eq!(addr, "127.0.0.1:9999".parse::<SocketAddr>().unwrap());
+    }
+
+    // --- checkpoint_config_from_settings ---
+
+    #[test]
+    fn checkpoint_config_defaults() {
+        let cfg = checkpoint_config_from_settings(&empty_config());
+        assert_eq!(cfg.rest_url, "https://clob.polymarket.com");
+        assert_eq!(cfg.interval, Duration::from_secs(60));
+        assert_eq!(cfg.rate_limit_pause, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn checkpoint_config_overrides() {
+        let settings = config_with("storage.checkpoint_interval_secs", "120");
+        let cfg = checkpoint_config_from_settings(&settings);
+        assert_eq!(cfg.interval, Duration::from_secs(120));
+    }
+}

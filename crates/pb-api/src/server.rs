@@ -146,16 +146,24 @@ pub async fn serve(
         .await
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+#[derive(serde::Serialize)]
+struct HealthResponse {
+    ready: bool,
+    hydrated: bool,
+    wal_lag_bytes: u64,
+    needs_resync: bool,
+}
+
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let hydrated = state.live.is_hydrated();
     let wal_lag = state.wal_lag_bytes.load(Ordering::Relaxed);
     let needs_resync = state.needs_resync.load(Ordering::Relaxed);
-    Json(serde_json::json!({
-        "ready": hydrated && !needs_resync,
-        "hydrated": hydrated,
-        "wal_lag_bytes": wal_lag,
-        "needs_resync": needs_resync,
-    }))
+    Json(HealthResponse {
+        ready: hydrated && !needs_resync,
+        hydrated,
+        wal_lag_bytes: wal_lag,
+        needs_resync,
+    })
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
@@ -1406,5 +1414,405 @@ mod tests {
         let body: serde_json::Value = response_json(response).await;
         assert_eq!(body["ready"], false);
         assert_eq!(body["needs_resync"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Health endpoint edge cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_reports_not_ready_before_hydration() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        // Do NOT call mark_hydrated
+        let state = AppState {
+            live,
+            config: ApiConfig {
+                parquet_base_path: tmp_dir.path().to_string_lossy().to_string(),
+                default_depth: 20,
+                max_depth: 200,
+                stale_after_secs: 60,
+                query_max_rows: 10_000,
+                query_timeout_secs: 30,
+            },
+            broadcast: None,
+            slug_registry: pb_types::SlugRegistry::new(),
+            replay_service: AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
+                tmp_dir.path().to_str().unwrap(),
+            )),
+            integrity_service: AnyIntegrityService::Parquet(
+                pb_service::ParquetIntegrityService::new(tmp_dir.path().to_str().unwrap()),
+            ),
+            execution_service: AnyExecutionService::Parquet(
+                pb_service::ParquetExecutionService::new(tmp_dir.path().to_str().unwrap()),
+            ),
+            query_service: None,
+            wal_lag_bytes: Arc::new(AtomicU64::new(0)),
+            needs_resync: Arc::new(AtomicBool::new(false)),
+        };
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["ready"], false);
+        assert_eq!(body["hydrated"], false);
+    }
+
+    #[tokio::test]
+    async fn health_reports_wal_lag() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.wal_lag_bytes.store(12345, Ordering::Relaxed);
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response_json(response).await;
+        assert_eq!(body["wal_lag_bytes"], 12345);
+    }
+
+    // -----------------------------------------------------------------------
+    // Error response format consistency
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn error_responses_have_consistent_json_shape() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        // 404 from inactive asset
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbooks/nonexistent/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: crate::dto::ApiErrorResponse = response_json(response).await;
+        assert!(!body.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bad_request_error_has_json_error_field() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        // depth=0 produces 400
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=recv_time&depth=0",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: crate::dto::ApiErrorResponse = response_json(response).await;
+        assert!(body.error.contains("depth"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Depth validation edge cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn orderbook_snapshot_returns_400_for_zero_depth() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbooks/tok1/snapshot?depth=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn orderbook_snapshot_returns_400_for_depth_exceeding_max() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let app = router(state);
+        // max_depth is 200 in test_state
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/orderbooks/tok1/snapshot?depth=999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // Time window validation edge cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integrity_summary_returns_400_for_equal_start_end() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/integrity/summary?asset_id=tok1&start_us=100&end_us=100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn integrity_summary_returns_400_for_window_exceeding_max() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        // 24 hours = 86_400_000_000 us, exceed it by 1
+        let start = 100u64;
+        let end = start + 86_400_000_001;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/integrity/summary?asset_id=tok1&start_us={start}&end_us={end}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn execution_returns_400_for_reversed_time_window() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/execution/orders?start_us=500&end_us=100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn execution_returns_400_for_limit_exceeding_max() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/execution/orders?start_us=100&end_us=200&limit=5000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // Replay mode validation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn replay_returns_400_for_unsupported_source() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=recv_time&source=clickhouse",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: crate::dto::ApiErrorResponse = response_json(response).await;
+        assert!(body.error.contains("clickhouse"));
+    }
+
+    #[tokio::test]
+    async fn replay_exchange_time_mode_is_valid() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        writer
+            .write_batch(&[
+                PersistedRecord::Book(BookEvent {
+                    asset_id: AssetId::new("tok1"),
+                    kind: BookEventKind::Snapshot,
+                    side: Side::Bid,
+                    price: FixedPrice::new(5000).unwrap(),
+                    size: FixedSize::from_f64(100.0).unwrap(),
+                    provenance: test_provenance(base_ts, 0),
+                }),
+                PersistedRecord::Book(BookEvent {
+                    asset_id: AssetId::new("tok1"),
+                    kind: BookEventKind::Snapshot,
+                    side: Side::Ask,
+                    price: FixedPrice::new(5500).unwrap(),
+                    size: FixedSize::from_f64(110.0).unwrap(),
+                    provenance: test_provenance(base_ts, 1),
+                }),
+            ])
+            .await
+            .unwrap();
+
+        let app = router(test_state(base_path).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us={base_ts}&mode=exchange_time"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let replay: crate::dto::ReplayReconstructionResponse = response_json(response).await;
+        assert_eq!(replay.mode, "exchange_time");
+    }
+
+    // -----------------------------------------------------------------------
+    // Feed status
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn feed_status_returns_empty_when_no_assets() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let status: crate::dto::FeedStatusResponse = response_json(response).await;
+        assert_eq!(status.active_asset_count, 0);
+        assert!(status.active_assets.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Replay depth enforcement
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn replay_returns_400_for_depth_exceeding_max() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=recv_time&depth=999",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // ServiceError -> ApiError mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn service_error_to_api_error_mapping() {
+        use crate::error::ApiError;
+
+        let nf: ApiError = pb_service::ServiceError::NotFound("x".into()).into();
+        assert!(matches!(nf, ApiError::NotFound(_)));
+
+        let ip: ApiError = pb_service::ServiceError::InvalidParams("x".into()).into();
+        assert!(matches!(ip, ApiError::BadRequest(_)));
+
+        let un: ApiError = pb_service::ServiceError::Unavailable("x".into()).into();
+        assert!(matches!(un, ApiError::ServiceUnavailable(_)));
+
+        let int: ApiError = pb_service::ServiceError::Internal("x".into()).into();
+        assert!(matches!(int, ApiError::Internal(_)));
+    }
+
+    #[test]
+    fn api_error_status_codes() {
+        use axum::response::IntoResponse;
+        use crate::error::ApiError;
+
+        let resp = ApiError::BadRequest("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = ApiError::NotFound("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = ApiError::ServiceUnavailable("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let resp = ApiError::Internal("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

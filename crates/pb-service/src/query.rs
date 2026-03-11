@@ -327,4 +327,78 @@ mod tests {
         assert_eq!(guard.max_rows, 10_000);
         assert_eq!(guard.timeout_secs, 30);
     }
+
+    #[test]
+    fn validate_read_only_rejects_all_write_keywords() {
+        for kw in WRITE_KEYWORDS {
+            let sql = format!("{kw} something");
+            assert!(
+                validate_read_only(&sql).is_err(),
+                "should reject {kw}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_read_only_case_insensitive() {
+        assert!(validate_read_only("drop TABLE foo").is_err());
+        assert!(validate_read_only("insert INTO foo VALUES (1)").is_err());
+    }
+
+    #[test]
+    fn validate_read_only_allows_keyword_within_identifier() {
+        // "UPDATED_AT" contains "UPDATE" but is not a standalone keyword
+        assert!(validate_read_only("SELECT UPDATED_AT FROM foo").is_ok());
+        assert!(validate_read_only("SELECT CREATED_BY FROM foo").is_ok());
+    }
+
+    #[test]
+    fn validate_read_only_rejects_keyword_with_leading_whitespace() {
+        assert!(validate_read_only("   DELETE FROM foo").is_err());
+        assert!(validate_read_only("\n\tDROP TABLE x").is_err());
+    }
+
+    #[test]
+    fn validate_read_only_allows_show_and_describe() {
+        assert!(validate_read_only("SHOW TABLES").is_ok());
+        assert!(validate_read_only("DESCRIBE TABLE foo").is_ok());
+    }
+
+    #[test]
+    fn inject_limit_case_insensitive_check() {
+        let sql = "SELECT * FROM foo limit 25";
+        let result = inject_limit(sql, 100);
+        assert_eq!(result, "SELECT * FROM foo limit 25");
+    }
+
+    #[test]
+    fn inject_limit_with_zero_max_rows() {
+        let sql = "SELECT * FROM foo";
+        let result = inject_limit(sql, 0);
+        assert_eq!(result, "SELECT * FROM foo LIMIT 0");
+    }
+
+    #[test]
+    fn validate_read_only_empty_string() {
+        assert!(validate_read_only("").is_ok());
+    }
+
+    #[test]
+    fn validate_read_only_error_contains_keyword() {
+        let err = validate_read_only("DROP TABLE foo").unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => assert!(msg.contains("DROP")),
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
+    fn query_guard_custom_values() {
+        let guard = QueryGuard {
+            max_rows: 500,
+            timeout_secs: 5,
+        };
+        assert_eq!(guard.max_rows, 500);
+        assert_eq!(guard.timeout_secs, 5);
+    }
 }

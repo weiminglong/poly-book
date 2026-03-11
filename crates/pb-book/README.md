@@ -35,11 +35,18 @@ pb-book (L2Book)
 
 - `Reverse<FixedPrice>` on the bid side ensures `BTreeMap` iteration yields
   best bid first without extra sorting. See [ADR-0002](../../docs/adr/0002-btreemap-orderbook.md).
+- **O(1) total sizes**: `total_bid_size` and `total_ask_size` are maintained via
+  incremental running sums (`total_bid_raw` / `total_ask_raw` fields) updated
+  during `apply_snapshot` and `apply_delta`, avoiding full-tree walks.
+- `#[inline]` on hot-path methods: `apply_delta`, `best_bid`, `best_ask`,
+  `mid_price`, `spread`, `weighted_mid_price`.
 - `check_integrity` detects crossed books (best bid >= best ask). Zero-size
   levels are prevented at insertion time by `apply_snapshot` and `apply_delta`.
 - `check_sequence` enforces monotonic sequence numbers and detects gaps.
 - `proptest` suites verify ordering, spread, snapshot idempotency, and crossed-book
   detection.
+- 69 tests covering empty book, single level, snapshot duplicates, delta sequences,
+  and proptest invariants.
 
 ## Docs to Update After Changes
 

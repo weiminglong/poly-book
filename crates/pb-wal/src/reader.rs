@@ -14,9 +14,9 @@ pub struct WalReader {
     current_segment_id: u64,
     /// Byte offset within the current segment.
     current_offset: usize,
-    /// Cached mmap of the current segment.
+    /// Cached data of the current segment.
     current_data: Option<Vec<u8>>,
-    /// Sorted list of available segment IDs.
+    /// Sorted list of available segment IDs (refreshed on segment advance).
     available_segments: Vec<u64>,
 }
 
@@ -103,11 +103,14 @@ impl WalReader {
         }
     }
 
-    /// Commit the current read position to disk so it survives restarts.
+    /// Commit the current read position atomically to disk so it survives
+    /// restarts. Uses write-to-temp + rename for crash safety.
     pub fn commit_position(&self) -> Result<(), WalError> {
         let path = self.position_file_path();
         let content = format!("{}:{}", self.current_segment_id, self.current_offset);
-        std::fs::write(&path, content).map_err(|e| WalError::io(&path, e))
+        let tmp_path = path.with_extension("pos.tmp");
+        std::fs::write(&tmp_path, &content).map_err(|e| WalError::io(&tmp_path, e))?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| WalError::io(&path, e))
     }
 
     /// Returns the current read position as (segment_id, offset).
@@ -115,29 +118,28 @@ impl WalReader {
         (self.current_segment_id, self.current_offset)
     }
 
-    /// Check if the reader's committed position references a segment that has been pruned.
+    /// Check if the reader's committed position references a segment that has
+    /// been pruned. Uses the cached segment list from the most recent
+    /// `advance_segment` or `open` call to avoid redundant directory scans.
     /// Returns true if the reader needs to re-hydrate from checkpoint.
     pub fn needs_resync(&self) -> bool {
-        let committed_seg = self.current_segment_id;
-        if let Ok(available) = segment::list_segment_ids(&self.config.base_path) {
-            if let Some(&earliest) = available.first() {
-                return committed_seg < earliest;
-            }
+        if let Some(&earliest) = self.available_segments.first() {
+            return self.current_segment_id < earliest;
         }
         false
     }
 
-    /// Returns the byte lag between the reader's current position and the latest
-    /// data on disk. Returns None if lag cannot be determined.
+    /// Returns the byte lag between the reader's current position and the
+    /// latest data on disk. Uses the cached segment list and only stats the
+    /// files for size information.
     pub fn lag_bytes(&self) -> Option<u64> {
-        let available = segment::list_segment_ids(&self.config.base_path).ok()?;
-        if available.is_empty() {
+        if self.available_segments.is_empty() {
             return Some(0);
         }
 
         let mut lag: u64 = 0;
 
-        for &seg_id in &available {
+        for &seg_id in &self.available_segments {
             if seg_id < self.current_segment_id {
                 continue;
             }
@@ -151,6 +153,12 @@ impl WalReader {
             }
         }
         Some(lag)
+    }
+
+    /// Refresh the cached list of available segments from disk.
+    pub fn refresh_segments(&mut self) -> Result<(), WalError> {
+        self.available_segments = segment::list_segment_ids(&self.config.base_path)?;
+        Ok(())
     }
 
     fn position_file_path(&self) -> PathBuf {

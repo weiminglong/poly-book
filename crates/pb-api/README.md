@@ -31,6 +31,7 @@ Full route contracts and error semantics: [docs/api.md](../../docs/api.md).
 | `BookBroadcast` | `tokio::sync::broadcast` channel for WebSocket incremental updates. |
 | `AppState` | Shared axum state holding the live model, broadcast, slug registry, service backends, WAL lag tracking, and config. |
 | `ApiConfig` | API server configuration (depth limits, stale thresholds, query guard settings). |
+| `HealthResponse` | Typed health response struct (avoids `serde_json::json!` dynamic `Value` tree allocation). |
 | `ApiError` | Structured error type mapped to HTTP status codes. |
 
 DTOs in `dto.rs`: `FeedStatusResponse`, `LiveOrderBookSnapshot`,
@@ -70,3 +71,9 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 | WebSocket protocol changed | `web/src/useOrderBookStream.ts`, `docs/api.md` |
 | Route or capability added/removed | Update the active OpenSpec change `tasks.md`, `proposal.md` if scope shifts |
 | API config keys changed | `config/default.toml` `[api]` section, `docs/operations.md` |
+
+## Tests
+
+65 tests covering health states, error format consistency, depth and time parameter
+validation, execution limits, `ServiceError` to `ApiError` mapping,
+`PerAssetBroadcast` unit tests, and `LiveReadModel` tests.

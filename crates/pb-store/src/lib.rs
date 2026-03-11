@@ -17,3 +17,6 @@ pub use schema::{
     trade_event_refs_to_record_batch, trade_event_schema,
 };
 pub use writer::{ClickHouseRecordWriter, ParquetRecordWriter};
+
+#[cfg(test)]
+mod tests;

@@ -264,7 +264,7 @@ Workspace crates:
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
 | `pb-store` | Parquet and ClickHouse sinks |
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
-| `pb-wal` | Embedded write-ahead log with mmap'd segments and CRC32C framing |
+| `pb-wal` | Embedded write-ahead log with append-only segments and CRC32C framing |
 | `pb-service` | Transport-neutral domain service layer with configurable backends |
 | `pb-grpc` | gRPC read surface using tonic (optional, delegates to pb-service) |
 | `pb-metrics` | Prometheus metrics endpoint |

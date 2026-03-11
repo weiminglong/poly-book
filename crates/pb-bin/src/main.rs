@@ -172,11 +172,36 @@ async fn main() -> Result<()> {
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::error!(error = %e, "failed to listen for ctrl_c");
-            return;
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            tokio::select! {
+                result = ctrl_c => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "failed to listen for ctrl_c");
+                        return;
+                    }
+                    tracing::info!("received SIGINT, initiating graceful shutdown");
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM, initiating graceful shutdown");
+                }
+            }
         }
-        tracing::info!("received Ctrl+C, initiating graceful shutdown");
+
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = ctrl_c.await {
+                tracing::error!(error = %e, "failed to listen for ctrl_c");
+                return;
+            }
+            tracing::info!("received Ctrl+C, initiating graceful shutdown");
+        }
+
         shutdown_clone.cancel();
     });
 
@@ -272,4 +297,268 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    // --- CLI parsing: valid subcommands ---
+
+    #[test]
+    fn parse_discover_defaults() {
+        let cli = Cli::try_parse_from(["poly-book", "discover"]).unwrap();
+        match cli.command {
+            Commands::Discover { filter, limit } => {
+                assert!(filter.is_none());
+                assert_eq!(limit, 500);
+            }
+            _ => panic!("expected Discover"),
+        }
+    }
+
+    #[test]
+    fn parse_discover_with_args() {
+        let cli =
+            Cli::try_parse_from(["poly-book", "discover", "--filter", "BTC", "--limit", "100"])
+                .unwrap();
+        match cli.command {
+            Commands::Discover { filter, limit } => {
+                assert_eq!(filter.as_deref(), Some("BTC"));
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("expected Discover"),
+        }
+    }
+
+    #[test]
+    fn parse_ingest_defaults() {
+        let cli = Cli::try_parse_from(["poly-book", "ingest"]).unwrap();
+        match cli.command {
+            Commands::Ingest {
+                tokens,
+                parquet,
+                clickhouse,
+                metrics,
+            } => {
+                assert!(tokens.is_none());
+                assert!(parquet);
+                assert!(!clickhouse);
+                assert!(metrics);
+            }
+            _ => panic!("expected Ingest"),
+        }
+    }
+
+    #[test]
+    fn parse_ingest_with_tokens() {
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "ingest",
+            "--tokens",
+            "tok1,tok2",
+            "--clickhouse",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Ingest {
+                tokens,
+                clickhouse,
+                ..
+            } => {
+                assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
+                assert!(clickhouse);
+            }
+            _ => panic!("expected Ingest"),
+        }
+    }
+
+    #[test]
+    fn parse_replay_requires_all_args() {
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "replay",
+            "--token",
+            "tok1",
+            "--at",
+            "1000000",
+            "--mode",
+            "recv_time",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Replay {
+                token,
+                at,
+                source,
+                mode,
+                validate,
+            } => {
+                assert_eq!(token, "tok1");
+                assert_eq!(at, 1_000_000);
+                assert_eq!(source, "parquet");
+                assert_eq!(mode, "recv_time");
+                assert!(!validate);
+            }
+            _ => panic!("expected Replay"),
+        }
+    }
+
+    #[test]
+    fn parse_execution_replay() {
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "execution-replay",
+            "--start",
+            "100",
+            "--end",
+            "200",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ExecutionReplay {
+                order_id,
+                start,
+                end,
+                source,
+            } => {
+                assert!(order_id.is_none());
+                assert_eq!(start, 100);
+                assert_eq!(end, 200);
+                assert_eq!(source, "parquet");
+            }
+            _ => panic!("expected ExecutionReplay"),
+        }
+    }
+
+    #[test]
+    fn parse_backfill() {
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "backfill",
+            "--tokens",
+            "tok1,tok2",
+            "--interval-secs",
+            "30",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Backfill {
+                tokens,
+                interval_secs,
+                duration_mins,
+            } => {
+                assert_eq!(tokens, "tok1,tok2");
+                assert_eq!(interval_secs, 30);
+                assert_eq!(duration_mins, 0);
+            }
+            _ => panic!("expected Backfill"),
+        }
+    }
+
+    #[test]
+    fn parse_auto_ingest() {
+        let cli = Cli::try_parse_from(["poly-book", "auto-ingest"]).unwrap();
+        match cli.command {
+            Commands::AutoIngest {
+                parquet,
+                clickhouse,
+                metrics,
+            } => {
+                assert!(parquet);
+                assert!(!clickhouse);
+                assert!(metrics);
+            }
+            _ => panic!("expected AutoIngest"),
+        }
+    }
+
+    #[test]
+    fn parse_serve_api() {
+        let cli =
+            Cli::try_parse_from(["poly-book", "serve-api", "--tokens", "tok1", "--auto-rotate"])
+                .unwrap();
+        match cli.command {
+            Commands::ServeApi {
+                tokens,
+                auto_rotate,
+                ..
+            } => {
+                assert_eq!(tokens.as_deref(), Some("tok1"));
+                assert!(auto_rotate);
+            }
+            _ => panic!("expected ServeApi"),
+        }
+    }
+
+    #[test]
+    fn parse_serve() {
+        let cli =
+            Cli::try_parse_from(["poly-book", "serve", "--tokens", "tok1,tok2"]).unwrap();
+        match cli.command {
+            Commands::Serve { tokens, metrics } => {
+                assert_eq!(tokens, "tok1,tok2");
+                assert!(metrics);
+            }
+            _ => panic!("expected Serve"),
+        }
+    }
+
+    // --- CLI parsing: invalid / missing args ---
+
+    #[test]
+    fn parse_no_subcommand_fails() {
+        let result = Cli::try_parse_from(["poly-book"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_unknown_subcommand_fails() {
+        let result = Cli::try_parse_from(["poly-book", "frobnicate"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_replay_missing_required_args_fails() {
+        // --token and --at and --mode are required
+        let result = Cli::try_parse_from(["poly-book", "replay", "--token", "tok1"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_backfill_missing_tokens_fails() {
+        let result = Cli::try_parse_from(["poly-book", "backfill"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_serve_missing_tokens_fails() {
+        let result = Cli::try_parse_from(["poly-book", "serve"]);
+        assert!(result.is_err());
+    }
+
+    // --- Global CLI flags ---
+
+    #[test]
+    fn parse_global_config_flag() {
+        let cli =
+            Cli::try_parse_from(["poly-book", "--config", "/tmp/alt.toml", "discover"]).unwrap();
+        assert_eq!(cli.config, "/tmp/alt.toml");
+    }
+
+    #[test]
+    fn parse_global_log_level_flag() {
+        let cli =
+            Cli::try_parse_from(["poly-book", "--log-level", "debug", "discover"]).unwrap();
+        assert_eq!(cli.log_level, "debug");
+    }
+
+    #[test]
+    fn parse_global_defaults() {
+        let cli = Cli::try_parse_from(["poly-book", "discover"]).unwrap();
+        assert_eq!(cli.config, "config/default.toml");
+        assert_eq!(cli.log_level, "info");
+    }
 }

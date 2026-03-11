@@ -8,37 +8,6 @@ use super::market_discovery::{
 };
 use super::pipeline;
 
-async fn fanout_event(
-    event: pb_types::PersistedRecord,
-    fanout_txs: &[tokio::sync::mpsc::Sender<pb_types::PersistedRecord>],
-) -> bool {
-    match fanout_txs {
-        [] => true,
-        [a] => {
-            if let Err(e) = a.send(event).await {
-                tracing::warn!("fan-out channel closed: {e}");
-                return false;
-            }
-            true
-        }
-        [a, b] => {
-            let ev_a = event.clone();
-            let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
-            if ra.is_err() || rb.is_err() {
-                if let Err(e) = ra {
-                    tracing::warn!("fan-out channel 0 closed: {e}");
-                }
-                if let Err(e) = rb {
-                    tracing::warn!("fan-out channel 1 closed: {e}");
-                }
-                return false;
-            }
-            true
-        }
-        _ => unreachable!("at most 2 sinks"),
-    }
-}
-
 pub async fn run(
     settings: Config,
     enable_parquet: bool,
@@ -98,7 +67,7 @@ pub async fn run(
         loop {
             match event_rx.recv().await {
                 Some(event) => {
-                    if !fanout_event(event, fanout_txs.as_slice()).await {
+                    if !pipeline::fanout_event(event, fanout_txs.as_slice()).await {
                         break;
                     }
                 }
@@ -247,7 +216,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::fanout_event;
+    use super::pipeline::fanout_event;
     use pb_types::{DataSource, EventProvenance, IngestEvent, IngestEventKind, PersistedRecord};
 
     fn sample_record() -> PersistedRecord {
@@ -280,5 +249,40 @@ mod tests {
         assert!(!ok);
         let received = open_rx.recv().await.unwrap();
         assert!(matches!(received, PersistedRecord::Ingest(_)));
+    }
+
+    #[tokio::test]
+    async fn fanout_event_empty_slice_returns_true() {
+        let ok = fanout_event(sample_record(), &[]).await;
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn fanout_event_single_open_channel_returns_true() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let ok = fanout_event(sample_record(), &[tx]).await;
+        assert!(ok);
+        let received = rx.recv().await.unwrap();
+        assert!(matches!(received, PersistedRecord::Ingest(_)));
+    }
+
+    #[tokio::test]
+    async fn fanout_event_single_closed_channel_returns_false() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        drop(rx);
+        let ok = fanout_event(sample_record(), &[tx]).await;
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn fanout_event_two_open_channels_delivers_to_both() {
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(4);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(4);
+        let ok = fanout_event(sample_record(), &[tx1, tx2]).await;
+        assert!(ok);
+        let r1 = rx1.recv().await.unwrap();
+        let r2 = rx2.recv().await.unwrap();
+        assert!(matches!(r1, PersistedRecord::Ingest(_)));
+        assert!(matches!(r2, PersistedRecord::Ingest(_)));
     }
 }

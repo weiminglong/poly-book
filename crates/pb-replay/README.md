@@ -46,7 +46,14 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   `read_market_data`, `read_checkpoints`, `read_latest_checkpoint`,
   `read_validations`, `read_execution_events`.
 - Both readers support time-range filtering and asset filtering at the storage
-  layer to minimize I/O.
+  layer to minimize I/O. ClickHouseReader pushes `WHERE asset_id` into the query
+  for server-side filtering and adds `ORDER BY` clauses on all queries.
+- ClickHouseReader uses `tokio::try_join!` to run independent queries concurrently
+  (e.g., checkpoints + market data) instead of sequential awaits.
+- Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
+  heap allocation during reconstruction.
+- Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
+  for efficiency in Parquet hour-path generation.
 
 ## Docs to Update After Changes
 
@@ -57,3 +64,9 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 | New storage backend reader | `docs/operations.md`, `pb-api` if the reader is used in routes |
 | Backfill config shape changed | `config/default.toml`, `docs/operations.md` |
 | Replay semantics affect API responses | `docs/api.md`, check the active OpenSpec change under `openspec/changes/` |
+
+## Tests
+
+27 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
+`ParquetReader` integration, end-to-end write-then-reconstruct round-trips, and
+backfill REST response parsing.

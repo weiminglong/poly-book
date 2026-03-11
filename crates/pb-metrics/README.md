@@ -30,6 +30,13 @@ Any crate can record metrics via the `metrics` crate macros (`counter!`,
 recorder is installed. pb-metrics itself is a leaf crate with no internal
 workspace dependencies.
 
+## Design Notes
+
+- `status_to_static()` maps HTTP status codes (including 201) to `&'static str`,
+  avoiding `u16::to_string()` heap allocation on every request.
+- `build_router()` helper deduplicates `Router` construction across serve
+  functions.
+
 ## Docs to Update After Changes
 
 | What changed | Update |

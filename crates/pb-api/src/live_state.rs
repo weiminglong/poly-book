@@ -959,6 +959,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_status_reflects_session_state() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        let status = model.feed_status_raw().await;
+        assert_eq!(status.session_status, SessionStatus::Starting);
+        assert_eq!(status.active_asset_count, 0);
+        assert!(status.current_session_id.is_none());
+        assert!(status.last_rotation_us.is_none());
+    }
+
+    #[tokio::test]
+    async fn feed_status_after_reconnect_success() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 200,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: Some("session-42".to_string()),
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let status = model.feed_status_raw().await;
+        assert_eq!(status.session_status, SessionStatus::Connected);
+        assert_eq!(status.current_session_id.as_deref(), Some("session-42"));
+    }
+
+    #[tokio::test]
+    async fn feed_status_during_reconnect() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectStart,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 200,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let status = model.feed_status_raw().await;
+        assert_eq!(status.session_status, SessionStatus::Reconnecting);
+    }
+
+    #[tokio::test]
+    async fn set_active_assets_prunes_old_books() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model
+            .set_active_assets(vec!["tok1".to_string(), "tok2".to_string()])
+            .await;
+
+        // Apply snapshot for tok1
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+
+        // Rotate to only tok2
+        model
+            .set_active_assets(vec!["tok2".to_string()])
+            .await;
+
+        assert!(!model.is_asset_active("tok1").await);
+        assert!(model.is_asset_active("tok2").await);
+    }
+
+    #[tokio::test]
+    async fn set_last_rotation_us() {
+        let model = LiveReadModel::new(FeedMode::AutoRotate);
+        model.set_last_rotation_us(555).await;
+        let status = model.feed_status_raw().await;
+        assert_eq!(status.last_rotation_us, Some(555));
+    }
+
+    #[tokio::test]
+    async fn is_hydrated_default_false() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        assert!(!model.is_hydrated());
+    }
+
+    #[tokio::test]
+    async fn mark_hydrated_sets_flag() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.mark_hydrated().await;
+        assert!(model.is_hydrated());
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_not_active_for_unknown_asset() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        let err = model.snapshot("unknown", 5, 100).await.unwrap_err();
+        assert_eq!(err, SnapshotLookupError::AssetNotActive);
+    }
+
+    #[tokio::test]
+    async fn active_assets_includes_stale_info() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        let assets = model.active_assets(60).await;
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].asset_id, "tok1");
+        // no data received, so stale and no book
+        assert!(assets[0].stale);
+        assert!(!assets[0].has_book);
+    }
+
+    #[tokio::test]
+    async fn hydrate_checkpoint_initializes_book() {
+        use pb_types::event::{BookCheckpoint, PriceLevel};
+
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let checkpoint = BookCheckpoint {
+            asset_id: AssetId::new("tok1"),
+            checkpoint_timestamp_us: 500,
+            bids: vec![PriceLevel {
+                price: pb_types::FixedPrice::from_f64(0.50).unwrap(),
+                size: pb_types::FixedSize::from_f64(10.0).unwrap(),
+            }],
+            asks: vec![PriceLevel {
+                price: pb_types::FixedPrice::from_f64(0.60).unwrap(),
+                size: pb_types::FixedSize::from_f64(20.0).unwrap(),
+            }],
+            provenance: EventProvenance {
+                recv_timestamp_us: 500,
+                exchange_timestamp_us: 490,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+            },
+            wal_offset: None,
+        };
+
+        model.hydrate_checkpoint(checkpoint).await;
+        model.mark_hydrated().await;
+
+        let snap = model.snapshot("tok1", 5, 999_999).await.unwrap();
+        assert_eq!(snap.bid_depth, 1);
+        assert_eq!(snap.ask_depth, 1);
+    }
+
+    #[tokio::test]
+    async fn global_warning_surfaced_in_feed_status() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::SequenceGap,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 999,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: Some(1),
+                observed_sequence: Some(5),
+                details: Some("global gap".to_string()),
+            }))
+            .await;
+
+        let status = model.feed_status_raw().await;
+        let warning = status.latest_global_warning.unwrap();
+        assert_eq!(warning.kind, "sequence_gap");
+        assert_eq!(warning.details.as_deref(), Some("global gap"));
+    }
+
+    #[tokio::test]
+    async fn delta_event_updates_existing_book() {
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+
+        // First apply a snapshot group, then materialize
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        // Now apply a delta
+        model
+            .apply_record(PersistedRecord::Book(pb_types::BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Delta,
+                side: Side::Bid,
+                price: pb_types::FixedPrice::from_f64(0.55).unwrap(),
+                size: pb_types::FixedSize::from_f64(5.0).unwrap(),
+                provenance: EventProvenance {
+                    recv_timestamp_us: 102,
+                    exchange_timestamp_us: 100,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: Some(Sequence::new(2)),
+                },
+            }))
+            .await;
+
+        let snap = model.snapshot("tok1", 5, 100).await.unwrap();
+        assert_eq!(snap.bid_depth, 2); // original bid + delta bid
+    }
+
+    #[tokio::test]
     async fn concurrent_readers_see_consistent_state() {
         let model = LiveReadModel::new(FeedMode::FixedTokens);
         model.set_active_assets(vec!["tok1".to_string()]).await;
