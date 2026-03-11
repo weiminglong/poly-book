@@ -45,9 +45,14 @@ impl WalWriter {
         self.active.append(payload)
     }
 
-    /// Flush the active segment's buffered writes.
-    pub fn flush(&self) -> Result<(), WalError> {
+    /// Flush the active segment's buffered writes to the OS page cache.
+    pub fn flush(&mut self) -> Result<(), WalError> {
         self.active.flush()
+    }
+
+    /// Flush and fsync for guaranteed durability.
+    pub fn sync(&mut self) -> Result<(), WalError> {
+        self.active.sync()
     }
 
     /// Returns the current write position as (segment_id, offset).

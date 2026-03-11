@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use crate::error::WalError;
@@ -10,17 +11,21 @@ pub const HEADER_SIZE: usize = FRAME_HEADER_LEN;
 /// Maximum payload size per record (256 MB).
 pub const MAX_RECORD_SIZE: usize = 256 * 1024 * 1024;
 
+/// BufWriter capacity — 64 KiB is enough to batch many small record frames
+/// while keeping memory usage low.
+const BUF_WRITER_CAPACITY: usize = 64 * 1024;
+
 /// A single WAL segment file.
 ///
 /// Segments are append-only files with a fixed maximum size. Records are
 /// framed with a 4-byte little-endian length prefix followed by a 4-byte
-/// CRC32C checksum, then the payload bytes.
-#[derive(Debug)]
+/// CRC32C checksum, then the payload bytes. Writes are batched through a
+/// `BufWriter` to reduce syscall frequency.
 pub struct Segment {
     pub id: u64,
     pub path: PathBuf,
     pub write_offset: u64,
-    file: File,
+    writer: BufWriter<File>,
 }
 
 impl Segment {
@@ -38,7 +43,7 @@ impl Segment {
             id,
             path,
             write_offset: 0,
-            file,
+            writer: BufWriter::with_capacity(BUF_WRITER_CAPACITY, file),
         })
     }
 
@@ -51,15 +56,24 @@ impl Segment {
             .open(&path)
             .map_err(|e| WalError::io(&path, e))?;
         let write_offset = file.metadata().map_err(|e| WalError::io(&path, e))?.len();
+        // Seek to end so BufWriter appends correctly.
+        use std::io::Seek;
+        let mut file = file;
+        file.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| WalError::io(&path, e))?;
         Ok(Self {
             id,
             path,
             write_offset,
-            file,
+            writer: BufWriter::with_capacity(BUF_WRITER_CAPACITY, file),
         })
     }
 
     /// Append a framed record (header + payload) to this segment.
+    ///
+    /// The 8-byte frame header (length + CRC32C) and payload are assembled
+    /// into a single `write_all` call via the internal `BufWriter`, reducing
+    /// syscall frequency compared to three separate writes.
     pub fn append(&mut self, payload: &[u8]) -> Result<u64, WalError> {
         if payload.len() > MAX_RECORD_SIZE {
             return Err(WalError::RecordTooLarge {
@@ -72,14 +86,17 @@ impl Segment {
         let len = payload.len() as u32;
         let crc = crc32c::crc32c(payload);
 
+        // Assemble frame header into a stack buffer, then write header + payload
+        // through BufWriter (typically coalesced into a single syscall).
+        let mut header = [0u8; HEADER_SIZE];
+        header[..4].copy_from_slice(&len.to_le_bytes());
+        header[4..8].copy_from_slice(&crc.to_le_bytes());
+
         use std::io::Write;
-        self.file
-            .write_all(&len.to_le_bytes())
+        self.writer
+            .write_all(&header)
             .map_err(|e| WalError::io(&self.path, e))?;
-        self.file
-            .write_all(&crc.to_le_bytes())
-            .map_err(|e| WalError::io(&self.path, e))?;
-        self.file
+        self.writer
             .write_all(payload)
             .map_err(|e| WalError::io(&self.path, e))?;
 
@@ -87,17 +104,34 @@ impl Segment {
         Ok(offset)
     }
 
-    /// Flush buffered writes to the OS.
-    pub fn flush(&self) -> Result<(), WalError> {
+    /// Flush buffered writes to the OS page cache.
+    pub fn flush(&mut self) -> Result<(), WalError> {
         use std::io::Write;
-        (&self.file)
-            .flush()
+        self.writer.flush().map_err(|e| WalError::io(&self.path, e))
+    }
+
+    /// Flush and fsync to guarantee durability on disk.
+    pub fn sync(&mut self) -> Result<(), WalError> {
+        self.flush()?;
+        self.writer
+            .get_ref()
+            .sync_data()
             .map_err(|e| WalError::io(&self.path, e))
     }
 
     /// Returns the remaining capacity in this segment.
     pub fn remaining(&self, segment_size: u64) -> u64 {
         segment_size.saturating_sub(self.write_offset)
+    }
+}
+
+impl std::fmt::Debug for Segment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Segment")
+            .field("id", &self.id)
+            .field("path", &self.path)
+            .field("write_offset", &self.write_offset)
+            .finish()
     }
 }
 
@@ -172,4 +206,265 @@ pub fn list_segment_ids(dir: &Path) -> Result<Vec<u64>, WalError> {
     }
     ids.sort_unstable();
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- read_record_at tests ----
+
+    #[test]
+    fn read_record_at_empty_data_returns_none() {
+        let result = read_record_at(&[], 0, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_record_at_offset_past_end_returns_none() {
+        let data = vec![0u8; 16];
+        let result = read_record_at(&data, 100, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_record_at_truncated_header_returns_none() {
+        // Less than HEADER_SIZE bytes remaining.
+        let data = vec![0u8; 4];
+        let result = read_record_at(&data, 0, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_record_at_zero_length_returns_none() {
+        // A zero-length record marks end of written data.
+        let mut data = vec![0u8; HEADER_SIZE];
+        data[..4].copy_from_slice(&0u32.to_le_bytes());
+        data[4..8].copy_from_slice(&0u32.to_le_bytes());
+        let result = read_record_at(&data, 0, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_record_at_valid_frame() {
+        let payload = b"hello";
+        let len = payload.len() as u32;
+        let crc = crc32c::crc32c(payload);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(&crc.to_le_bytes());
+        data.extend_from_slice(payload);
+
+        let result = read_record_at(&data, 0, 0).unwrap().unwrap();
+        assert_eq!(result.0, payload);
+        assert_eq!(result.1, HEADER_SIZE + payload.len());
+    }
+
+    #[test]
+    fn read_record_at_crc_mismatch() {
+        let payload = b"hello";
+        let len = payload.len() as u32;
+        let bad_crc = 0xDEADBEEFu32;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(&bad_crc.to_le_bytes());
+        data.extend_from_slice(payload);
+
+        let err = read_record_at(&data, 0, 42).unwrap_err();
+        match err {
+            WalError::CrcMismatch {
+                segment_id,
+                offset,
+                expected,
+                actual,
+            } => {
+                assert_eq!(segment_id, 42);
+                assert_eq!(offset, 0);
+                assert_eq!(expected, bad_crc);
+                assert_eq!(actual, crc32c::crc32c(payload));
+            }
+            other => panic!("expected CrcMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_record_at_truncated_payload() {
+        let len = 100u32; // Claims 100 bytes of payload.
+        let crc = 0u32;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(&crc.to_le_bytes());
+        data.extend_from_slice(&[0u8; 10]); // Only 10 bytes, not 100.
+
+        let err = read_record_at(&data, 0, 7).unwrap_err();
+        match err {
+            WalError::TruncatedRecord { segment_id, offset } => {
+                assert_eq!(segment_id, 7);
+                assert_eq!(offset, 0);
+            }
+            other => panic!("expected TruncatedRecord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_record_at_multiple_records() {
+        // Write two valid records back to back.
+        let p1 = b"first";
+        let p2 = b"second";
+        let mut data = Vec::new();
+
+        for payload in [p1.as_slice(), p2.as_slice()] {
+            let len = payload.len() as u32;
+            let crc = crc32c::crc32c(payload);
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(&crc.to_le_bytes());
+            data.extend_from_slice(payload);
+        }
+
+        let (rec1, next) = read_record_at(&data, 0, 0).unwrap().unwrap();
+        assert_eq!(rec1, p1);
+        let (rec2, _) = read_record_at(&data, next, 0).unwrap().unwrap();
+        assert_eq!(rec2, p2);
+    }
+
+    #[test]
+    fn read_record_at_corrupt_single_byte_in_payload() {
+        let payload = b"integrity-check";
+        let len = payload.len() as u32;
+        let crc = crc32c::crc32c(payload);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(&crc.to_le_bytes());
+        data.extend_from_slice(payload);
+
+        // Flip one bit in the middle of the payload.
+        let mid = HEADER_SIZE + payload.len() / 2;
+        data[mid] ^= 0x01;
+
+        let err = read_record_at(&data, 0, 0).unwrap_err();
+        assert!(matches!(err, WalError::CrcMismatch { .. }));
+    }
+
+    // ---- Segment create/append/flush tests ----
+
+    #[test]
+    fn segment_create_and_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+
+        assert_eq!(seg.id, 0);
+        assert_eq!(seg.write_offset, 0);
+
+        let offset = seg.append(b"test-payload").unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(
+            seg.write_offset,
+            HEADER_SIZE as u64 + b"test-payload".len() as u64
+        );
+    }
+
+    #[test]
+    fn segment_flush_makes_data_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+        seg.append(b"flush-test").unwrap();
+        seg.flush().unwrap();
+
+        // Read back the file and verify the frame.
+        let data = std::fs::read(&seg.path).unwrap();
+        let (payload, _) = read_record_at(&data, 0, 0).unwrap().unwrap();
+        assert_eq!(payload, b"flush-test");
+    }
+
+    #[test]
+    fn segment_sync_does_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+        seg.append(b"sync-test").unwrap();
+        seg.sync().unwrap();
+    }
+
+    #[test]
+    fn segment_remaining_decreases_on_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+        let seg_size = 4096u64;
+
+        assert_eq!(seg.remaining(seg_size), seg_size);
+
+        seg.append(b"data").unwrap();
+        let expected_used = HEADER_SIZE as u64 + 4;
+        assert_eq!(seg.remaining(seg_size), seg_size - expected_used);
+    }
+
+    #[test]
+    fn segment_rejects_oversized_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+
+        let huge = vec![0u8; MAX_RECORD_SIZE + 1];
+        let err = seg.append(&huge).unwrap_err();
+        assert!(matches!(err, WalError::RecordTooLarge { .. }));
+    }
+
+    #[test]
+    fn segment_open_append_resumes_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut seg = Segment::create(5, dir.path()).unwrap();
+            seg.append(b"record-1").unwrap();
+            seg.append(b"record-2").unwrap();
+            seg.flush().unwrap();
+        }
+
+        let seg = Segment::open_append(5, dir.path()).unwrap();
+        let expected_offset = 2 * (HEADER_SIZE as u64 + 8); // two 8-byte payloads
+        assert_eq!(seg.write_offset, expected_offset);
+    }
+
+    // ---- segment_path and list_segment_ids tests ----
+
+    #[test]
+    fn segment_path_format() {
+        let dir = Path::new("/tmp/wal");
+        let path = segment_path(dir, 42);
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/wal/segment_00000000000000000042.wal")
+        );
+    }
+
+    #[test]
+    fn list_segment_ids_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = list_segment_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn list_segment_ids_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create segments out of order.
+        for id in [3, 1, 5, 2] {
+            Segment::create(id, dir.path()).unwrap();
+        }
+        let ids = list_segment_ids(dir.path()).unwrap();
+        assert_eq!(ids, vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn list_segment_ids_ignores_non_wal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        Segment::create(0, dir.path()).unwrap();
+        // Create a non-WAL file.
+        std::fs::write(dir.path().join("consumer_test.pos"), "0:0").unwrap();
+        std::fs::write(dir.path().join("random.txt"), "data").unwrap();
+
+        let ids = list_segment_ids(dir.path()).unwrap();
+        assert_eq!(ids, vec![0]);
+    }
 }

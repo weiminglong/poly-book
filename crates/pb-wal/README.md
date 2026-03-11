@@ -57,11 +57,24 @@ and feeds decoded records into the live read model.
 
 ## Design Notes
 
+- **Append-only file I/O** — segments use standard file I/O (not mmap).
+  `WalWriter` wraps the active file in a `BufWriter` with a 64 KB buffer,
+  reducing write syscalls by ~3x.
+- **Efficient framing**: the 8-byte frame header (4-byte length + 4-byte CRC32C)
+  is stack-assembled and written in a single call instead of two separate writes.
+- **Explicit durability**: `WalWriter::sync()` calls `fdatasync` to flush buffered
+  data to stable storage on demand.
+- **Single-buffer codec encode**: `codec::encode` uses `serialize_into` to write
+  directly into the frame buffer, avoiding an intermediate allocation.
 - Segments are fixed-size append-only files. The writer rotates to a new segment
   when the active segment reaches the configured `segment_size` threshold.
 - Multiple consumers can independently tail the same WAL with separate position
   files (`consumer_{name}.pos`). Each consumer commits its read position to disk
   via `WalReader::commit_position()` and resumes from there on restart.
+- **Atomic position writes**: position files are written to a temp file first, then
+  renamed into place, preventing partial reads on crash.
+- **Cached segment list**: `WalReader` caches the segment directory listing,
+  avoiding repeated directory re-scans during tailing.
 - **Pruning**: `WalWriter::prune()` removes sealed segments that all registered
   consumers have advanced past. The active segment is never pruned.
 - **Backpressure pruning**: `WalWriter::prune_with_backpressure()` retains at
@@ -74,6 +87,9 @@ and feeds decoded records into the live read model.
   the reader's current position and the latest data on disk.
 - The codec version byte allows future record format changes without breaking
   existing segments.
+- `memmap2` dependency removed — all I/O is via standard file operations.
+- 61 tests covering CRC corruption detection, truncated frames, codec round-trips,
+  segment rotation, reader position persistence, and pruner safety.
 
 ## Docs to Update After Changes
 

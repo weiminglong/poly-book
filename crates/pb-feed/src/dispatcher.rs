@@ -30,6 +30,16 @@ fn record_label(record: &PersistedRecord) -> &'static str {
     }
 }
 
+/// Parse a side string from the venue into the internal `Side` enum.
+/// Returns `None` for unrecognized values.
+fn parse_side(raw: &str) -> Option<Side> {
+    match raw {
+        "BUY" | "buy" | "Bid" | "bid" => Some(Side::Bid),
+        "SELL" | "sell" | "Ask" | "ask" => Some(Side::Ask),
+        _ => None,
+    }
+}
+
 pub struct Dispatcher {
     rx: mpsc::Receiver<FeedMessage>,
     tx: mpsc::Sender<PersistedRecord>,
@@ -219,11 +229,10 @@ impl Dispatcher {
             WsMessage::PriceChange(pc) => {
                 let exchange_ts = parse_timestamp_us(pc.timestamp);
                 for entry in &pc.price_changes {
-                    let side = match entry.side {
-                        "BUY" | "buy" | "Bid" | "bid" => Side::Bid,
-                        "SELL" | "sell" | "Ask" | "ask" => Side::Ask,
-                        other => {
-                            warn!(side = other, "unknown side string, skipping delta");
+                    let side = match parse_side(entry.side) {
+                        Some(s) => s,
+                        None => {
+                            warn!(side = entry.side, "unknown side string, skipping delta");
                             continue;
                         }
                     };
@@ -245,7 +254,7 @@ impl Dispatcher {
             WsMessage::LastTradePrice(lt) => {
                 let asset_id = self.intern_asset_id(lt.asset_id);
                 let size = lt.size.map(FixedSize::try_from).transpose()?;
-                let side = lt.side.and_then(parse_trade_side);
+                let side = lt.side.and_then(parse_side);
                 let fidelity = if size.is_some() && side.is_some() {
                     TradeFidelity::Full
                 } else {
@@ -343,7 +352,8 @@ impl Dispatcher {
     }
 
     async fn send(&self, record: PersistedRecord) -> Result<(), FeedError> {
-        pb_metrics::record_message_received(record_label(&record));
+        let label = record_label(&record);
+        pb_metrics::record_message_received(label);
 
         match &record {
             PersistedRecord::Book(event) => match event.kind {
@@ -397,14 +407,6 @@ fn parse_timestamp_us(ts: Option<&str>) -> u64 {
         raw.saturating_mul(1000)
     } else {
         raw
-    }
-}
-
-fn parse_trade_side(raw: &str) -> Option<Side> {
-    match raw {
-        "BUY" | "buy" | "Bid" | "bid" => Some(Side::Bid),
-        "SELL" | "sell" | "Ask" | "ask" => Some(Side::Ask),
-        _ => None,
     }
 }
 
@@ -549,5 +551,663 @@ mod tests {
             PersistedRecord::Ingest(event) => assert_eq!(event.kind, IngestEventKind::SourceReset),
             other => panic!("expected source reset, got {other:?}"),
         }
+    }
+
+    // ---- parse_side tests ----
+
+    #[test]
+    fn parse_side_buy_variants() {
+        assert_eq!(parse_side("BUY"), Some(Side::Bid));
+        assert_eq!(parse_side("buy"), Some(Side::Bid));
+        assert_eq!(parse_side("Bid"), Some(Side::Bid));
+        assert_eq!(parse_side("bid"), Some(Side::Bid));
+    }
+
+    #[test]
+    fn parse_side_sell_variants() {
+        assert_eq!(parse_side("SELL"), Some(Side::Ask));
+        assert_eq!(parse_side("sell"), Some(Side::Ask));
+        assert_eq!(parse_side("Ask"), Some(Side::Ask));
+        assert_eq!(parse_side("ask"), Some(Side::Ask));
+    }
+
+    #[test]
+    fn parse_side_invalid_returns_none() {
+        assert_eq!(parse_side(""), None);
+        assert_eq!(parse_side("Buy"), None);
+        assert_eq!(parse_side("Sell"), None);
+        assert_eq!(parse_side("BUYING"), None);
+        assert_eq!(parse_side("bids"), None);
+        assert_eq!(parse_side("unknown"), None);
+        assert_eq!(parse_side("0"), None);
+        assert_eq!(parse_side(" BUY"), None);
+        assert_eq!(parse_side("BUY "), None);
+    }
+
+    // ---- parse_timestamp_us tests ----
+
+    #[test]
+    fn parse_timestamp_us_none_returns_zero() {
+        assert_eq!(parse_timestamp_us(None), 0);
+    }
+
+    #[test]
+    fn parse_timestamp_us_non_numeric_returns_zero() {
+        assert_eq!(parse_timestamp_us(Some("not-a-number")), 0);
+        assert_eq!(parse_timestamp_us(Some("")), 0);
+    }
+
+    #[test]
+    fn parse_timestamp_us_millis_converted_to_micros() {
+        // A 13-digit millisecond timestamp should be multiplied by 1000.
+        let ts = parse_timestamp_us(Some("1700000000000"));
+        assert_eq!(ts, 1_700_000_000_000_000);
+    }
+
+    #[test]
+    fn parse_timestamp_us_micros_left_unchanged() {
+        // A 16-digit microsecond timestamp should pass through unchanged.
+        let ts = parse_timestamp_us(Some("1700000000000000"));
+        assert_eq!(ts, 1_700_000_000_000_000);
+    }
+
+    #[test]
+    fn parse_timestamp_us_zero_returns_zero() {
+        assert_eq!(parse_timestamp_us(Some("0")), 0);
+    }
+
+    // ---- Dispatcher: malformed JSON handling ----
+
+    #[tokio::test]
+    async fn dispatch_ignores_empty_string() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(raw_message(String::new()))
+            .await
+            .unwrap();
+
+        // No events should have been produced.
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_plain_text() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(raw_message("hello world".to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_empty_json_object() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(raw_message("{}".to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_json_null() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(raw_message("null".to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_unknown_event_type() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "unknown_event",
+            "data": "something"
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_missing_event_type() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "asset_id": "tok1",
+            "bids": [],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_json_array() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(raw_message("[1,2,3]".to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ignores_nested_garbage() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "bids": "not_an_array",
+            "asks": 42
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    // ---- Dispatcher: price_change with invalid side ----
+
+    #[tokio::test]
+    async fn delta_with_unknown_side_is_skipped() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000000",
+            "price_changes": [{
+                "asset_id": "tok1",
+                "price": "0.50",
+                "size": "10",
+                "side": "INVALID_SIDE"
+            }]
+        });
+
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // The delta should be silently skipped.
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    // ---- Dispatcher: trade with full fidelity ----
+
+    #[tokio::test]
+    async fn trade_event_marks_full_fidelity_when_side_and_size_present() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "last_trade_price",
+            "asset_id": "tok1",
+            "price": "0.60",
+            "size": "100",
+            "side": "BUY"
+        });
+
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Trade(event) => {
+                assert_eq!(event.fidelity, TradeFidelity::Full);
+                assert!(event.size.is_some());
+                assert_eq!(event.side, Some(Side::Bid));
+            }
+            other => panic!("expected trade event, got {other:?}"),
+        }
+    }
+
+    // ---- Dispatcher: asset_id interning ----
+
+    #[tokio::test]
+    async fn asset_id_is_interned_across_messages() {
+        let (_raw_tx, raw_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        for _ in 0..3 {
+            let msg = serde_json::json!({
+                "event_type": "last_trade_price",
+                "asset_id": "tok1",
+                "price": "0.60"
+            });
+            dispatcher
+                .dispatch(raw_message(msg.to_string()))
+                .await
+                .unwrap();
+        }
+
+        // Should have exactly 1 entry in the cache despite 3 messages.
+        assert_eq!(dispatcher.asset_id_cache.len(), 1);
+        assert!(dispatcher.asset_id_cache.contains_key("tok1"));
+
+        // All 3 events should have been produced.
+        for _ in 0..3 {
+            assert!(event_rx.try_recv().is_ok());
+        }
+    }
+
+    // ---- Dispatcher: empty dispatcher lookups ----
+
+    #[tokio::test]
+    async fn empty_dispatcher_handles_unknown_asset() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Sequences for a brand new asset start at 0.
+        let msg = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000000",
+            "price_changes": [{
+                "asset_id": "never-seen",
+                "price": "0.50",
+                "size": "10",
+                "side": "BUY"
+            }]
+        });
+
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(event) => {
+                assert_eq!(event.provenance.sequence.unwrap().raw(), 0);
+                assert_eq!(event.asset_id.as_str(), "never-seen");
+            }
+            other => panic!("expected book event, got {other:?}"),
+        }
+    }
+
+    // ---- Dispatcher: sequence numbering across assets ----
+
+    #[tokio::test]
+    async fn sequences_are_independent_per_asset() {
+        let (_raw_tx, raw_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        for asset in &["tok1", "tok2"] {
+            for _ in 0..2 {
+                let msg = serde_json::json!({
+                    "event_type": "price_change",
+                    "timestamp": "1700000000000000",
+                    "price_changes": [{
+                        "asset_id": asset,
+                        "price": "0.50",
+                        "size": "10",
+                        "side": "BUY"
+                    }]
+                });
+                dispatcher
+                    .dispatch(raw_message(msg.to_string()))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // tok1: seq 0, 1
+        for expected_seq in [0, 1] {
+            match event_rx.recv().await.unwrap() {
+                PersistedRecord::Book(event) => {
+                    assert_eq!(event.asset_id.as_str(), "tok1");
+                    assert_eq!(event.provenance.sequence.unwrap().raw(), expected_seq);
+                }
+                other => panic!("expected book event, got {other:?}"),
+            }
+        }
+        // tok2: seq 0, 1
+        for expected_seq in [0, 1] {
+            match event_rx.recv().await.unwrap() {
+                PersistedRecord::Book(event) => {
+                    assert_eq!(event.asset_id.as_str(), "tok2");
+                    assert_eq!(event.provenance.sequence.unwrap().raw(), expected_seq);
+                }
+                other => panic!("expected book event, got {other:?}"),
+            }
+        }
+    }
+
+    // ---- Dispatcher: lifecycle ReconnectStart ----
+
+    #[tokio::test]
+    async fn reconnect_start_emits_single_ingest_event() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher
+            .dispatch(FeedMessage::Lifecycle(WsLifecycleEvent {
+                kind: WsLifecycleKind::ReconnectStart,
+                recv_timestamp_us: 10,
+                session_id: "session-1".to_string(),
+                details: Some("attempt=0".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Ingest(event) => {
+                assert_eq!(event.kind, IngestEventKind::ReconnectStart);
+                assert_eq!(event.details, Some("attempt=0".to_string()));
+            }
+            other => panic!("expected reconnect start, got {other:?}"),
+        }
+
+        // ReconnectStart should NOT emit SourceReset.
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    // ---- Dispatcher: session tracking ----
+
+    #[tokio::test]
+    async fn reconnect_success_updates_session_id() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        assert!(dispatcher.current_session_id.is_none());
+
+        dispatcher
+            .dispatch(FeedMessage::Lifecycle(WsLifecycleEvent {
+                kind: WsLifecycleKind::ReconnectSuccess,
+                recv_timestamp_us: 10,
+                session_id: "new-session".to_string(),
+                details: None,
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dispatcher.current_session_id.as_deref(),
+            Some("new-session")
+        );
+    }
+
+    // ---- Dispatcher: book with empty bids and asks ----
+
+    #[tokio::test]
+    async fn snapshot_with_empty_bids_and_asks_resets_sequence() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        dispatcher.asset_sequences.insert(Arc::from("tok1"), 50);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [],
+            "asks": []
+        });
+
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // No book events emitted (empty bids/asks), but sequence should still reset.
+        assert!(event_rx.try_recv().is_err());
+        assert_eq!(dispatcher.asset_sequences.get("tok1"), Some(&0));
+    }
+
+    // ---- Dispatcher: output channel closed ----
+
+    #[tokio::test]
+    async fn dispatch_returns_channel_send_when_output_closed() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Drop the receiver to close the channel.
+        drop(event_rx);
+
+        let msg = serde_json::json!({
+            "event_type": "last_trade_price",
+            "asset_id": "tok1",
+            "price": "0.60"
+        });
+
+        let result = dispatcher.dispatch(raw_message(msg.to_string())).await;
+        assert!(matches!(result, Err(FeedError::ChannelSend)));
+    }
+
+    // ---- Dispatcher: cancellation token shuts down run loop ----
+
+    #[tokio::test]
+    async fn run_with_token_shuts_down_on_cancellation() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel immediately.
+        token_clone.cancel();
+
+        let result = dispatcher.run_with_token(token).await;
+        assert!(result.is_ok());
+    }
+
+    // ---- Dispatcher: run exits when input channel closes ----
+
+    #[tokio::test]
+    async fn run_exits_when_input_channel_closes() {
+        let (raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Drop the sender to close the input channel.
+        drop(raw_tx);
+
+        let result = dispatcher.run().await;
+        assert!(result.is_ok());
+    }
+
+    // ---- Dispatcher: price_change with multiple entries ----
+
+    #[tokio::test]
+    async fn price_change_with_multiple_entries_emits_multiple_book_events() {
+        let (_raw_tx, raw_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000000",
+            "price_changes": [
+                {"asset_id": "tok1", "price": "0.50", "size": "10", "side": "BUY"},
+                {"asset_id": "tok1", "price": "0.55", "size": "20", "side": "SELL"},
+                {"asset_id": "tok2", "price": "0.30", "size": "5", "side": "buy"}
+            ]
+        });
+
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // Should emit 3 book events.
+        let e1 = event_rx.recv().await.unwrap();
+        let e2 = event_rx.recv().await.unwrap();
+        let e3 = event_rx.recv().await.unwrap();
+
+        match e1 {
+            PersistedRecord::Book(event) => {
+                assert_eq!(event.side, Side::Bid);
+                assert_eq!(event.kind, BookEventKind::Delta);
+            }
+            other => panic!("expected book event, got {other:?}"),
+        }
+        match e2 {
+            PersistedRecord::Book(event) => {
+                assert_eq!(event.side, Side::Ask);
+            }
+            other => panic!("expected book event, got {other:?}"),
+        }
+        match e3 {
+            PersistedRecord::Book(event) => {
+                assert_eq!(event.asset_id.as_str(), "tok2");
+                assert_eq!(event.side, Side::Bid);
+            }
+            other => panic!("expected book event, got {other:?}"),
+        }
+    }
+
+    // ---- record_label coverage ----
+
+    #[test]
+    fn record_label_covers_all_variants() {
+        use pb_types::event::{
+            BookCheckpoint, ExecutionEvent, ExecutionEventKind, LatencyTrace, ReplayMode,
+            ReplayValidation,
+        };
+
+        let prov = EventProvenance {
+            recv_timestamp_us: 0,
+            exchange_timestamp_us: 0,
+            source: DataSource::WebSocket,
+            source_event_id: None,
+            source_session_id: None,
+            sequence: None,
+        };
+
+        assert_eq!(
+            record_label(&PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("t"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Bid,
+                price: FixedPrice::new(1).unwrap(),
+                size: FixedSize::from_f64(1.0).unwrap(),
+                provenance: prov.clone(),
+            })),
+            "snapshot"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("t"),
+                kind: BookEventKind::Delta,
+                side: Side::Ask,
+                price: FixedPrice::new(1).unwrap(),
+                size: FixedSize::from_f64(1.0).unwrap(),
+                provenance: prov.clone(),
+            })),
+            "delta"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Trade(TradeEvent {
+                asset_id: AssetId::new("t"),
+                price: FixedPrice::new(1).unwrap(),
+                size: None,
+                side: None,
+                trade_id: None,
+                fidelity: TradeFidelity::Partial,
+                provenance: prov.clone(),
+            })),
+            "trade"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectStart,
+                provenance: prov.clone(),
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            })),
+            "ingest"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Checkpoint(BookCheckpoint {
+                asset_id: AssetId::new("t"),
+                checkpoint_timestamp_us: 0,
+                provenance: prov.clone(),
+                bids: vec![],
+                asks: vec![],
+                wal_offset: None,
+            })),
+            "checkpoint"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Validation(ReplayValidation {
+                asset_id: AssetId::new("t"),
+                mode: ReplayMode::RecvTime,
+                replay_timestamp_us: 0,
+                reference_timestamp_us: 0,
+                matched: true,
+                mismatch_summary: None,
+                persisted_at_us: 0,
+            })),
+            "validation"
+        );
+        assert_eq!(
+            record_label(&PersistedRecord::Execution(ExecutionEvent {
+                event_timestamp_us: 0,
+                asset_id: None,
+                order_id: "o1".to_string(),
+                client_order_id: None,
+                venue_order_id: None,
+                kind: ExecutionEventKind::SubmitIntent,
+                side: None,
+                price: None,
+                size: None,
+                status: None,
+                reason: None,
+                latency: LatencyTrace::default(),
+            })),
+            "execution"
+        );
     }
 }

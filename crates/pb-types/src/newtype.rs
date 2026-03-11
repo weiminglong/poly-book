@@ -42,15 +42,18 @@ impl From<&str> for AssetId {
 pub struct Sequence(pub u64);
 
 impl Sequence {
-    pub fn new(seq: u64) -> Self {
+    #[inline]
+    pub const fn new(seq: u64) -> Self {
         Self(seq)
     }
 
-    pub fn next(self) -> Self {
+    #[inline]
+    pub const fn next(self) -> Self {
         Self(self.0 + 1)
     }
 
-    pub fn raw(self) -> u64 {
+    #[inline]
+    pub const fn raw(self) -> u64 {
         self.0
     }
 }
@@ -78,5 +81,152 @@ mod tests {
         let b = Sequence::new(2);
         assert!(a < b);
         assert_eq!(a.next(), b);
+    }
+
+    // --- Sequence hardened tests ---
+
+    #[test]
+    fn sequence_zero_default() {
+        assert_eq!(Sequence::default(), Sequence::new(0));
+        assert_eq!(Sequence::default().raw(), 0);
+    }
+
+    #[test]
+    fn sequence_next_from_zero() {
+        assert_eq!(Sequence::new(0).next(), Sequence::new(1));
+    }
+
+    #[test]
+    fn sequence_const_fn_in_const_context() {
+        const SEQ: Sequence = Sequence::new(42);
+        const RAW: u64 = SEQ.raw();
+        const NEXT: Sequence = SEQ.next();
+        assert_eq!(RAW, 42);
+        assert_eq!(NEXT.raw(), 43);
+    }
+
+    #[test]
+    fn sequence_display() {
+        assert_eq!(format!("{}", Sequence::new(0)), "0");
+        assert_eq!(
+            format!("{}", Sequence::new(u64::MAX)),
+            format!("{}", u64::MAX)
+        );
+    }
+
+    #[test]
+    fn sequence_ordering_comprehensive() {
+        let a = Sequence::new(0);
+        let b = Sequence::new(1);
+        let c = Sequence::new(u64::MAX);
+        assert!(a < b);
+        assert!(b < c);
+        assert!(a < c);
+        assert_eq!(a, Sequence::new(0));
+    }
+
+    #[test]
+    fn sequence_serde_roundtrip() {
+        let seq = Sequence::new(999_999);
+        let json = serde_json::to_string(&seq).unwrap();
+        let seq2: Sequence = serde_json::from_str(&json).unwrap();
+        assert_eq!(seq, seq2);
+    }
+
+    #[test]
+    fn sequence_serde_zero() {
+        let seq = Sequence::new(0);
+        let json = serde_json::to_string(&seq).unwrap();
+        assert_eq!(json, "0");
+        let seq2: Sequence = serde_json::from_str(&json).unwrap();
+        assert_eq!(seq, seq2);
+    }
+
+    #[test]
+    fn sequence_serde_u64_max() {
+        let seq = Sequence::new(u64::MAX);
+        let json = serde_json::to_string(&seq).unwrap();
+        let seq2: Sequence = serde_json::from_str(&json).unwrap();
+        assert_eq!(seq, seq2);
+    }
+
+    #[test]
+    fn sequence_hash_equality() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Sequence::new(10));
+        assert!(set.contains(&Sequence::new(10)));
+        assert!(!set.contains(&Sequence::new(11)));
+    }
+
+    #[test]
+    fn sequence_copy_semantics() {
+        let s = Sequence::new(100);
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // --- AssetId hardened tests ---
+
+    #[test]
+    fn asset_id_from_string() {
+        let id = AssetId::from("hello".to_string());
+        assert_eq!(id.as_str(), "hello");
+    }
+
+    #[test]
+    fn asset_id_from_str_ref() {
+        let id = AssetId::from("world");
+        assert_eq!(id.as_str(), "world");
+    }
+
+    #[test]
+    fn asset_id_clone_is_cheap() {
+        let id = AssetId::new("shared-data");
+        let cloned = id.clone();
+        // Arc-based clone, both point to same allocation
+        assert_eq!(id, cloned);
+        assert_eq!(id.as_str(), cloned.as_str());
+    }
+
+    #[test]
+    fn asset_id_empty_string() {
+        let id = AssetId::new("");
+        assert_eq!(id.as_str(), "");
+        assert_eq!(format!("{id}"), "");
+    }
+
+    #[test]
+    fn asset_id_long_token_id() {
+        let long = "21742633143463801764263866138596936600980228888098934498299596572218858267895";
+        let id = AssetId::new(long);
+        assert_eq!(id.as_str(), long);
+    }
+
+    #[test]
+    fn asset_id_serde_roundtrip() {
+        let id = AssetId::new("token-123");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"token-123\"");
+        let id2: AssetId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn asset_id_hash_equality() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AssetId::new("abc"));
+        assert!(set.contains(&AssetId::new("abc")));
+        assert!(!set.contains(&AssetId::new("def")));
+    }
+
+    #[test]
+    fn asset_id_equality_independent_of_construction() {
+        let a = AssetId::new("test");
+        let b = AssetId::from("test".to_string());
+        let c = AssetId::from("test");
+        assert_eq!(a, b);
+        assert_eq!(b, c);
     }
 }

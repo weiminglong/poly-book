@@ -9,10 +9,10 @@ the system.
 
 | Type | Description |
 |------|-------------|
-| `FixedPrice(u32)` | Price scaled by 10,000 (4 decimal places). Never use `f64`. See [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md). |
-| `FixedSize(u64)` | Size scaled by 1,000,000 (6 decimal places). |
+| `FixedPrice(u32)` | Price scaled by 10,000 (4 decimal places). `const fn` on `raw()`, `is_zero()`. Never use `f64`. See [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md). |
+| `FixedSize(u64)` | Size scaled by 1,000,000 (6 decimal places). `const fn` on `new()`, `raw()`, `is_zero()`. |
 | `AssetId` | Typed newtype wrapping a string identifier for a market asset. |
-| `Sequence` | Monotonically increasing event sequence number. |
+| `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
 | `PersistedRecord` | Enum dispatching to the six event datasets below. |
 
@@ -48,12 +48,19 @@ pb-types ◄── pb-feed    (wire deserialization)
 
 ## Design Notes
 
+- **Zero-alloc serde**: `FixedPrice` and `FixedSize` serialize via `itoa` +
+  stack buffers and deserialize via a custom `Visitor`, avoiding heap allocation
+  on the hot path. Dependency: `itoa = "1"`.
+- `#[inline]` on all hot-path accessors for `FixedPrice`, `FixedSize`, and
+  `Sequence`.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization
   on the ingest hot path. See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
 - `PersistedRecord` is the single enum that splits into all six datasets. Adding
   a new dataset means adding a variant here, plus corresponding schema and writer
   in pb-store and reader in pb-replay.
 - `proptest` suites verify fixed-point roundtrip, ordering, and serde consistency.
+- 149 tests covering boundary conditions, serde round-trips, proptest invariants,
+  and all persisted record types.
 
 ## Docs to Update After Changes
 

@@ -66,8 +66,8 @@ impl ParquetReader {
         }
     }
 
-    fn hour_paths(&self, dataset: &str, start_us: u64, end_us: u64) -> Vec<PathBuf> {
-        use chrono::{TimeZone, Timelike, Utc};
+    pub(crate) fn hour_paths(&self, dataset: &str, start_us: u64, end_us: u64) -> Vec<PathBuf> {
+        use chrono::{Datelike, TimeZone, Timelike, Utc};
 
         let start_dt = Utc
             .timestamp_opt(start_us as i64 / 1_000_000, 0)
@@ -86,13 +86,14 @@ impl ParquetReader {
         let end_naive = end_dt.naive_utc();
 
         while current <= end_naive {
-            paths.push(self.base_path.join(dataset).join(format!(
-                "{}/{:02}/{:02}/{:02}",
-                current.format("%Y"),
-                current.format("%m"),
-                current.format("%d"),
-                current.format("%H"),
-            )));
+            let hour_key = format!(
+                "{:04}/{:02}/{:02}/{:02}",
+                current.year(),
+                current.month(),
+                current.day(),
+                current.hour(),
+            );
+            paths.push(self.base_path.join(dataset).join(hour_key));
             current += chrono::Duration::hours(1);
         }
         paths
@@ -1110,33 +1111,42 @@ impl EventReader for ClickHouseReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
-        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ?";
-        let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ?";
-        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ?";
+        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
+        let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, trade_id";
+        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us";
 
-        let book_rows: Vec<BookEventRow> = self
-            .client
-            .query(book_query)
-            .bind(asset_id.as_str())
-            .bind(start_us)
-            .bind(end_us)
-            .fetch_all()
-            .await?;
-        let trade_rows: Vec<TradeEventRow> = self
-            .client
-            .query(trade_query)
-            .bind(asset_id.as_str())
-            .bind(start_us)
-            .bind(end_us)
-            .fetch_all()
-            .await?;
-        let ingest_rows: Vec<IngestEventRow> = self
-            .client
-            .query(ingest_query)
-            .bind(start_us)
-            .bind(end_us)
-            .fetch_all()
-            .await?;
+        let (book_rows, trade_rows, ingest_rows) = tokio::try_join!(
+            async {
+                self.client
+                    .query(book_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_all::<BookEventRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+            async {
+                self.client
+                    .query(trade_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_all::<TradeEventRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+            async {
+                self.client
+                    .query(ingest_query)
+                    .bind(start_us)
+                    .bind(end_us)
+                    .bind(asset_id.as_str())
+                    .fetch_all::<IngestEventRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+        )?;
 
         let mut book_events = book_rows
             .into_iter()
@@ -1203,10 +1213,6 @@ impl EventReader for ClickHouseReader {
 
         let mut ingest_events = ingest_rows
             .into_iter()
-            .filter(|row| {
-                row.asset_id.as_deref().is_none()
-                    || row.asset_id.as_deref() == Some(asset_id.as_str())
-            })
             .map(|row| {
                 Ok(IngestEvent {
                     asset_id: row.asset_id.map(AssetId::new),

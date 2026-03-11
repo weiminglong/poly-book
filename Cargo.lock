@@ -2255,15 +2255,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memmap2"
-version = "0.9.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "metrics"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2837,8 +2828,10 @@ dependencies = [
  "axum",
  "metrics",
  "metrics-exporter-prometheus",
+ "reqwest 0.13.2",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -2846,7 +2839,6 @@ dependencies = [
 name = "pb-replay"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arrow",
  "chrono",
  "clickhouse",
@@ -2855,10 +2847,12 @@ dependencies = [
  "parquet",
  "pb-book",
  "pb-metrics",
+ "pb-store",
  "pb-types",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2895,12 +2889,14 @@ dependencies = [
  "bytes",
  "chrono",
  "clickhouse",
+ "futures-util",
  "object_store",
  "parquet",
  "pb-metrics",
  "pb-types",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2912,6 +2908,7 @@ name = "pb-types"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "itoa",
  "proptest",
  "serde",
  "serde_json",
@@ -2924,7 +2921,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "crc32c",
- "memmap2",
  "pb-types",
  "proptest",
  "tempfile",

@@ -243,9 +243,137 @@ fn fastrand_jitter(max: u64) -> u64 {
     if max == 0 {
         return 0;
     }
-    let raw = std::time::SystemTime::now()
+    // Use a simple hash of the current nanosecond timestamp plus thread id
+    // for lightweight jitter. This avoids pulling in a full PRNG crate while
+    // providing better distribution than raw subsec_nanos alone.
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;
-    raw % max
+    // Multiplicative hash (Knuth's) to spread adjacent nanosecond values.
+    let hash = nanos.wrapping_mul(2654435761);
+    hash % max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a WsClient-like backoff calculator without TLS.
+    /// We replicate the backoff_ms logic directly since WsClient::new requires
+    /// TLS which isn't needed for unit-testing backoff math.
+    fn backoff_ms(config: &WsConfig, attempt: u32) -> u64 {
+        let exp = config
+            .reconnect_base_delay_ms
+            .saturating_mul(1u64 << attempt.min(15));
+        let jitter = fastrand_jitter(exp / 4);
+        exp.saturating_add(jitter)
+            .min(config.reconnect_max_delay_ms)
+    }
+
+    #[test]
+    fn backoff_attempt_zero_equals_base() {
+        let config = WsConfig {
+            reconnect_base_delay_ms: 100,
+            reconnect_max_delay_ms: 30_000,
+            ..WsConfig::default()
+        };
+        let result = backoff_ms(&config, 0);
+        // base=100, jitter up to 25 -> result in [100, 125)
+        assert!(result >= 100);
+        assert!(result < 125);
+    }
+
+    #[test]
+    fn backoff_grows_exponentially() {
+        let config = WsConfig {
+            reconnect_base_delay_ms: 100,
+            reconnect_max_delay_ms: 1_000_000,
+            ..WsConfig::default()
+        };
+
+        // Without jitter, attempt 0=100, 1=200, 2=400, 3=800.
+        // With jitter up to exp/4, we verify monotonic lower bounds.
+        let b0 = config.reconnect_base_delay_ms; // 100
+        let b1 = b0 * 2; // 200
+        let b2 = b0 * 4; // 400
+        let b3 = b0 * 8; // 800
+
+        let r0 = backoff_ms(&config, 0);
+        let r1 = backoff_ms(&config, 1);
+        let r2 = backoff_ms(&config, 2);
+        let r3 = backoff_ms(&config, 3);
+
+        assert!(r0 >= b0, "attempt 0: {r0} < {b0}");
+        assert!(r1 >= b1, "attempt 1: {r1} < {b1}");
+        assert!(r2 >= b2, "attempt 2: {r2} < {b2}");
+        assert!(r3 >= b3, "attempt 3: {r3} < {b3}");
+    }
+
+    #[test]
+    fn backoff_capped_at_max() {
+        let config = WsConfig {
+            reconnect_base_delay_ms: 100,
+            reconnect_max_delay_ms: 500,
+            ..WsConfig::default()
+        };
+
+        // At attempt 10, base * 2^10 = 102,400 >> max=500.
+        let result = backoff_ms(&config, 10);
+        assert_eq!(result, 500);
+    }
+
+    #[test]
+    fn backoff_high_attempt_does_not_overflow() {
+        let config = WsConfig {
+            reconnect_base_delay_ms: 100,
+            reconnect_max_delay_ms: 30_000,
+            ..WsConfig::default()
+        };
+
+        // Attempt 100 would overflow without the .min(15) guard.
+        let result = backoff_ms(&config, 100);
+        assert!(result <= 30_000);
+    }
+
+    #[test]
+    fn backoff_u32_max_attempt_does_not_panic() {
+        let config = WsConfig {
+            reconnect_base_delay_ms: 100,
+            reconnect_max_delay_ms: 30_000,
+            ..WsConfig::default()
+        };
+
+        let result = backoff_ms(&config, u32::MAX);
+        assert!(result <= 30_000);
+    }
+
+    #[test]
+    fn jitter_returns_zero_when_max_is_zero() {
+        assert_eq!(fastrand_jitter(0), 0);
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        // Run multiple times to exercise the hash path.
+        for _ in 0..100 {
+            let j = fastrand_jitter(1000);
+            assert!(j < 1000, "jitter {j} >= 1000");
+        }
+    }
+
+    #[test]
+    fn jitter_max_one_returns_zero() {
+        // hash % 1 == 0 always.
+        assert_eq!(fastrand_jitter(1), 0);
+    }
+
+    #[test]
+    fn ws_config_default_values() {
+        let config = WsConfig::default();
+        assert_eq!(config.reconnect_base_delay_ms, 100);
+        assert_eq!(config.reconnect_max_delay_ms, 30_000);
+        assert_eq!(config.ping_interval_secs, 10);
+        assert!(config.ws_url.starts_with("wss://"));
+    }
 }

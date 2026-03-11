@@ -17,3 +17,8 @@ axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = "0.5"
+reqwest = { workspace = true }

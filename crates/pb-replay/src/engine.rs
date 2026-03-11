@@ -154,7 +154,7 @@ fn reconstruct_book(
     window
         .ingest_events
         .sort_by_key(|event| event.provenance.recv_timestamp_us);
-    let mut continuity_events = window.ingest_events.clone();
+    let mut continuity_events = std::mem::take(&mut window.ingest_events);
     let mut book = L2Book::new(asset_id.clone());
     let mut used_checkpoint = false;
     let start_idx = if let Some(checkpoint) = checkpoint {

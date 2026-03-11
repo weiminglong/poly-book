@@ -30,7 +30,7 @@
   ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
   │ ParquetSink │      │ClickHouse   │      │  WalWriter   │
   │  (pb-store) │      │Sink         │      │  (pb-wal)    │
-  │  5-min Zstd │      │(pb-store)   │      │ mmap+CRC32C  │
+  │  5-min Zstd │      │(pb-store)   │      │ append+CRC32C│
   └──────┬──────┘      │ 1s batch    │      └──────┬───────┘
          │             └──────┬──────┘             │
          │                    │               WAL segments

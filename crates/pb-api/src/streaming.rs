@@ -213,3 +213,121 @@ async fn send_json(socket: &mut WebSocket, msg: &BookUpdateMessage) -> Result<()
         Err(_) => Err(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_update(asset_id: &str) -> BookUpdateMessage {
+        BookUpdateMessage {
+            asset_id: asset_id.to_string(),
+            slug: None,
+            sequence: 1,
+            last_update_us: 100,
+            bids: vec![],
+            asks: vec![],
+            mid_price: None,
+            spread: None,
+        }
+    }
+
+    #[test]
+    fn per_asset_broadcast_new_is_empty() {
+        let b = PerAssetBroadcast::new();
+        assert!(!b.has_subscribers());
+        assert!(b.active_assets().is_empty());
+    }
+
+    #[test]
+    fn per_asset_broadcast_default_same_as_new() {
+        let b = PerAssetBroadcast::default();
+        assert!(!b.has_subscribers());
+    }
+
+    #[test]
+    fn set_active_assets_creates_channels() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["a".to_string(), "b".to_string()]);
+        let active = b.active_assets();
+        assert!(active.contains(&"a".to_string()));
+        assert!(active.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn set_active_assets_removes_stale_channels() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["a".to_string(), "b".to_string()]);
+        b.set_active_assets(&["b".to_string()]);
+        let active = b.active_assets();
+        assert!(!active.contains(&"a".to_string()));
+        assert!(active.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn subscribe_returns_none_for_unknown_asset() {
+        let b = PerAssetBroadcast::new();
+        assert!(b.subscribe("unknown").is_none());
+    }
+
+    #[test]
+    fn subscribe_returns_receiver_for_known_asset() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string()]);
+        assert!(b.subscribe("tok1").is_some());
+    }
+
+    #[test]
+    fn has_subscribers_after_subscribe() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string()]);
+        assert!(!b.has_subscribers());
+        let _rx = b.subscribe("tok1").unwrap();
+        assert!(b.has_subscribers());
+    }
+
+    #[test]
+    fn send_delivers_to_subscriber() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string()]);
+        let mut rx = b.subscribe("tok1").unwrap();
+        b.send(test_update("tok1"));
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.asset_id, "tok1");
+    }
+
+    #[test]
+    fn send_silently_drops_for_unknown_asset() {
+        let b = PerAssetBroadcast::new();
+        // No panic, no error
+        b.send(test_update("unknown"));
+    }
+
+    #[test]
+    fn send_to_wrong_asset_does_not_deliver() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string(), "tok2".to_string()]);
+        let mut rx1 = b.subscribe("tok1").unwrap();
+        b.send(test_update("tok2"));
+        assert!(rx1.try_recv().is_err());
+    }
+
+    #[test]
+    fn dropping_subscriber_reduces_count() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string()]);
+        let rx = b.subscribe("tok1").unwrap();
+        assert!(b.has_subscribers());
+        drop(rx);
+        assert!(!b.has_subscribers());
+    }
+
+    #[test]
+    fn removing_asset_drops_channel_receivers() {
+        let b = PerAssetBroadcast::new();
+        b.set_active_assets(&["tok1".to_string()]);
+        let mut rx = b.subscribe("tok1").unwrap();
+        b.set_active_assets(&[]); // removes tok1
+                                  // Channel should now be closed
+        assert!(rx.try_recv().is_err());
+    }
+}

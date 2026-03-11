@@ -70,11 +70,12 @@ pub async fn run(
     let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, enable_clickhouse).await?;
 
     // Open WAL writer for durable event streaming.
+    // The writer is only accessed on this task's event loop so no Arc/Mutex needed.
     let wal_config = pipeline::wal_config_from_settings(&settings);
-    let wal_writer = match pb_wal::WalWriter::open(wal_config) {
+    let mut wal_writer = match pb_wal::WalWriter::open(wal_config) {
         Ok(w) => {
             tracing::info!("WAL writer opened");
-            Some(std::sync::Arc::new(std::sync::Mutex::new(w)))
+            Some(w)
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to open WAL writer, continuing without WAL");
@@ -90,26 +91,11 @@ pub async fn run(
     if let Some(ptx) = sinks.parquet_tx {
         let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
-        let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    biased;
-                    _ = fwd_token.cancelled() => break,
-                    event = frx.recv() => match event {
-                        Some(e) => e,
-                        None => break,
-                    },
-                };
-                tokio::select! {
-                    biased;
-                    result = ptx.send(event) => {
-                        if let Err(e) = result {
-                            tracing::warn!("parquet sink send failed: {e}");
-                            break;
-                        }
-                    }
-                    _ = fwd_token.cancelled() => break,
+            while let Some(event) = frx.recv().await {
+                if let Err(e) = ptx.send(event).await {
+                    tracing::warn!("parquet sink send failed: {e}");
+                    break;
                 }
             }
         }));
@@ -118,26 +104,11 @@ pub async fn run(
     if let Some(ctx) = sinks.clickhouse_tx {
         let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
-        let fwd_token = shutdown.child_token();
         fanout_handles.push(tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    biased;
-                    _ = fwd_token.cancelled() => break,
-                    event = frx.recv() => match event {
-                        Some(e) => e,
-                        None => break,
-                    },
-                };
-                tokio::select! {
-                    biased;
-                    result = ctx.send(event) => {
-                        if let Err(e) = result {
-                            tracing::warn!("clickhouse sink send failed: {e}");
-                            break;
-                        }
-                    }
-                    _ = fwd_token.cancelled() => break,
+            while let Some(event) = frx.recv().await {
+                if let Err(e) = ctx.send(event).await {
+                    tracing::warn!("clickhouse sink send failed: {e}");
+                    break;
                 }
             }
         }));
@@ -159,11 +130,10 @@ pub async fn run(
             },
         };
         // Write to WAL before fan-out to sinks.
-        if let Some(ref wal) = wal_writer {
+        if let Some(ref mut wal) = wal_writer {
             match pb_wal::codec::encode(&event) {
                 Ok(payload) => {
-                    let mut w = wal.lock().unwrap();
-                    if let Err(e) = w.append(&payload) {
+                    if let Err(e) = wal.append(&payload) {
                         tracing::warn!(error = %e, "WAL append failed");
                     }
                 }
@@ -172,35 +142,14 @@ pub async fn run(
                 }
             }
         }
-        match fanout_txs.as_slice() {
-            [] => {}
-            [a] => {
-                if a.send(event).await.is_err() {
-                    tracing::warn!("fan-out channel closed, stopping");
-                    break;
-                }
-            }
-            [a, b] => {
-                let ev_a = event.clone();
-                let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
-                if ra.is_err() || rb.is_err() {
-                    if let Err(e) = ra {
-                        tracing::warn!("fan-out channel 0 closed: {e}");
-                    }
-                    if let Err(e) = rb {
-                        tracing::warn!("fan-out channel 1 closed: {e}");
-                    }
-                    break;
-                }
-            }
-            _ => unreachable!("at most 2 sinks"),
+        if !pipeline::fanout_event(event, &fanout_txs).await {
+            break;
         }
     }
 
     // Flush WAL before shutdown.
-    if let Some(ref wal) = wal_writer {
-        let w = wal.lock().unwrap();
-        if let Err(e) = w.flush() {
+    if let Some(ref mut wal) = wal_writer {
+        if let Err(e) = wal.flush() {
             tracing::warn!(error = %e, "WAL flush failed during shutdown");
         }
     }

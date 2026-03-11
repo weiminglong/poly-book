@@ -41,10 +41,15 @@ Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel
 
 - Dispatcher uses `FxHashMap` for hot-path lookups on trusted venue data.
   See [ADR-0006](../../docs/adr/0006-fxhashmap-dispatcher.md).
-- WsClient reconnects with exponential backoff plus jitter to avoid thundering
-  herd on venue restarts.
+- Unified `parse_side()` function for bid/ask parsing (deduplicated from previous
+  per-site implementations).
+- WsClient reconnects with exponential backoff plus jitter (improved distribution
+  using Knuth's multiplicative hash constant) to avoid thundering herd on venue
+  restarts.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
+- 50 tests covering malformed JSON, `parse_side` coverage, dispatcher behavior,
+  lifecycle events, and run loop shutdown.
 
 ## Docs to Update After Changes
 

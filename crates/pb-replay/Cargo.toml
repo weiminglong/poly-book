@@ -25,6 +25,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-anyhow = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
+pb-store = { workspace = true }

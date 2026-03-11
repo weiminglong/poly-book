@@ -43,7 +43,7 @@ impl ParquetSink {
     }
 
     pub async fn run_with_token(mut self, token: CancellationToken) -> Result<(), StoreError> {
-        let mut buffer: Vec<PersistedRecord> = Vec::new();
+        let mut buffer: Vec<PersistedRecord> = Vec::with_capacity(4096);
         let mut interval = tokio::time::interval(self.flush_interval);
         interval.tick().await;
 

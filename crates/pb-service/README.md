@@ -79,6 +79,10 @@ pb-service trait method
 - If ClickHouse is unavailable at startup, the system falls back to Parquet.
 - `QueryGuard` enforces read-only SQL (rejects write keywords), injects `LIMIT` if missing, and applies a configurable timeout.
 - `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format for dynamic SQL execution.
+- Five shared helpers are extracted into `lib.rs` to eliminate ~140 lines of
+  duplicated business logic between Parquet and ClickHouse backends:
+  `map_replay_error`, `ingest_to_continuity`, `build_replay_result`,
+  `build_integrity_summary`, `build_execution_timeline`.
 
 ## Docs to Update After Changes
 
@@ -90,3 +94,9 @@ pb-service trait method
 | Error variant added | `pb-api` `ServiceError → ApiError` mapping |
 | Changes affect API contracts | `docs/api.md`, `docs/serve-api.md` |
 | New query guard rule or type | `pb-api` query handler, `docs/api.md` query routes |
+
+## Tests
+
+45 tests covering shared helper functions (error mapping, continuity gap detection,
+replay result construction, integrity summary building, execution timeline ordering),
+query guard edge cases, and backend-specific service logic.
