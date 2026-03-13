@@ -28,6 +28,8 @@ base_path = "./data/wal"
 segment_size_mb = 64
 max_segments = 16
 max_consumer_lag_bytes = 268435456  # 256 MB
+# How often separated `serve` durably commits its live WAL reader position.
+position_commit_interval_ms = 1000
 
 [api]
 listen_addr = "0.0.0.0:3000"

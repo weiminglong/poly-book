@@ -48,6 +48,7 @@ Same pattern for `AnyIntegrityService`, `AnyExecutionService`, and `AnyQueryServ
 | `ExecutionTimeline` | Execution events with total count. |
 | `ContinuityEvent` | Structured reconnect/gap/stale event from the data layer. |
 | `QueryGuard` | Guard rails for query execution (max rows, timeout). |
+| `guard_sql` | Shared query-guard entrypoint that validates read-only SQL and injects `LIMIT`. |
 | `QueryResult` | Query result with columns, rows, truncation flag, execution time. |
 | `QueryColumnInfo` | Column metadata (name and data type). |
 | `DatasetSchema` | Dataset schema with name, description, and columns. |
@@ -77,7 +78,12 @@ pb-service trait method
 - `ServiceError` maps cleanly to HTTP status codes at the `pb-api` boundary.
 - Backend selection is configured via `api.historical_backend` in config.
 - If ClickHouse is unavailable at startup, the system falls back to Parquet.
-- `QueryGuard` enforces read-only SQL (rejects write keywords), injects `LIMIT` if missing, and applies a configurable timeout.
+- `QueryGuard` enforces a single read-only SQL statement rooted at
+  `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`, strips comments and quoted
+  literals before keyword checks, injects `LIMIT` if missing, and applies a
+  configurable timeout.
+- `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
+  targets exercise the same sanitizer and normalization path the runtime uses.
 - `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format for dynamic SQL execution.
 - Five shared helpers are extracted into `lib.rs` to eliminate ~140 lines of
   duplicated business logic between Parquet and ClickHouse backends:
@@ -97,6 +103,6 @@ pb-service trait method
 
 ## Tests
 
-45 tests covering shared helper functions (error mapping, continuity gap detection,
+51 tests covering shared helper functions (error mapping, continuity gap detection,
 replay result construction, integrity summary building, execution timeline ordering),
 query guard edge cases, and backend-specific service logic.

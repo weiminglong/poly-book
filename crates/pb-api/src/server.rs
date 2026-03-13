@@ -1153,6 +1153,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_orderbook_resolves_slug() {
+        use futures_util::StreamExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        let broadcast = crate::streaming::PerAssetBroadcast::new();
+        broadcast.set_active_assets(&["tok1".to_string()]);
+        state.broadcast = Some(broadcast.clone());
+        state
+            .slug_registry
+            .register("my-market-yes", &AssetId::new("tok1"));
+
+        state.live.set_active_assets(vec!["tok1".to_string()]).await;
+        state.live.configure_broadcast(broadcast, 20).await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Bid,
+                price: FixedPrice::from_f64(0.50).unwrap(),
+                size: FixedSize::from_f64(10.0).unwrap(),
+                provenance: test_provenance(100, 0),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Book(BookEvent {
+                asset_id: AssetId::new("tok1"),
+                kind: BookEventKind::Snapshot,
+                side: Side::Ask,
+                price: FixedPrice::from_f64(0.60).unwrap(),
+                size: FixedSize::from_f64(20.0).unwrap(),
+                provenance: test_provenance(100, 1),
+            }))
+            .await;
+        state
+            .live
+            .apply_record(PersistedRecord::Ingest(pb_types::IngestEvent {
+                asset_id: None,
+                kind: pb_types::IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 200,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: None,
+                    sequence: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let server_handle = tokio::spawn(async move {
+            crate::serve(listener, state, shutdown_clone).await.unwrap();
+        });
+
+        let url = format!(
+            "ws://127.0.0.1:{}/api/v1/streams/orderbook?asset_id=my-market-yes",
+            addr.port()
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timed out waiting for ws message")
+            .expect("stream ended")
+            .expect("ws error");
+
+        let text = msg.into_text().unwrap();
+        let update: crate::dto::BookUpdateMessage = serde_json::from_str(&text).unwrap();
+        assert_eq!(update.asset_id, "tok1");
+        assert_eq!(update.slug.as_deref(), Some("my-market-yes"));
+
+        let _ = ws.close(None).await;
+        shutdown.cancel();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
     async fn orderbook_snapshot_resolves_slug() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;

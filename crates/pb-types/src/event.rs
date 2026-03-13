@@ -131,6 +131,14 @@ impl std::fmt::Display for IngestEventKind {
     }
 }
 
+impl IngestEventKind {
+    /// Returns true when the event represents a hard continuity reset between
+    /// feed sessions. Replay should not stitch state across this boundary.
+    pub fn is_continuity_reset(self) -> bool {
+        matches!(self, Self::SourceReset)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestEvent {
     pub asset_id: Option<AssetId>,

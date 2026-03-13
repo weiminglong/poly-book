@@ -46,6 +46,10 @@ Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel
 - WsClient reconnects with exponential backoff plus jitter (improved distribution
   using Knuth's multiplicative hash constant) to avoid thundering herd on venue
   restarts.
+- On reconnect success, the dispatcher clears per-asset sequence and stale
+  snapshot tracking before emitting `SourceReset`, so downstream replay does not
+  stitch state across feed sessions or reject the first fresh post-reconnect
+  snapshot as stale.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
 - 50 tests covering malformed JSON, `parse_side` coverage, dispatcher behavior,

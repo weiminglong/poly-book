@@ -15,7 +15,7 @@ pub use clickhouse::{
 pub use error::ServiceError;
 pub use parquet::{ParquetExecutionService, ParquetIntegrityService, ParquetReplayService};
 pub use query::{
-    AnyQueryService, ClickHouseQueryService, DatasetSchema, QueryColumnInfo, QueryGuard,
+    guard_sql, AnyQueryService, ClickHouseQueryService, DatasetSchema, QueryColumnInfo, QueryGuard,
     QueryResult, QueryService,
 };
 

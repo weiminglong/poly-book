@@ -43,7 +43,8 @@ Checkpoint hydration -> WAL tail -> LiveReadModel -> pb-api routes
 In separated mode, the `serve` process does not run venue connectivity. Instead
 it hydrates from the latest `BookCheckpoint` (Parquet), replays WAL records from
 the checkpoint offset, then live-tails the WAL written by a separate `ingest`
-process.
+process. The live tail resumes from the exact post-hydration WAL position so
+startup does not re-apply records that were already consumed during hydration.
 
 The browser or client talks only to the API layer. It does not reconstruct the
 book from raw feed messages directly.
@@ -89,15 +90,25 @@ read model is fed directly from the dispatcher channel.
   Does not serve HTTP.
 - **`serve`**: Reads the latest `BookCheckpoint` from Parquet, replays WAL from
   the checkpoint's offset, then live-tails the WAL for new records. Serves HTTP/WS.
+  The live WAL consumer commits its position periodically during steady-state
+  tailing.
 
 The `serve` process can be killed and restarted without data loss. On restart it
 re-hydrates from the latest checkpoint and catches up from the WAL.
+WebSocket book subscribers continue receiving incremental updates in separated
+mode because projector-side broadcast fanout is configured for WAL-tail
+applies, not just feed-driven `serve-api` applies.
 
 ## Why It Does Not Persist Live Data
 
 The API processes (both `serve-api` and `serve`) derive a live read model in
 memory but do not write new market data to storage. Ingestion persistence is the
 responsibility of the `ingest` or `auto-ingest` processes.
+
+The read model's projector keeps a cached published view for REST reads and
+only rebuilds per-asset snapshot materializations for assets actually touched by
+an incoming record. This avoids full book-vector rebuilds across all active
+assets on every delta while keeping the HTTP and WebSocket contracts unchanged.
 
 ## Live Modes
 

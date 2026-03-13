@@ -24,7 +24,7 @@ Six event datasets, each with its own Parquet schema and ClickHouse table:
 |---------|---------|
 | `BookEvent` | L2 orderbook deltas and snapshots from the venue WebSocket. |
 | `TradeEvent` | Matched trades with a `TradeFidelity` label. |
-| `IngestEvent` | Feed lifecycle events: connect, disconnect, reconnect. |
+| `IngestEvent` | Feed lifecycle events plus continuity boundaries such as `source_reset`. |
 | `BookCheckpoint` | Full book state captured via periodic REST snapshots. |
 | `ReplayValidation` | REST-vs-replay comparison results from the replay engine. |
 | `ExecutionEvent` | Order lifecycle state changes (fill, cancel, etc.). |

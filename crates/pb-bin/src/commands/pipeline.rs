@@ -157,11 +157,16 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
     let max_consumer_lag_bytes = settings
         .get_int("wal.max_consumer_lag_bytes")
         .unwrap_or(256 * 1024 * 1024) as u64;
+    let position_commit_interval_ms = settings
+        .get_int("wal.position_commit_interval_ms")
+        .unwrap_or(1_000)
+        .max(1) as u64;
     pb_wal::WalConfig {
         base_path: std::path::PathBuf::from(base_path),
         segment_size: segment_size_mb * 1024 * 1024,
         max_segments,
         max_consumer_lag_bytes,
+        position_commit_interval_ms,
     }
 }
 
@@ -393,6 +398,7 @@ mod tests {
         assert_eq!(cfg.segment_size, 64 * 1024 * 1024);
         assert_eq!(cfg.max_segments, 16);
         assert_eq!(cfg.max_consumer_lag_bytes, 256 * 1024 * 1024);
+        assert_eq!(cfg.position_commit_interval_ms, 1_000);
     }
 
     #[test]
@@ -404,12 +410,15 @@ mod tests {
             .unwrap()
             .set_override("wal.max_segments", 8)
             .unwrap()
+            .set_override("wal.position_commit_interval_ms", 250)
+            .unwrap()
             .build()
             .unwrap();
         let cfg = wal_config_from_settings(&settings);
         assert_eq!(cfg.base_path, std::path::PathBuf::from("/tmp/wal"));
         assert_eq!(cfg.segment_size, 32 * 1024 * 1024);
         assert_eq!(cfg.max_segments, 8);
+        assert_eq!(cfg.position_commit_interval_ms, 250);
     }
 
     // --- ws_config_from_settings ---

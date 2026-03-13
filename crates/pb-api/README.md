@@ -55,10 +55,18 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   See [docs/serve-api.md](../../docs/serve-api.md) for runtime constraints.
 - `LiveReadModel` receives `PersistedRecord` events and maintains in-memory
   book state without persisting to disk.
+- The projector keeps a cached published projection and only rebuilds
+  `AssetReadView` snapshots for assets touched by a record, instead of
+  re-materializing every tracked book on each update.
 - WebSocket streaming uses a broadcast channel with capacity 256. Slow consumers
   that fall behind receive a fresh full snapshot to re-sync.
+- Both `serve-api` and separated `serve` mode route projector updates through
+  the same broadcast fanout, so WAL-tail updates are streamed to WS clients as
+  incremental book messages instead of snapshot-only sessions.
 - Historical reads use configurable backend (Parquet or ClickHouse) via `pb-service` enum dispatch.
 - Query workbench (`/query/datasets`, `/query/sql`) is ClickHouse-only and optional (`query_service: Option<AnyQueryService>`).
+- WebSocket `asset_id` accepts either the canonical token ID or a registered
+  slug, matching the REST snapshot route.
 
 ## Docs to Update After Changes
 
@@ -74,6 +82,6 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 
 ## Tests
 
-65 tests covering health states, error format consistency, depth and time parameter
+68 tests covering health states, error format consistency, depth and time parameter
 validation, execution limits, `ServiceError` to `ApiError` mapping,
 `PerAssetBroadcast` unit tests, and `LiveReadModel` tests.

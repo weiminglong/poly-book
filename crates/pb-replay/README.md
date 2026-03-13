@@ -40,8 +40,11 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 ## Design Notes
 
 - Reconstruction starts from the nearest checkpoint before the target timestamp,
-  then applies deltas forward. No checkpoint means replaying from the beginning
-  of the Parquet partition.
+  then only reads market data from that checkpoint timestamp forward instead of
+  replaying the full lookback window.
+- `SourceReset` is treated as a hard continuity boundary during replay. If the
+  latest reset precedes the target, replay ignores older checkpoints/snapshots
+  and requires a fresh post-reset snapshot before applying later deltas.
 - The `EventReader` trait has methods for reading each dataset type:
   `read_market_data`, `read_checkpoints`, `read_latest_checkpoint`,
   `read_validations`, `read_execution_events`.

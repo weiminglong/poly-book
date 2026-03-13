@@ -114,6 +114,12 @@ Returns:
 - asset ID
 - selected replay mode
 - whether replay used a checkpoint
+- replay starts from the latest checkpoint at or before `at_us` when available,
+  and only reads forward from that checkpoint horizon instead of the full
+  default lookback window
+- `source_reset` continuity events are treated as hard replay boundaries; if a
+  reset occurs before `at_us`, reconstruction requires a fresh post-reset
+  snapshot instead of stitching pre-reset state across sessions
 - reconstructed top-of-book and top-N levels
 - continuity events returned with the reconstruction
 
@@ -203,10 +209,14 @@ Behavior:
 - upgrades to WebSocket
 - sends an initial full snapshot message on connect
 - sends incremental book update messages as JSON text frames
-- filters updates to the requested asset
+- accepts either a raw token ID or a registered slug in `asset_id`
+- filters updates to the requested asset after slug resolution
 - handles ping/pong and graceful close
 - slow consumers that fall behind the broadcast buffer receive a fresh full
   snapshot to re-sync
+- in separated `serve` mode, incremental frames are sourced from WAL-tail
+  projector updates, so clients continue receiving live deltas after the
+  initial snapshot
 
 ### `GET /api/v1/assets/resolve`
 
@@ -256,8 +266,11 @@ Request body (JSON):
 
 Guard rails:
 
+- Only a single read-only statement is allowed
+- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`
 - Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
-  `TRUNCATE`) are rejected with 400
+  `TRUNCATE`, `RENAME`, `GRANT`, `REVOKE`, `ATTACH`, `DETACH`) are rejected
+  with 400 after comments and quoted literals are stripped from the guard scan
 - `LIMIT` is injected if not present
 - Queries time out after `api.query_timeout_secs` (default 30s)
 

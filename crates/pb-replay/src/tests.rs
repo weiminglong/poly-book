@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
@@ -94,6 +94,7 @@ struct MockReader {
     latest_checkpoint: Option<BookCheckpoint>,
     validations: Vec<ReplayValidation>,
     execution_events: Vec<ExecutionEvent>,
+    market_data_calls: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
 impl MockReader {
@@ -104,6 +105,7 @@ impl MockReader {
             latest_checkpoint: None,
             validations: vec![],
             execution_events: vec![],
+            market_data_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -121,15 +123,24 @@ impl MockReader {
         self.checkpoints = cps;
         self
     }
+
+    fn with_call_log(mut self, calls: Arc<Mutex<Vec<(u64, u64)>>>) -> Self {
+        self.market_data_calls = calls;
+        self
+    }
 }
 
 impl EventReader for MockReader {
     async fn read_market_data(
         &self,
         _asset_id: &AssetId,
-        _start_us: u64,
-        _end_us: u64,
+        start_us: u64,
+        end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
+        self.market_data_calls
+            .lock()
+            .unwrap()
+            .push((start_us, end_us));
         Ok(self.market_data.clone())
     }
 
@@ -166,6 +177,24 @@ impl EventReader for MockReader {
         _end_us: u64,
     ) -> Result<Vec<ExecutionEvent>, ReplayError> {
         Ok(self.execution_events.clone())
+    }
+}
+
+fn source_reset_event(recv_ts: u64) -> pb_types::IngestEvent {
+    pb_types::IngestEvent {
+        asset_id: None,
+        kind: pb_types::event::IngestEventKind::SourceReset,
+        provenance: EventProvenance {
+            recv_timestamp_us: recv_ts,
+            exchange_timestamp_us: 0,
+            source: DataSource::WebSocket,
+            source_event_id: None,
+            source_session_id: Some("sess-reset".into()),
+            sequence: None,
+        },
+        expected_sequence: None,
+        observed_sequence: None,
+        details: Some("reset".into()),
     }
 }
 
@@ -240,6 +269,31 @@ async fn replay_engine_reconstruct_from_checkpoint() {
 }
 
 #[tokio::test]
+async fn replay_engine_uses_checkpoint_timestamp_as_market_data_floor() {
+    let checkpoint_ts = BASE_TS;
+    let target_ts = BASE_TS + 100_000;
+    let checkpoint = make_checkpoint(
+        checkpoint_ts,
+        vec![(5000, 1_000_000)],
+        vec![(5100, 2_000_000)],
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let reader = MockReader::new()
+        .with_call_log(calls.clone())
+        .with_market_data(MarketDataWindow::default())
+        .with_latest_checkpoint(Some(checkpoint));
+    let engine = ReplayEngine::new(reader);
+
+    let _ = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await;
+
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], (checkpoint_ts, target_ts));
+}
+
+#[tokio::test]
 async fn replay_engine_no_snapshot_returns_error() {
     let market_data = MarketDataWindow {
         book_events: vec![
@@ -262,6 +316,63 @@ async fn replay_engine_no_snapshot_returns_error() {
         Err(ReplayError::NoSnapshotFound { .. }) => {}
         other => panic!("expected NoSnapshotFound, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn replay_engine_does_not_stitch_across_source_reset_without_new_snapshot() {
+    let snapshot_ts = BASE_TS;
+    let reset_ts = BASE_TS + 50_000;
+    let target_ts = BASE_TS + 100_000;
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(snapshot_ts, Side::Bid, 5000, 1_000_000, 1),
+            make_snapshot_event(snapshot_ts, Side::Ask, 5100, 2_000_000, 1),
+            make_delta_event(target_ts, Side::Bid, 4900, 500_000, 2),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![source_reset_event(reset_ts)],
+    };
+
+    let reader = MockReader::new().with_market_data(market_data);
+    let engine = ReplayEngine::new(reader);
+
+    let result = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await;
+
+    assert!(matches!(result, Err(ReplayError::NoSnapshotFound { .. })));
+}
+
+#[tokio::test]
+async fn replay_engine_uses_post_reset_snapshot_when_available() {
+    let pre_reset_ts = BASE_TS;
+    let reset_ts = BASE_TS + 50_000;
+    let post_reset_snapshot_ts = BASE_TS + 60_000;
+    let target_ts = BASE_TS + 100_000;
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(pre_reset_ts, Side::Bid, 5000, 1_000_000, 1),
+            make_snapshot_event(pre_reset_ts, Side::Ask, 5100, 2_000_000, 1),
+            make_snapshot_event(post_reset_snapshot_ts, Side::Bid, 4900, 700_000, 1),
+            make_snapshot_event(post_reset_snapshot_ts, Side::Ask, 5200, 900_000, 1),
+            make_delta_event(target_ts, Side::Bid, 4800, 300_000, 2),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![source_reset_event(reset_ts)],
+    };
+
+    let reader = MockReader::new().with_market_data(market_data);
+    let engine = ReplayEngine::new(reader);
+
+    let result = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await
+        .unwrap();
+
+    assert_eq!(result.book.bid_depth(), 2);
+    assert_eq!(result.book.ask_depth(), 1);
+    let (best_bid_price, _) = result.book.best_bid().unwrap();
+    assert_eq!(best_bid_price, FixedPrice::new(4900).unwrap());
 }
 
 #[tokio::test]
