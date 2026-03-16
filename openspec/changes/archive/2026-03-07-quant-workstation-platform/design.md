@@ -107,6 +107,10 @@ In the target clean-slate topology, the live read model should be hydrated by
 durable checkpoints and ordered update streams rather than depending on a
 browser-serving process to own exchange sockets directly.
 
+The serving-side published projection should also be incremental: book updates
+should only re-materialize the affected asset views rather than rebuilding
+every active asset snapshot on each record.
+
 ### Historical and analytical reads
 
 Historical replay remains grounded in the existing replay readers and datasets.

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use config::Config;
@@ -52,6 +53,8 @@ pub async fn run(
     let broadcast = pb_api::PerAssetBroadcast::new();
     broadcast.set_active_assets(&token_ids);
     live.set_active_assets(token_ids.clone()).await;
+    live.configure_broadcast(broadcast.clone(), default_depth)
+        .await;
 
     // Hydrate from checkpoints + WAL.
     let reader = pb_replay::ParquetReader::new(&parquet_base_path);
@@ -80,6 +83,7 @@ pub async fn run(
         live.clone(),
         broadcast.clone(),
         default_depth,
+        hydration_result.wal_end_position,
         shutdown.child_token(),
         wal_lag_bytes.clone(),
         needs_resync.clone(),
@@ -151,13 +155,19 @@ fn spawn_wal_tailer(
     live: pb_api::LiveReadModel,
     _broadcast: pb_api::PerAssetBroadcast,
     _default_depth: usize,
+    start_position: Option<pb_wal::WalPosition>,
     shutdown: CancellationToken,
     lag_bytes_atomic: Arc<AtomicU64>,
     needs_resync_atomic: Arc<AtomicBool>,
     max_consumer_lag_bytes: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut reader = match pb_wal::WalReader::open(config, "serve-live") {
+        let position_commit_interval_ms = config.position_commit_interval_ms;
+        let reader_result = match start_position {
+            Some(position) => pb_wal::WalReader::open_at(config, "serve-live", position),
+            None => pb_wal::WalReader::open(config, "serve-live"),
+        };
+        let mut reader = match reader_result {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to open WAL reader for live tailing");
@@ -165,7 +175,10 @@ fn spawn_wal_tailer(
             }
         };
 
-        let poll_interval = std::time::Duration::from_millis(50);
+        let poll_interval = Duration::from_millis(50);
+        let commit_interval = Duration::from_millis(position_commit_interval_ms);
+        let mut last_commit = Instant::now();
+        let mut dirty_position = false;
 
         loop {
             if shutdown.is_cancelled() {
@@ -195,12 +208,16 @@ fn spawn_wal_tailer(
                 Ok(Some(payload)) => match pb_wal::codec::decode(&payload) {
                     Ok(record) => {
                         live.apply_record(record).await;
+                        dirty_position = true;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to decode WAL record");
                     }
                 },
                 Ok(None) => {
+                    if dirty_position && last_commit.elapsed() >= commit_interval {
+                        commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+                    }
                     // No new records — poll again after a short delay.
                     tokio::select! {
                         _ = tokio::time::sleep(poll_interval) => {}
@@ -209,6 +226,9 @@ fn spawn_wal_tailer(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "WAL read error during live tailing");
+                    if dirty_position && last_commit.elapsed() >= commit_interval {
+                        commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+                    }
                     tokio::select! {
                         _ = tokio::time::sleep(poll_interval) => {}
                         _ = shutdown.cancelled() => break,
@@ -217,8 +237,131 @@ fn spawn_wal_tailer(
             }
         }
 
+        if dirty_position {
+            commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+        }
         if let Err(e) = reader.commit_position() {
             tracing::warn!(error = %e, "failed to commit WAL reader position on shutdown");
         }
     })
+}
+
+fn commit_reader_position(
+    reader: &pb_wal::WalReader,
+    dirty_position: &mut bool,
+    last_commit: &mut Instant,
+) {
+    match reader.commit_position() {
+        Ok(()) => {
+            *dirty_position = false;
+            *last_commit = Instant::now();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to commit WAL reader position");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::timeout;
+
+    use super::*;
+    use pb_types::event::{
+        BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side,
+    };
+    use pb_types::{AssetId, FixedPrice, FixedSize, Sequence};
+
+    fn snapshot_record(
+        asset_id: &str,
+        side: Side,
+        price: u32,
+        size: f64,
+        seq: u64,
+    ) -> PersistedRecord {
+        PersistedRecord::Book(BookEvent {
+            asset_id: AssetId::new(asset_id),
+            kind: BookEventKind::Snapshot,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::from_f64(size).unwrap(),
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_000_000,
+                exchange_timestamp_us: 1_700_000_000_000_000,
+                source: DataSource::WebSocket,
+                source_event_id: Some("snap-1".to_string()),
+                source_session_id: Some("ws-session-1".to_string()),
+                sequence: Some(Sequence::new(seq)),
+            },
+        })
+    }
+
+    fn reconnect_success_record() -> PersistedRecord {
+        PersistedRecord::Ingest(pb_types::IngestEvent {
+            asset_id: None,
+            kind: pb_types::IngestEventKind::ReconnectSuccess,
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_100_000,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: Some("ws-session-1".to_string()),
+                sequence: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn wal_tailer_broadcasts_updates_in_serve_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        for record in [
+            snapshot_record("tok1", Side::Bid, 5000, 10.0, 0),
+            snapshot_record("tok1", Side::Ask, 6000, 20.0, 1),
+            reconnect_success_record(),
+        ] {
+            writer
+                .append(&pb_wal::codec::encode(&record).unwrap())
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let live = pb_api::LiveReadModel::new(pb_api::FeedMode::FixedTokens);
+        let broadcast = pb_api::PerAssetBroadcast::new();
+        broadcast.set_active_assets(&["tok1".to_string()]);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+        live.configure_broadcast(broadcast.clone(), 20).await;
+        let mut rx = broadcast.subscribe("tok1").unwrap();
+
+        let shutdown = CancellationToken::new();
+        let handle = spawn_wal_tailer(
+            config,
+            live,
+            broadcast,
+            20,
+            None,
+            shutdown.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            256 * 1024 * 1024,
+        );
+
+        let update = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for broadcast")
+            .expect("broadcast closed");
+        assert_eq!(update.asset_id, "tok1");
+        assert!(!update.bids.is_empty());
+        assert!(!update.asks.is_empty());
+
+        shutdown.cancel();
+        let _ = handle.await;
+    }
 }

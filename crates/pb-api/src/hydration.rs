@@ -26,6 +26,8 @@ pub struct HydrationResult {
     pub wal_records_replayed: usize,
     /// The WAL offset we resumed from (if any).
     pub wal_resume_offset: Option<u64>,
+    /// The exact WAL position after hydration replay finishes.
+    pub wal_end_position: Option<pb_wal::WalPosition>,
 }
 
 /// Hydrate the read model from the latest checkpoint per asset, then replay
@@ -45,6 +47,7 @@ pub async fn hydrate<R: pb_replay::EventReader>(
         checkpoints_loaded: 0,
         wal_records_replayed: 0,
         wal_resume_offset: None,
+        wal_end_position: None,
     };
 
     // Phase 1: Load latest checkpoint per asset.
@@ -91,8 +94,11 @@ pub async fn hydrate<R: pb_replay::EventReader>(
     // Phase 2: Replay WAL tail from the minimum checkpoint offset.
     if let Some(wal_dir) = wal_path {
         if wal_dir.exists() {
-            result.wal_records_replayed = replay_wal_tail(model, wal_dir, min_wal_offset).await;
+            let (wal_records_replayed, wal_end_position) =
+                replay_wal_tail(model, wal_dir, min_wal_offset).await;
+            result.wal_records_replayed = wal_records_replayed;
             result.wal_resume_offset = min_wal_offset;
+            result.wal_end_position = wal_end_position;
         } else {
             info!(path = %wal_dir.display(), "WAL directory not found, skipping WAL replay");
         }
@@ -118,7 +124,7 @@ async fn replay_wal_tail(
     model: &LiveReadModel,
     wal_dir: &Path,
     from_global_offset: Option<u64>,
-) -> usize {
+) -> (usize, Option<pb_wal::WalPosition>) {
     let config = pb_wal::WalConfig {
         base_path: wal_dir.to_path_buf(),
         ..Default::default()
@@ -128,7 +134,7 @@ async fn replay_wal_tail(
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "failed to open WAL reader for hydration");
-            return 0;
+            return (0, None);
         }
     };
 
@@ -178,7 +184,7 @@ async fn replay_wal_tail(
         );
     }
 
-    records_replayed
+    (records_replayed, Some(reader.current_position()))
 }
 
 fn now_us() -> u64 {
@@ -186,4 +192,102 @@ fn now_us() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb_types::event::{
+        BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side,
+    };
+    use pb_types::{FixedPrice, FixedSize, Sequence};
+
+    fn snapshot_record(side: Side, price: u32, size: f64, seq: u64) -> PersistedRecord {
+        PersistedRecord::Book(BookEvent {
+            asset_id: AssetId::new("tok1"),
+            kind: BookEventKind::Snapshot,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::from_f64(size).unwrap(),
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_000_000,
+                exchange_timestamp_us: 1_700_000_000_000_000,
+                source: DataSource::WebSocket,
+                source_event_id: Some("snap-1".to_string()),
+                source_session_id: Some("ws-session-1".to_string()),
+                sequence: Some(Sequence::new(seq)),
+            },
+        })
+    }
+
+    fn delta_record() -> PersistedRecord {
+        PersistedRecord::Book(BookEvent {
+            asset_id: AssetId::new("tok1"),
+            kind: BookEventKind::Delta,
+            side: Side::Bid,
+            price: FixedPrice::new(4900).unwrap(),
+            size: FixedSize::from_f64(5.0).unwrap(),
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_100_000,
+                exchange_timestamp_us: 1_700_000_000_100_000,
+                source: DataSource::WebSocket,
+                source_event_id: Some("delta-1".to_string()),
+                source_session_id: Some("ws-session-1".to_string()),
+                sequence: Some(Sequence::new(2)),
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn hydration_returns_end_position_for_live_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        for record in [
+            snapshot_record(Side::Bid, 5000, 10.0, 0),
+            snapshot_record(Side::Ask, 6000, 20.0, 1),
+        ] {
+            writer
+                .append(&pb_wal::codec::encode(&record).unwrap())
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let result = hydrate::<pb_replay::ParquetReader>(
+            &live,
+            None,
+            Some(dir.path()),
+            &["tok1".to_string()],
+        )
+        .await;
+
+        assert_eq!(result.wal_records_replayed, 2);
+        let position = result
+            .wal_end_position
+            .expect("hydration should return an end position");
+
+        let mut reader =
+            pb_wal::WalReader::open_at(config.clone(), "handoff-test", position).unwrap();
+        assert!(reader.next().unwrap().is_none());
+
+        let delta = delta_record();
+        writer
+            .append(&pb_wal::codec::encode(&delta).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let payload = reader
+            .next()
+            .unwrap()
+            .expect("expected only the new post-hydration record");
+        let decoded = pb_wal::codec::decode(&payload).unwrap();
+        assert_eq!(decoded, delta);
+        assert!(reader.next().unwrap().is_none());
+    }
 }

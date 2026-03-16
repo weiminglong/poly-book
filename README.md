@@ -214,6 +214,7 @@ Fuzz targets under `fuzz/` cover deserialization and book mutation:
 cargo +nightly fuzz run fuzz_ws_deser       # wire protocol parsing
 cargo +nightly fuzz run fuzz_fixed_price     # FixedPrice/FixedSize parsing
 cargo +nightly fuzz run fuzz_book_delta      # book delta application invariants
+cargo +nightly fuzz run fuzz_query_guard     # SQL query guard sanitizer + LIMIT normalization
 ```
 
 ### Latency Design

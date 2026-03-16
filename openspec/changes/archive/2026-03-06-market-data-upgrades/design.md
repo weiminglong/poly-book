@@ -46,7 +46,10 @@ source metadata needed to explain event origin and ordering.
 
 Readers must surface continuity metadata alongside event streams. A replay
 consumer may still choose best-effort reconstruction, but gaps can no longer be
-only warning logs.
+only warning logs. `SourceReset` boundaries emitted on reconnect must be treated
+as hard replay cutoffs: pre-reset checkpoints and snapshots cannot be stitched
+into the new session unless a fresh post-reset snapshot re-establishes book
+truth.
 
 ## Phase 2: Backtest-Credible Replay
 

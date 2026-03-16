@@ -43,11 +43,14 @@ impl<R: EventReader> ReplayEngine<R> {
         target_timestamp_us: u64,
         mode: ReplayMode,
     ) -> Result<ReplayResult, ReplayError> {
-        let start_us = target_timestamp_us.saturating_sub(self.lookback_us);
         let checkpoint = self
             .reader
             .read_latest_checkpoint(asset_id, target_timestamp_us)
             .await?;
+        let start_us = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_timestamp_us)
+            .unwrap_or_else(|| target_timestamp_us.saturating_sub(self.lookback_us));
         let window = self
             .reader
             .read_market_data(asset_id, start_us, target_timestamp_us)
@@ -154,9 +157,15 @@ fn reconstruct_book(
     window
         .ingest_events
         .sort_by_key(|event| event.provenance.recv_timestamp_us);
+    let reset_boundary_us = latest_reset_boundary_us(&window.ingest_events, target_timestamp_us);
     let mut continuity_events = std::mem::take(&mut window.ingest_events);
     let mut book = L2Book::new(asset_id.clone());
     let mut used_checkpoint = false;
+    let checkpoint = checkpoint.filter(|checkpoint| {
+        reset_boundary_us
+            .map(|reset_ts| checkpoint.provenance.recv_timestamp_us >= reset_ts)
+            .unwrap_or(true)
+    });
     let start_idx = if let Some(checkpoint) = checkpoint {
         debug!(
             asset_id = %asset_id,
@@ -178,6 +187,9 @@ fn reconstruct_book(
             .rposition(|event| {
                 event.kind == BookEventKind::Snapshot
                     && event_ordering_ts(event, mode) <= target_timestamp_us
+                    && reset_boundary_us
+                        .map(|reset_ts| event.provenance.recv_timestamp_us >= reset_ts)
+                        .unwrap_or(true)
             })
             .ok_or_else(|| ReplayError::NoSnapshotFound {
                 asset_id: asset_id.to_string(),
@@ -259,6 +271,17 @@ fn reconstruct_book(
     }
 
     Ok((book, continuity_events, used_checkpoint))
+}
+
+fn latest_reset_boundary_us(events: &[IngestEvent], target_timestamp_us: u64) -> Option<u64> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind.is_continuity_reset()
+                && event.provenance.recv_timestamp_us <= target_timestamp_us
+        })
+        .map(|event| event.provenance.recv_timestamp_us)
+        .max()
 }
 
 fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {

@@ -36,6 +36,11 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   library crates use `thiserror`.
 - Graceful shutdown via `CancellationToken` propagated to all subsystems.
   Both SIGINT and SIGTERM are handled for container/production environments.
+- In separated `serve` mode, startup hydrates from checkpoints + WAL, then
+  resumes live WAL tailing from the exact post-hydration position rather than
+  re-reading the entire log. The live consumer also commits its read position
+  periodically so restarts do not roll back far under normal operation. That
+  commit cadence is tunable via `wal.position_commit_interval_ms`.
 - WAL writer is owned directly on the single-threaded event loop (no
   `Arc<Mutex<_>>` overhead).
 - `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic

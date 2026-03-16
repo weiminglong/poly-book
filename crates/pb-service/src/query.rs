@@ -51,14 +51,148 @@ const WRITE_KEYWORDS: &[&str] = &[
     "REVOKE", "ATTACH", "DETACH",
 ];
 
+const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"];
+
+fn sanitize_sql(sql: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Normal,
+        SingleQuote,
+        DoubleQuote,
+        Backtick,
+        LineComment,
+        BlockComment,
+    }
+
+    let mut sanitized = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut state = State::Normal;
+
+    while let Some(ch) = chars.next() {
+        match state {
+            State::Normal => match ch {
+                '\'' => {
+                    sanitized.push(' ');
+                    state = State::SingleQuote;
+                }
+                '"' => {
+                    sanitized.push(' ');
+                    state = State::DoubleQuote;
+                }
+                '`' => {
+                    sanitized.push(' ');
+                    state = State::Backtick;
+                }
+                '-' if chars.peek() == Some(&'-') => {
+                    sanitized.push(' ');
+                    sanitized.push(' ');
+                    chars.next();
+                    state = State::LineComment;
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    sanitized.push(' ');
+                    sanitized.push(' ');
+                    chars.next();
+                    state = State::BlockComment;
+                }
+                _ => sanitized.push(ch),
+            },
+            State::SingleQuote => {
+                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                if ch == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        sanitized.push(' ');
+                        chars.next();
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::DoubleQuote => {
+                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                if ch == '"' {
+                    if chars.peek() == Some(&'"') {
+                        sanitized.push(' ');
+                        chars.next();
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::Backtick => {
+                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                if ch == '`' {
+                    state = State::Normal;
+                }
+            }
+            State::LineComment => {
+                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                if ch == '\n' {
+                    state = State::Normal;
+                }
+            }
+            State::BlockComment => {
+                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    sanitized.push(' ');
+                    chars.next();
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    sanitized
+}
+
+fn keyword_tokens(sql: &str) -> impl Iterator<Item = &str> {
+    sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+}
+
+fn has_multiple_statements(sql: &str) -> bool {
+    let mut saw_semicolon = false;
+    for ch in sql.chars() {
+        if ch == ';' {
+            saw_semicolon = true;
+            continue;
+        }
+        if saw_semicolon && !ch.is_whitespace() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Validate that SQL is read-only.
 fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
-    let upper = sql.to_uppercase();
-    // Split on whitespace and check each token - handles leading whitespace, comments etc.
+    let sanitized = sanitize_sql(sql);
+    let upper = sanitized.to_uppercase();
+    let trimmed = upper.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceError::InvalidParams(
+            "SQL must not be empty".to_string(),
+        ));
+    }
+    if has_multiple_statements(trimmed) {
+        return Err(ServiceError::InvalidParams(
+            "multiple SQL statements are not allowed".to_string(),
+        ));
+    }
+
+    let tokens: Vec<&str> = keyword_tokens(trimmed).collect();
+    let Some(root) = tokens.first().copied() else {
+        return Err(ServiceError::InvalidParams(
+            "SQL must not be empty".to_string(),
+        ));
+    };
+    if !ALLOWED_ROOT_KEYWORDS.contains(&root) {
+        return Err(ServiceError::InvalidParams(format!(
+            "statement type is not allowed: {root}"
+        )));
+    }
     for keyword in WRITE_KEYWORDS {
-        // Check if the keyword appears as a standalone word (not within identifiers)
-        // Simple approach: check if it appears at the start or after whitespace
-        if upper.split_whitespace().any(|word| word == *keyword) {
+        if tokens.iter().any(|token| token == keyword) {
             return Err(ServiceError::InvalidParams(format!(
                 "write operations are not allowed: found {keyword}"
             )));
@@ -67,13 +201,21 @@ fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// Validate and normalize SQL under the configured query guard.
+pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> {
+    validate_read_only(sql)?;
+    Ok(inject_limit(sql, guard.max_rows))
+}
+
 /// Inject LIMIT clause if not present and max_rows is set.
 fn inject_limit(sql: &str, max_rows: usize) -> String {
-    let upper = sql.to_uppercase();
-    if upper.contains("LIMIT") {
-        sql.to_string()
+    let trimmed = sql.trim_end();
+    let without_semicolon = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    let upper = sanitize_sql(without_semicolon).to_uppercase();
+    if keyword_tokens(&upper).any(|token| token == "LIMIT") {
+        without_semicolon.to_string()
     } else {
-        format!("{sql} LIMIT {max_rows}")
+        format!("{without_semicolon} LIMIT {max_rows}")
     }
 }
 
@@ -144,8 +286,7 @@ impl QueryService for ClickHouseQueryService {
         sql: &str,
         guard: &QueryGuard,
     ) -> Result<QueryResult, ServiceError> {
-        validate_read_only(sql)?;
-        let guarded_sql = inject_limit(sql, guard.max_rows);
+        let guarded_sql = guard_sql(sql, guard)?;
 
         let start = Instant::now();
         let resp: reqwest::Response = tokio::time::timeout(
@@ -322,6 +463,13 @@ mod tests {
     }
 
     #[test]
+    fn inject_limit_handles_trailing_semicolon() {
+        let sql = "SELECT * FROM foo;";
+        let result = inject_limit(sql, 100);
+        assert_eq!(result, "SELECT * FROM foo LIMIT 100");
+    }
+
+    #[test]
     fn query_guard_defaults() {
         let guard = QueryGuard::default();
         assert_eq!(guard.max_rows, 10_000);
@@ -362,6 +510,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_read_only_ignores_keywords_in_strings_and_comments() {
+        assert!(validate_read_only("SELECT 'DROP TABLE foo'").is_ok());
+        assert!(validate_read_only("SELECT 1 -- DELETE FROM foo").is_ok());
+        assert!(validate_read_only("/* INSERT INTO foo */ SELECT 1").is_ok());
+    }
+
+    #[test]
+    fn validate_read_only_rejects_multiple_statements() {
+        let err = validate_read_only("SELECT 1; DELETE FROM foo").unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => assert!(msg.contains("multiple SQL statements")),
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
+    fn validate_read_only_rejects_non_read_root_statement() {
+        let err = validate_read_only("SYSTEM FLUSH LOGS").unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(msg.contains("statement type is not allowed"))
+            }
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
     fn inject_limit_case_insensitive_check() {
         let sql = "SELECT * FROM foo limit 25";
         let result = inject_limit(sql, 100);
@@ -376,8 +551,30 @@ mod tests {
     }
 
     #[test]
+    fn guard_sql_validates_and_injects_limit() {
+        let guard = QueryGuard {
+            max_rows: 25,
+            timeout_secs: 1,
+        };
+        let result = guard_sql("SELECT * FROM foo;", &guard).unwrap();
+        assert_eq!(result, "SELECT * FROM foo LIMIT 25");
+    }
+
+    #[test]
+    fn guard_sql_rejects_write_statement() {
+        let guard = QueryGuard::default();
+        let err = guard_sql("DELETE FROM foo", &guard).unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(msg.contains("statement type is not allowed"))
+            }
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
     fn validate_read_only_empty_string() {
-        assert!(validate_read_only("").is_ok());
+        assert!(validate_read_only("").is_err());
     }
 
     #[test]

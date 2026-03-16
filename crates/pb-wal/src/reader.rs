@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 
 use tracing::warn;
@@ -5,6 +6,13 @@ use tracing::warn;
 use crate::error::WalError;
 use crate::segment;
 use crate::WalConfig;
+
+/// Durable reader position within the WAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalPosition {
+    pub segment_id: u64,
+    pub offset: usize,
+}
 
 /// WAL consumer that reads records with independent position tracking.
 pub struct WalReader {
@@ -44,6 +52,28 @@ impl WalReader {
 
         // Load the starting segment data.
         reader.load_segment(start_seg)?;
+        Ok(reader)
+    }
+
+    /// Open a WAL reader at an explicit position instead of the last committed
+    /// consumer position. This is useful for handing off from checkpoint/WAL
+    /// hydration directly into live tailing without replaying already-applied
+    /// records.
+    pub fn open_at(
+        config: WalConfig,
+        consumer_name: &str,
+        position: WalPosition,
+    ) -> Result<Self, WalError> {
+        let available = segment::list_segment_ids(&config.base_path)?;
+        let mut reader = Self {
+            config,
+            consumer_name: consumer_name.to_string(),
+            current_segment_id: position.segment_id,
+            current_offset: position.offset,
+            current_data: None,
+            available_segments: available,
+        };
+        reader.load_segment(position.segment_id)?;
         Ok(reader)
     }
 
@@ -109,13 +139,30 @@ impl WalReader {
         let path = self.position_file_path();
         let content = format!("{}:{}", self.current_segment_id, self.current_offset);
         let tmp_path = path.with_extension("pos.tmp");
-        std::fs::write(&tmp_path, &content).map_err(|e| WalError::io(&tmp_path, e))?;
-        std::fs::rename(&tmp_path, &path).map_err(|e| WalError::io(&path, e))
+        let mut file = std::fs::File::create(&tmp_path).map_err(|e| WalError::io(&tmp_path, e))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| WalError::io(&tmp_path, e))?;
+        file.sync_all().map_err(|e| WalError::io(&tmp_path, e))?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| WalError::io(&path, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| WalError::io(parent, e))?;
+        }
+        Ok(())
     }
 
     /// Returns the current read position as (segment_id, offset).
     pub fn position(&self) -> (u64, usize) {
         (self.current_segment_id, self.current_offset)
+    }
+
+    /// Returns the current read position as a typed value.
+    pub fn current_position(&self) -> WalPosition {
+        WalPosition {
+            segment_id: self.current_segment_id,
+            offset: self.current_offset,
+        }
     }
 
     /// Check if the reader's committed position references a segment that has

@@ -111,6 +111,7 @@ impl Dispatcher {
         };
         if event.kind == WsLifecycleKind::ReconnectSuccess {
             self.current_session_id = Some(event.session_id.clone());
+            self.reset_continuity_state();
         }
 
         let provenance = EventProvenance {
@@ -144,6 +145,11 @@ impl Dispatcher {
         }
 
         Ok(())
+    }
+
+    fn reset_continuity_state(&mut self) {
+        self.asset_sequences.clear();
+        self.last_snapshot_ts.clear();
     }
 
     async fn dispatch_raw(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
@@ -972,6 +978,82 @@ mod tests {
             dispatcher.current_session_id.as_deref(),
             Some("new-session")
         );
+    }
+
+    #[tokio::test]
+    async fn reconnect_success_clears_sequence_and_snapshot_state() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+        dispatcher.asset_sequences.insert(Arc::from("tok1"), 42);
+        dispatcher
+            .last_snapshot_ts
+            .insert(Arc::from("tok1"), 123_456);
+
+        dispatcher
+            .dispatch(FeedMessage::Lifecycle(WsLifecycleEvent {
+                kind: WsLifecycleKind::ReconnectSuccess,
+                recv_timestamp_us: 10,
+                session_id: "new-session".to_string(),
+                details: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(dispatcher.asset_sequences.is_empty());
+        assert!(dispatcher.last_snapshot_ts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_after_reconnect_is_not_treated_as_stale() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let initial = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(initial.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        dispatcher
+            .dispatch(FeedMessage::Lifecycle(WsLifecycleEvent {
+                kind: WsLifecycleKind::ReconnectSuccess,
+                recv_timestamp_us: 20,
+                session_id: "session-2".to_string(),
+                details: None,
+            }))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        let after_reconnect = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "50",
+            "bids": [{"price": "0.60", "size": "20"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(after_reconnect.to_string()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(event) => {
+                assert_eq!(event.kind, BookEventKind::Snapshot);
+                assert_eq!(event.provenance.sequence.unwrap().raw(), 0);
+            }
+            other => panic!("expected fresh snapshot after reset, got {other:?}"),
+        }
     }
 
     // ---- Dispatcher: book with empty bids and asks ----

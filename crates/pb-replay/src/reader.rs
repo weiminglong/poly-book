@@ -185,6 +185,33 @@ impl ParquetReader {
 
         Ok(batches.into_iter().flatten().collect())
     }
+
+    async fn latest_checkpoint_in_range(
+        &self,
+        asset_id: &AssetId,
+        start_us: u64,
+        end_us: u64,
+    ) -> Result<Option<BookCheckpoint>, ReplayError> {
+        let files = self
+            .dataset_files(
+                "book_checkpoints",
+                Some(asset_id.as_str()),
+                start_us,
+                end_us,
+            )
+            .await?;
+        if files.is_empty() {
+            return Ok(None);
+        }
+
+        let mut checkpoints = self
+            .read_parquet_files(files, |batch| {
+                extract_checkpoints(batch, asset_id, start_us, end_us)
+            })
+            .await?;
+        checkpoints.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
+        Ok(checkpoints.pop())
+    }
 }
 
 fn parse_source(value: &str) -> Result<DataSource, ReplayError> {
@@ -937,29 +964,20 @@ impl EventReader for ParquetReader {
         asset_id: &AssetId,
         at_us: u64,
     ) -> Result<Option<BookCheckpoint>, ReplayError> {
-        let recent_start = at_us.saturating_sub(RECENT_CHECKPOINT_LOOKBACK_US);
-        let recent_files = self
-            .dataset_files(
-                "book_checkpoints",
-                Some(asset_id.as_str()),
-                recent_start,
-                at_us,
-            )
-            .await?;
-        if !recent_files.is_empty() {
-            let mut recent = self
-                .read_parquet_files(recent_files, |batch| {
-                    extract_checkpoints(batch, asset_id, recent_start, at_us)
-                })
-                .await?;
-            recent.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
-            if let Some(checkpoint) = recent.pop() {
+        let mut window = RECENT_CHECKPOINT_LOOKBACK_US;
+        loop {
+            let start_us = at_us.saturating_sub(window);
+            if let Some(checkpoint) = self
+                .latest_checkpoint_in_range(asset_id, start_us, at_us)
+                .await?
+            {
                 return Ok(Some(checkpoint));
             }
+            if start_us == 0 {
+                return Ok(None);
+            }
+            window = window.saturating_mul(2);
         }
-
-        let mut checkpoints = self.read_checkpoints(asset_id, 0, at_us).await?;
-        Ok(checkpoints.pop())
     }
 
     async fn read_validations(

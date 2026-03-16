@@ -9,7 +9,8 @@ between the `ingest` and `serve` processes.
 |------|-------------|
 | `WalWriter` | Appends records to the active segment, rotates on size threshold, seals completed segments. |
 | `WalReader` | Tails across segments with independent consumer position tracking. Resumes from committed offset on restart. |
-| `WalConfig` | Segment size, base directory, max retained segments, max consumer lag bytes (for backpressure pruning). |
+| `WalPosition` | Typed `(segment_id, offset)` handoff point for resuming a reader without consulting a consumer position file. |
+| `WalConfig` | Segment size, base directory, max retained segments, max consumer lag bytes, and live reader position commit interval. |
 | `WalError` | Error type for WAL operations (IO, CRC, codec). |
 | `codec::encode` / `codec::decode` | Version-prefixed bincode serialization for `PersistedRecord`. |
 
@@ -71,8 +72,12 @@ and feeds decoded records into the live read model.
 - Multiple consumers can independently tail the same WAL with separate position
   files (`consumer_{name}.pos`). Each consumer commits its read position to disk
   via `WalReader::commit_position()` and resumes from there on restart.
+- `WalReader::open_at()` allows a runtime to hand off directly from hydration to
+  live tailing without replaying WAL records that were already applied during
+  startup.
 - **Atomic position writes**: position files are written to a temp file first, then
-  renamed into place, preventing partial reads on crash.
+  fsynced and renamed into place, and the parent directory is fsynced afterward,
+  preventing partial reads or lost renames on crash.
 - **Cached segment list**: `WalReader` caches the segment directory listing,
   avoiding repeated directory re-scans during tailing.
 - **Pruning**: `WalWriter::prune()` removes sealed segments that all registered
@@ -85,6 +90,9 @@ and feeds decoded records into the live read model.
   consumer should re-hydrate from a checkpoint.
 - **Lag tracking**: `WalReader::lag_bytes()` returns the byte distance between
   the reader's current position and the latest data on disk.
+- **Tunable commit cadence**: serve-side live readers commit their position on a
+  configurable interval via `wal.position_commit_interval_ms`, letting operators
+  trade off fsync frequency against restart replay distance.
 - The codec version byte allows future record format changes without breaking
   existing segments.
 - `memmap2` dependency removed — all I/O is via standard file operations.

@@ -12,7 +12,7 @@ mod segment;
 mod writer;
 
 pub use error::WalError;
-pub use reader::WalReader;
+pub use reader::{WalPosition, WalReader};
 pub use segment::HEADER_SIZE;
 pub use writer::WalWriter;
 
@@ -30,6 +30,9 @@ pub struct WalConfig {
     /// Maximum allowed consumer lag in bytes before pruning is paused.
     /// Default: 256 MB.
     pub max_consumer_lag_bytes: u64,
+    /// How often live readers should durably commit their consumer position
+    /// during steady-state tailing. Default: 1000 ms.
+    pub position_commit_interval_ms: u64,
 }
 
 impl Default for WalConfig {
@@ -39,6 +42,7 @@ impl Default for WalConfig {
             segment_size: 64 * 1024 * 1024, // 64 MB
             max_segments: 16,
             max_consumer_lag_bytes: 256 * 1024 * 1024, // 256 MB
+            position_commit_interval_ms: 1_000,
         }
     }
 }
@@ -284,6 +288,7 @@ mod tests {
             segment_size: 64,
             max_segments: 100,
             max_consumer_lag_bytes: 0,
+            position_commit_interval_ms: 1_000,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -333,6 +338,7 @@ mod tests {
             segment_size: 4096,
             max_segments: 4,
             max_consumer_lag_bytes: 256 * 1024 * 1024,
+            position_commit_interval_ms: 1_000,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -364,6 +370,7 @@ mod tests {
             max_segments: 100,
             // Set a very large retention window so no segments are pruned.
             max_consumer_lag_bytes: 1024 * 1024,
+            position_commit_interval_ms: 1_000,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -598,6 +605,36 @@ mod tests {
         assert!(reader2.next().unwrap().is_none());
     }
 
+    #[test]
+    fn reader_can_start_from_explicit_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..WalConfig::default()
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for i in 0..5 {
+            writer.append(format!("msg-{i}").as_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+
+        let mut reader = WalReader::open(config.clone(), "explicit-start-source").unwrap();
+        for _ in 0..3 {
+            reader.next().unwrap().unwrap();
+        }
+        let position = reader.current_position();
+
+        let mut resumed = WalReader::open_at(config, "explicit-start-dest", position).unwrap();
+        let r1 = resumed.next().unwrap().unwrap();
+        assert_eq!(r1, b"msg-3");
+        let r2 = resumed.next().unwrap().unwrap();
+        assert_eq!(r2, b"msg-4");
+        assert!(resumed.next().unwrap().is_none());
+    }
+
     // ---- Reader: atomic position file (temp + rename) ----
 
     #[test]
@@ -771,6 +808,7 @@ mod tests {
             segment_size: 64,
             max_segments: 100,
             max_consumer_lag_bytes: 0,
+            position_commit_interval_ms: 1_000,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();

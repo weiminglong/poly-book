@@ -13,6 +13,7 @@ serde_json = "1"
 pb-types = { path = "../crates/pb-types" }
 pb-book = { path = "../crates/pb-book" }
 pb-wal = { path = "../crates/pb-wal" }
+pb-service = { path = "../crates/pb-service" }
 arbitrary = { version = "1", features = ["derive"] }
 tempfile = "3"
 
@@ -34,6 +35,11 @@ doc = false
 [[bin]]
 name = "fuzz_wal_corruption"
 path = "fuzz_targets/fuzz_wal_corruption.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_query_guard"
+path = "fuzz_targets/fuzz_query_guard.rs"
 doc = false
 
 [workspace]

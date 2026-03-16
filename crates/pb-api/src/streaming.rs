@@ -98,11 +98,18 @@ pub async fn ws_orderbook(
     Query(query): Query<StreamQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let asset_id = query.asset_id.clone();
+    let raw_asset_id = query.asset_id.clone();
+    let asset_id = state
+        .slug_registry
+        .resolve(&raw_asset_id)
+        .map(|id| id.to_string())
+        .unwrap_or(raw_asset_id.clone());
 
     let is_active = state.live.is_asset_active(&asset_id).await;
     if !is_active {
-        return Err(ApiError::NotFound(format!("asset not active: {asset_id}")));
+        return Err(ApiError::NotFound(format!(
+            "asset not active: {raw_asset_id}"
+        )));
     }
 
     let broadcast = state
@@ -118,9 +125,18 @@ pub async fn ws_orderbook(
     let live = state.live.clone();
     let stale_after_secs = state.config.stale_after_secs;
     let default_depth = state.config.default_depth;
+    let slug = state.slug_registry.slug_for_str(&asset_id);
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_ws_session(socket, rx, live, asset_id, default_depth, stale_after_secs)
+        handle_ws_session(
+            socket,
+            rx,
+            live,
+            asset_id,
+            slug,
+            default_depth,
+            stale_after_secs,
+        )
     }))
 }
 
@@ -129,6 +145,7 @@ async fn handle_ws_session(
     mut rx: broadcast::Receiver<BookUpdateMessage>,
     live: crate::live_state::LiveReadModel,
     asset_id: String,
+    slug: Option<String>,
     depth: usize,
     stale_after_secs: u64,
 ) {
@@ -137,7 +154,7 @@ async fn handle_ws_session(
         Ok(snapshot) => {
             let init_msg = BookUpdateMessage {
                 asset_id: snapshot.asset_id.clone(),
-                slug: snapshot.slug.clone(),
+                slug: slug.clone().or(snapshot.slug.clone()),
                 sequence: snapshot.sequence,
                 last_update_us: snapshot.last_update_us,
                 bids: snapshot.bids,
@@ -158,7 +175,10 @@ async fn handle_ws_session(
         tokio::select! {
             msg = rx.recv() => {
                 match msg {
-                    Ok(update) => {
+                    Ok(mut update) => {
+                        if update.slug.is_none() {
+                            update.slug = slug.clone();
+                        }
                         // No need to filter by asset_id — this receiver is
                         // already subscribed to the asset-specific channel.
                         if send_json(&mut socket, &update).await.is_err() {
@@ -170,7 +190,7 @@ async fn handle_ws_session(
                         if let Ok(snapshot) = live.snapshot(&asset_id, depth, stale_after_secs).await {
                             let resync = BookUpdateMessage {
                                 asset_id: snapshot.asset_id.clone(),
-                                slug: snapshot.slug.clone(),
+                                slug: slug.clone().or(snapshot.slug.clone()),
                                 sequence: snapshot.sequence,
                                 last_update_us: snapshot.last_update_us,
                                 bids: snapshot.bids,

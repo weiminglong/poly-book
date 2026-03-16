@@ -54,6 +54,7 @@ base_path = "./data/wal"
 segment_size_mb = 64
 max_segments = 16
 max_consumer_lag_bytes = 268435456  # 256 MB
+position_commit_interval_ms = 1000
 
 [grpc]
 enabled = false
@@ -71,6 +72,10 @@ PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data \
 PB__LOGGING__LEVEL=debug \
 cargo run -- auto-ingest
 ```
+
+On feed reconnect success, the dispatcher clears per-asset sequence and stale
+snapshot tracking before emitting `source_reset`, so downstream replay can treat
+the new WebSocket session as a hard continuity boundary.
 
 Serve the workstation API with explicit port overrides:
 
@@ -113,6 +118,12 @@ Each segment is a BufWriter-wrapped append-only file with length-prefix + CRC32C
 framing. Records use a version-byte prefix for forward-compatible deserialization
 (`pb_wal::codec`).
 
+The separated `serve` runtime keeps its live consumer position in
+`consumer_serve-live.pos`. That position is committed periodically during WAL
+tailing and durably written with temp-file + fsync + rename semantics.
+`wal.position_commit_interval_ms` controls the steady-state commit cadence for
+that reader.
+
 ## CI
 
 GitHub Actions runs the following checks on pushes and pull requests to `main`:
@@ -125,6 +136,10 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - Web CI — `eslint`, `tsc -b`, `vitest run`, `vite build` in `web/`
 - Fuzz smoke test — `fuzz_wal_corruption` and `fuzz_book_delta` (30s each, nightly)
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
+
+Additional local fuzz target:
+
+- `cargo +nightly fuzz run fuzz_query_guard` — SQL sanitizer and normalization path for the query workbench
 
 Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
 separate weekly schedule and on pushes/PRs.
