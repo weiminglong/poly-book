@@ -120,6 +120,12 @@ impl WalReader {
                     }
                     Err(WalError::TruncatedRecord { .. }) => {
                         // Truncated record at end of segment — advance.
+                        // Move offset to end of current data so that
+                        // advance_segment's reload-current-segment path
+                        // only reports new data if the file actually grew.
+                        if let Some(d) = &self.current_data {
+                            self.current_offset = d.len();
+                        }
                         if !self.advance_segment()? {
                             return Ok(None);
                         }
