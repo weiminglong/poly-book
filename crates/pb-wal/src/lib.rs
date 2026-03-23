@@ -1056,4 +1056,53 @@ mod tests {
             }
         }
     }
+
+    /// Regression test: corrupting the length field to a value larger than the
+    /// segment must NOT cause the reader to loop forever. Previously the reader
+    /// would repeatedly reload the same segment because `current_offset` was
+    /// never advanced past the truncated record.
+    #[test]
+    fn corrupted_length_field_does_not_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 8,
+            ..WalConfig::default()
+        };
+
+        // Write a single 1-byte payload.
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        writer.append(&[0u8]).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        // Corrupt byte 2 of the segment (part of the length field).
+        // Original length bytes for 1-byte payload: [1,0,0,0].
+        // After XOR with 0xFF at index 2: [1,0,255,0] = 16_711_681.
+        // This is far larger than the 9-byte segment, triggering TruncatedRecord.
+        let mut seg_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".wal"))
+            .map(|e| e.path())
+            .collect();
+        seg_files.sort();
+        assert!(!seg_files.is_empty());
+
+        let mut data = std::fs::read(&seg_files[0]).unwrap();
+        data[2] ^= 0xFF;
+        std::fs::write(&seg_files[0], &data).unwrap();
+
+        // The reader must terminate (not hang).
+        let mut reader = WalReader::open(config, "hang-test").unwrap();
+        let mut count = 0;
+        loop {
+            match reader.next() {
+                Ok(Some(_)) => count += 1,
+                Ok(None) | Err(_) => break,
+            }
+            assert!(count < 100, "reader appears to be looping");
+        }
+    }
 }
