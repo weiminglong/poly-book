@@ -267,10 +267,15 @@ impl WalReader {
             }
             None => {
                 // Reload current segment to check for new data appended since last read.
+                // Compare against the previously loaded data length (not current_offset)
+                // to detect actual file growth. Using current_offset would loop forever
+                // when corruption produces a zero-length record or other Ok(None) at a
+                // position before the end of the file.
                 let path = segment::segment_path(&self.config.base_path, self.current_segment_id);
                 if path.exists() {
+                    let prev_len = self.current_data.as_ref().map_or(0, |d| d.len());
                     let data = std::fs::read(&path).map_err(|e| WalError::io(&path, e))?;
-                    if data.len() > self.current_offset {
+                    if data.len() > prev_len {
                         self.current_data = Some(data);
                         return Ok(true);
                     }

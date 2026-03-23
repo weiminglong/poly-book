@@ -1102,4 +1102,47 @@ mod tests {
             assert!(count < 100, "reader appears to be looping");
         }
     }
+
+    /// Regression test: corrupting the length field to zero must NOT cause the
+    /// reader to loop forever. Zero-length is interpreted as "end of written
+    /// data" but advance_segment must not reload the same unchanged file.
+    #[test]
+    fn corrupted_zero_length_does_not_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 8,
+            ..WalConfig::default()
+        };
+
+        // Write a single 1-byte payload ([110]).
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        writer.append(&[110u8]).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        // Corrupt byte 0 of the length field with XOR 1:
+        // [1,0,0,0] -> [0,0,0,0] (zero length = "end of data" marker).
+        let mut seg_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".wal"))
+            .map(|e| e.path())
+            .collect();
+        seg_files.sort();
+        assert!(!seg_files.is_empty());
+
+        let mut data = std::fs::read(&seg_files[0]).unwrap();
+        data[0] ^= 1; // length 1 -> 0
+        std::fs::write(&seg_files[0], &data).unwrap();
+
+        // The reader must terminate (not hang).
+        let mut reader = WalReader::open(config, "zero-len-test").unwrap();
+        let mut count = 0;
+        while let Ok(Some(_)) = reader.next() {
+            count += 1;
+            assert!(count < 100, "reader appears to be looping");
+        }
+    }
 }
