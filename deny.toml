@@ -4,6 +4,10 @@ exclude-unpublished = true
 [advisories]
 unmaintained = "none"
 yanked = "warn"
+# astral-tokio-tar 0.5.6 (RUSTSEC-2026-0066): low-severity PAX extension
+# validation issue in testcontainers dev dependency. Waiting for
+# testcontainers to release with astral-tokio-tar >=0.6.0.
+ignore = ["RUSTSEC-2026-0066"]
 
 [licenses]
 private = { ignore = true }
