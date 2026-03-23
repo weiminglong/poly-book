@@ -227,12 +227,21 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
 
 /// Inject LIMIT clause if not present and max_rows is set.
 fn inject_limit(sql: &str, max_rows: usize) -> String {
+    // Strip trailing content after the last unquoted semicolon using the
+    // sanitized form to identify semicolons in Normal state. This prevents
+    // trailing quoted identifiers (e.g. `SHOW;\`foo\``) from interfering
+    // with LIMIT injection.
     let trimmed = sql.trim_end();
-    let without_semicolon = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
-    let result = sanitize_sql(without_semicolon);
+    let sanitized_full = sanitize_sql(trimmed);
+    let base = if let Some(pos) = sanitized_full.sql.rfind(';') {
+        trimmed[..pos].trim_end()
+    } else {
+        trimmed
+    };
+    let result = sanitize_sql(base);
     let upper = result.sql.to_uppercase();
     if keyword_tokens(&upper).any(|token| token == "LIMIT") {
-        without_semicolon.to_string()
+        base.to_string()
     } else {
         // If the SQL ends inside a line comment (e.g. "SELECT 1 --comment"),
         // a newline is needed so the LIMIT isn't swallowed by the comment.
@@ -241,7 +250,7 @@ fn inject_limit(sql: &str, max_rows: usize) -> String {
         } else {
             " "
         };
-        format!("{without_semicolon}{sep}LIMIT {max_rows}")
+        format!("{base}{sep}LIMIT {max_rows}")
     }
 }
 
