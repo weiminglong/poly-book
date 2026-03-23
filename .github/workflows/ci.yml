@@ -57,6 +57,9 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2
@@ -120,9 +123,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked || true
       - name: Fuzz WAL corruption (30s)
-        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30
+        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
       - name: Fuzz book delta (30s)
-        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30
+        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
+      - name: Fuzz query guard (30s)
+        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
 
   miri:
     name: Miri (undefined behavior)
