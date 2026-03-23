@@ -53,8 +53,15 @@ const WRITE_KEYWORDS: &[&str] = &[
 
 const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"];
 
-fn sanitize_sql(sql: &str) -> String {
-    #[derive(Clone, Copy)]
+/// Sanitize result: the normalized SQL text and whether the input ended in a
+/// balanced state (i.e. no unclosed quotes, strings, or comments).
+struct SanitizeResult {
+    sql: String,
+    balanced: bool,
+}
+
+fn sanitize_sql(sql: &str) -> SanitizeResult {
+    #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
         SingleQuote,
@@ -142,7 +149,10 @@ fn sanitize_sql(sql: &str) -> String {
         }
     }
 
-    sanitized
+    SanitizeResult {
+        sql: sanitized,
+        balanced: state == State::Normal || state == State::LineComment,
+    }
 }
 
 fn keyword_tokens(sql: &str) -> impl Iterator<Item = &str> {
@@ -166,8 +176,13 @@ fn has_multiple_statements(sql: &str) -> bool {
 
 /// Validate that SQL is read-only.
 fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
-    let sanitized = sanitize_sql(sql);
-    let upper = sanitized.to_uppercase();
+    let result = sanitize_sql(sql);
+    if !result.balanced {
+        return Err(ServiceError::InvalidParams(
+            "SQL has unclosed quote or comment".into(),
+        ));
+    }
+    let upper = result.sql.to_uppercase();
     let trimmed = upper.trim();
     if trimmed.is_empty() {
         return Err(ServiceError::InvalidParams(
@@ -211,7 +226,7 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
 fn inject_limit(sql: &str, max_rows: usize) -> String {
     let trimmed = sql.trim_end();
     let without_semicolon = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
-    let upper = sanitize_sql(without_semicolon).to_uppercase();
+    let upper = sanitize_sql(without_semicolon).sql.to_uppercase();
     if keyword_tokens(&upper).any(|token| token == "LIMIT") {
         without_semicolon.to_string()
     } else {
@@ -594,5 +609,29 @@ mod tests {
         };
         assert_eq!(guard.max_rows, 500);
         assert_eq!(guard.timeout_secs, 5);
+    }
+
+    #[test]
+    fn guard_sql_rejects_unclosed_quote() {
+        let guard = QueryGuard::default();
+        let err = guard_sql("SELECT * FROM foo WHERE name = 'unclosed", &guard).unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(msg.contains("unclosed"), "got: {msg}")
+            }
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
+    fn guard_sql_rejects_unclosed_double_quote() {
+        let guard = QueryGuard::default();
+        let err = guard_sql("SELECT * FROM \"foo", &guard).unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(msg.contains("unclosed"), "got: {msg}")
+            }
+            _ => panic!("expected InvalidParams"),
+        }
     }
 }
