@@ -1097,11 +1097,8 @@ mod tests {
         // The reader must terminate (not hang).
         let mut reader = WalReader::open(config, "hang-test").unwrap();
         let mut count = 0;
-        loop {
-            match reader.next() {
-                Ok(Some(_)) => count += 1,
-                Ok(None) | Err(_) => break,
-            }
+        while let Ok(Some(_)) = reader.next() {
+            count += 1;
             assert!(count < 100, "reader appears to be looping");
         }
     }
