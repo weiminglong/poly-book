@@ -58,6 +58,8 @@ const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "
 struct SanitizeResult {
     sql: String,
     balanced: bool,
+    /// True when the input ends inside a line comment (--...).
+    ends_in_line_comment: bool,
 }
 
 fn sanitize_sql(sql: &str) -> SanitizeResult {
@@ -152,6 +154,7 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
     SanitizeResult {
         sql: sanitized,
         balanced: state == State::Normal || state == State::LineComment,
+        ends_in_line_comment: state == State::LineComment,
     }
 }
 
@@ -226,11 +229,19 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
 fn inject_limit(sql: &str, max_rows: usize) -> String {
     let trimmed = sql.trim_end();
     let without_semicolon = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
-    let upper = sanitize_sql(without_semicolon).sql.to_uppercase();
+    let result = sanitize_sql(without_semicolon);
+    let upper = result.sql.to_uppercase();
     if keyword_tokens(&upper).any(|token| token == "LIMIT") {
         without_semicolon.to_string()
     } else {
-        format!("{without_semicolon} LIMIT {max_rows}")
+        // If the SQL ends inside a line comment (e.g. "SELECT 1 --comment"),
+        // a newline is needed so the LIMIT isn't swallowed by the comment.
+        let sep = if result.ends_in_line_comment {
+            "\n"
+        } else {
+            " "
+        };
+        format!("{without_semicolon}{sep}LIMIT {max_rows}")
     }
 }
 
@@ -633,5 +644,17 @@ mod tests {
             }
             _ => panic!("expected InvalidParams"),
         }
+    }
+
+    #[test]
+    fn guard_sql_trailing_line_comment_is_idempotent() {
+        let guard = QueryGuard {
+            max_rows: 100,
+            timeout_secs: 1,
+        };
+        let sql = "SELECT 1 --comment";
+        let first = guard_sql(sql, &guard).unwrap();
+        let second = guard_sql(&first, &guard).unwrap();
+        assert_eq!(first, second, "LIMIT injection must be idempotent");
     }
 }
