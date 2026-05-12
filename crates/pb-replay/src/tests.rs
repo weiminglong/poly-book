@@ -910,6 +910,10 @@ fn checkpoint_from_rest_parses_correctly() {
             price: "0.5100".into(),
             size: "2.000000".into(),
         }],
+        tick_size: None,
+        min_order_size: None,
+        neg_risk: None,
+        last_trade_price: None,
     };
 
     let checkpoint = checkpoint_from_rest(&response).unwrap();
@@ -933,6 +937,10 @@ fn parse_timestamp_us_milliseconds() {
         timestamp: Some("1750000200000".into()), // ms < 10^13 => multiply by 1000
         bids: vec![],
         asks: vec![],
+        tick_size: None,
+        min_order_size: None,
+        neg_risk: None,
+        last_trade_price: None,
     };
 
     let cp = checkpoint_from_rest(&response).unwrap();
@@ -952,6 +960,10 @@ fn parse_timestamp_us_microseconds() {
         timestamp: Some("1750000200000000".into()), // us >= 10^13 => keep as-is
         bids: vec![],
         asks: vec![],
+        tick_size: None,
+        min_order_size: None,
+        neg_risk: None,
+        last_trade_price: None,
     };
 
     let cp = checkpoint_from_rest(&response).unwrap();

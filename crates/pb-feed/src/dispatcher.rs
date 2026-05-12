@@ -283,6 +283,19 @@ impl Dispatcher {
                 };
                 self.send(PersistedRecord::Trade(event)).await?;
             }
+            WsMessage::TickSizeChange(t) => {
+                // V2 event: market's minimum tick size changed (typically
+                // when price crosses 0.04 / 0.96). Informational only — our
+                // book engine stores prices at full FixedPrice precision and
+                // does not enforce a min tick.
+                pb_metrics::record_message_received("tick_size_change");
+                debug!(
+                    asset_id = t.asset_id,
+                    old = ?t.old_tick_size,
+                    new = ?t.new_tick_size,
+                    "tick size changed"
+                );
+            }
         }
 
         Ok(())
@@ -696,6 +709,29 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_handles_v2_tick_size_change() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "tick_size_change",
+            "asset_id": "tok1",
+            "market": "0xabc",
+            "old_tick_size": "0.01",
+            "new_tick_size": "0.001",
+            "timestamp": "1700000000000"
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // V2 tick size events are observational; no PersistedRecord is emitted.
         assert!(event_rx.try_recv().is_err());
     }
 
