@@ -5,4 +5,12 @@ ignore = [
     # Transitive dev dependency via testcontainers 0.27.1.
     # Remove once testcontainers updates to astral-tokio-tar >=0.6.0.
     "RUSTSEC-2026-0066",
+    # astral-tokio-tar 0.5.6: PAX header desynchronization (file smuggling).
+    # Transitive dev dependency via testcontainers 0.27.1. Patched in 0.6.1.
+    # Remove once testcontainers updates to astral-tokio-tar >=0.6.1.
+    "RUSTSEC-2026-0112",
+    # astral-tokio-tar 0.5.6: unpack_in can chmod directories via symlinks.
+    # Transitive dev dependency via testcontainers 0.27.1. Patched in 0.6.1.
+    # Remove once testcontainers updates to astral-tokio-tar >=0.6.1.
+    "RUSTSEC-2026-0113",
 ]

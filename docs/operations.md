@@ -77,6 +77,29 @@ On feed reconnect success, the dispatcher clears per-asset sequence and stale
 snapshot tracking before emitting `source_reset`, so downstream replay can treat
 the new WebSocket session as a hard continuity boundary.
 
+### Polymarket CLOB V2
+
+The ingest pipeline targets Polymarket CLOB V2 (live as of 2026-04-28). The V2
+cutover did not change the WebSocket URL, the subscribe payload
+(`{"assets_ids": [...], "type": "market"}`), or the `book` / `price_change` /
+`last_trade_price` event shapes. `last_trade_price.fee_rate_bps` continues to
+reflect the actual fee charged at match time (now protocol-set per market).
+
+V2 additions handled by the dispatcher and REST client:
+
+- `tick_size_change` events parse without erroring and increment the
+  `pb_messages_received_total{event_type="tick_size_change"}` counter. They
+  are informational; the book engine does not enforce a minimum tick.
+- `GET /book` snapshots may include `tick_size`, `min_order_size`,
+  `neg_risk`, and `last_trade_price`. They are optional fields on
+  `RestBookResponse`.
+- V2's per-market metadata is reachable via
+  `RestClient::get_clob_market_info(condition_id)` → `GET
+  /clob-markets/{condition_id}`.
+
+Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
+`custom_feature_enabled: true` on subscribe and are not enabled by default.
+
 Serve the workstation API with explicit port overrides:
 
 ```bash

@@ -3,7 +3,7 @@ use tracing::debug;
 
 use crate::error::FeedError;
 use crate::rate_limiter::RateLimiter;
-use pb_types::wire::{GammaEvent, RestBookResponse};
+use pb_types::wire::{ClobMarketInfo, GammaEvent, RestBookResponse};
 
 #[derive(Debug, Clone)]
 pub struct RestConfig {
@@ -79,6 +79,22 @@ impl RestClient {
         let resp = classify_response(resp)?;
         let events = resp.json().await?;
         Ok(events)
+    }
+
+    /// Fetch V2 CLOB market metadata: min tick, min order size, fee schedule,
+    /// token outcomes, and protocol flags. Available on CLOB V2 only.
+    pub async fn get_clob_market_info(
+        &self,
+        condition_id: &str,
+    ) -> Result<ClobMarketInfo, FeedError> {
+        self.rate_limiter.acquire().await;
+        pb_metrics::record_rest_request();
+        let url = format!("{}/clob-markets/{condition_id}", self.config.clob_base_url);
+        debug!(url, "fetching clob market info");
+        let resp = self.client.get(&url).send().await?;
+        let resp = classify_response(resp)?;
+        let info = resp.json().await?;
+        Ok(info)
     }
 }
 

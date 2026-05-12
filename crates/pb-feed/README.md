@@ -13,7 +13,7 @@ Polymarket venue, receives raw messages, and normalizes them into split
 | `WsRawMessage` | Raw text message with receive timestamp from the WebSocket stream. |
 | `FeedMessage` | Enum wrapping `WsRawMessage` and `WsLifecycleEvent` for the ingest channel. |
 | `WsLifecycleEvent` | Reconnect lifecycle event with session ID and details. |
-| `RestClient` | HTTP client for REST API discovery and snapshot fetching. |
+| `RestClient` | HTTP client for REST API discovery, snapshot fetching, and V2 market metadata (`get_clob_market_info`). |
 | `RestConfig` | REST endpoint URLs (CLOB base, Gamma base). |
 | `RateLimiter` | Token-bucket rate limiter wrapping `governor`. |
 | `Dispatcher` | Deserializes raw WS messages and normalizes into `PersistedRecord` events. |
@@ -35,7 +35,31 @@ Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel
   lifecycle events to `IngestEvent` records, and emits `PersistedRecord` events
   on an outbound channel.
 - `RestClient` is used independently for market discovery (`discover_markets`,
-  `discover_by_slug`) and snapshot backfill (`fetch_book`).
+  `discover_by_slug`), snapshot backfill (`fetch_book`), and CLOB V2 market
+  metadata lookup (`get_clob_market_info`).
+
+## CLOB V2 notes
+
+The Polymarket CLOB V2 cutover (2026-04-28) did not change the WebSocket URL
+(`wss://ws-subscriptions-clob.polymarket.com/ws/market`), the subscription
+shape (`{"assets_ids": [...], "type": "market"}`), or the existing `book` /
+`price_change` / `last_trade_price` payloads. The `fee_rate_bps` field on
+`last_trade_price` continues to reflect the fee actually charged at match
+time (now protocol-set per market rather than embedded in the order).
+
+V2 additions handled here:
+
+- `tick_size_change` events parse via `WsMessage::TickSizeChange` and are
+  observed via the `pb_messages_received_total{event_type="tick_size_change"}`
+  Prometheus counter. They are informational — `L2Book` stores prices at full
+  `FixedPrice` precision and does not enforce a minimum tick.
+- `GET /book` responses may carry `tick_size`, `min_order_size`, `neg_risk`,
+  and `last_trade_price`. They are optional fields on `RestBookResponse`.
+- `GET /clob-markets/{condition_id}` is exposed as
+  `RestClient::get_clob_market_info`.
+
+Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
+`custom_feature_enabled: true` on subscribe and are not modeled today.
 
 ## Design Notes
 
