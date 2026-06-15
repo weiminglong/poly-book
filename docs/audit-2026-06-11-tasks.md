@@ -167,7 +167,7 @@
 - **Action:** Put all spawned tasks under a `JoinSet`/supervisor; treat unexpected exit/panic as fatal-or-restart with a metric/alert. Make `LiveReadModel::apply_record` fail when the projector channel is closed so the tailer stops committing positions. Add a tailer recovery loop (re-hydrate on resync, retry reader open with backoff) and reflect not-ready in `/health` (pairs with P2-API-3).
 - **Done when:** a panicking child task causes a non-zero exit or a logged+metered restart (test); a closed projector stops position commits; a tailer that hits resync re-hydrates instead of dying.
 
-### [ ] P2-LIFE-1 — Make graceful shutdown loss-free
+### [x] P2-LIFE-1 — Make graceful shutdown loss-free
 - **Severity:** medium · **Findings:** A.44, A.97, A.104
 - **Files:** `crates/pb-bin/src/commands/ingest.rs:120` (breaks immediately on cancel, drops up to 2048 buffered events + 2048 dispatcher frames), `:104` (abandons slow sink flushes after 10 s)
 - **Problem:** `ingest` drops queued events on cancel before WAL/sink write; `auto-ingest` already gets this right and should be the shared template. Shutdown abandons slow sink flushes after 10 s and ignores further signals.

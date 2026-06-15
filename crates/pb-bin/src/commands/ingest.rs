@@ -174,6 +174,26 @@ pub async fn run(
         }
     }
 
+    // Drain events still buffered in the channel at shutdown so a graceful stop
+    // does not discard records the dispatcher already produced (A.44/A.97). The
+    // feed and dispatcher share the shutdown token and are stopping, so this
+    // drains the backlog rather than waiting for new events.
+    // try_recv returns Err (Empty or Disconnected) once the backlog is drained,
+    // which ends the loop.
+    while let Ok(event) = event_rx.try_recv() {
+        match pb_wal::codec::encode(&event) {
+            Ok(payload) => {
+                wal_writer
+                    .append(&payload)
+                    .map_err(|e| anyhow::anyhow!("WAL append failed during drain: {e}"))?;
+                let _ = pipeline::fanout_event(event, &fanout_txs).await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "WAL encode failed during drain, dropping record");
+            }
+        }
+    }
+
     // Durably flush + fsync the WAL before shutdown so no acknowledged record
     // is lost on a clean stop.
     if let Err(e) = wal_writer.sync() {
