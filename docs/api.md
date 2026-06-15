@@ -9,15 +9,24 @@ The current API is intentionally narrow. It is meant to support the first
 backend slice of the workstation and may evolve as later phases add integrity,
 execution, query, and frontend capabilities.
 
-The current SPA consumes these shipped surfaces:
+The SPA ships six routes: `Live Feed`, `Orderbook`, `Replay Lab`, `Execution
+Timeline`, `Integrity`, and `Query Workbench`. The Query Workbench is opt-in
+(`api.query_workbench_enabled = true`, requires the ClickHouse backend). Latency
+surfaces remain deferred.
 
-- `Live Feed`
-- `Replay Lab`
-- `Integrity`
-- `Execution Timeline`
+## Security / Trust Boundary
 
-Latency surfaces remain deferred. The Query Workbench is implemented but
-opt-in (`api.query_workbench_enabled = true`, requires ClickHouse backend).
+There is **no built-in authentication** on the HTTP, WebSocket, or gRPC surfaces.
+All services default to binding loopback (`127.0.0.1`); to serve other hosts,
+place an authenticating reverse proxy in front and only then change the bind
+address. Never expose the metrics port or the SQL workbench to an untrusted
+network. HTTP request/response routes are bounded by a per-request timeout, a
+global in-flight concurrency cap, and a request-body size limit; 5xx responses
+return an opaque message and log the detail server-side.
+
+Health/readiness endpoints: `GET /health` (detailed JSON, always 200),
+`GET /health/live` (liveness), `GET /health/ready` (200 only when ready, else
+503).
 
 ## Slug Resolution
 
@@ -164,6 +173,7 @@ Query params:
 - `start_us`
 - `end_us`
   - `start_us` must be less than `end_us`
+  - the window may not exceed **24 hours**; a larger range returns `400`
 
 Returns:
 
@@ -181,6 +191,9 @@ Query params:
 - `start_us`
 - `end_us`
   - `start_us` must be less than `end_us`
+  - the window may not exceed **24 hours**; a larger range returns `400`
+  - the same window cap and result-limit clamp are enforced for the gRPC
+    `ExecutionTimeline` RPC
 - `order_id`
   - optional; filters to a single order
 - `asset_id`
