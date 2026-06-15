@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS book_events (
     price UInt32,
     size UInt64,
     sequence UInt64,
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     ingest_ordinal Nullable(UInt64),
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS book_events (
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, recv_timestamp_us, sequence, price)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_TRADE_EVENTS_DDL: &str = r#"
@@ -49,15 +50,16 @@ CREATE TABLE IF NOT EXISTS trade_events (
     size Nullable(UInt64),
     side Nullable(Enum8('Bid' = 1, 'Ask' = 2)),
     trade_id Nullable(String),
-    fidelity String,
+    fidelity LowCardinality(String),
     sequence Nullable(UInt64),
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, recv_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_INGEST_EVENTS_DDL: &str = r#"
@@ -65,18 +67,19 @@ CREATE TABLE IF NOT EXISTS ingest_events (
     recv_timestamp_us UInt64,
     exchange_timestamp_us UInt64,
     asset_id Nullable(String),
-    event_kind String,
+    event_kind LowCardinality(String),
     sequence Nullable(UInt64),
     expected_sequence Nullable(UInt64),
     observed_sequence Nullable(UInt64),
     details Nullable(String),
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (recv_timestamp_us, event_kind)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_BOOK_CHECKPOINTS_DDL: &str = r#"
@@ -85,7 +88,7 @@ CREATE TABLE IF NOT EXISTS book_checkpoints (
     recv_timestamp_us UInt64,
     exchange_timestamp_us UInt64,
     asset_id String,
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     bids_json String,
@@ -95,12 +98,13 @@ CREATE TABLE IF NOT EXISTS book_checkpoints (
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, checkpoint_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_REPLAY_VALIDATIONS_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS replay_validations (
     asset_id String,
-    mode String,
+    mode LowCardinality(String),
     replay_timestamp_us UInt64,
     reference_timestamp_us UInt64,
     matched UInt8,
@@ -110,6 +114,7 @@ CREATE TABLE IF NOT EXISTS replay_validations (
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, persisted_at_us, replay_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_EXECUTION_EVENTS_DDL: &str = r#"
@@ -119,7 +124,7 @@ CREATE TABLE IF NOT EXISTS execution_events (
     order_id String,
     client_order_id Nullable(String),
     venue_order_id Nullable(String),
-    event_kind String,
+    event_kind LowCardinality(String),
     side Nullable(Enum8('Bid' = 1, 'Ask' = 2)),
     price Nullable(UInt32),
     size Nullable(UInt64),
@@ -134,6 +139,7 @@ PARTITION BY event_date
 -- full scan on time-range lookups (audit finding A.38, clickhouse rule
 -- schema-pk-prioritize-filters).
 ORDER BY (event_timestamp_us, order_id)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 #[derive(Clone)]
@@ -536,36 +542,60 @@ impl ClickHouseRecordWriter {
             }
         }
 
+        // Per-batch, content-derived deduplication token. With the tables'
+        // non_replicated_deduplication_window, re-inserting the identical batch
+        // (an operator retry, or a partial-failure re-send) is deduplicated
+        // server-side per table instead of double-counting rows — the at-least-
+        // once-without-duplicates property the audit required (A.60/A.124).
+        let dedup_token = {
+            use std::hash::{Hash, Hasher};
+            let bytes = serde_json::to_vec(records).unwrap_or_default();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        };
+        // Insert client carries: the dedup token (A.60/A.124) and async-insert
+        // settings (A.40). On quiet assets the sink's 1s timer flushes far fewer
+        // than the recommended min batch, which would create many tiny parts;
+        // async_insert lets the server coalesce them, and wait_for_async_insert=1
+        // keeps the call durable (it returns only once the data is written).
+        let dedup_client = self
+            .client
+            .clone()
+            .with_setting("insert_deduplication_token", &dedup_token)
+            .with_setting("async_insert", "1")
+            .with_setting("wait_for_async_insert", "1");
+
         let mut book_insert: Option<clickhouse::insert::Insert<BookEventRow>> = if has_book {
-            Some(self.client.insert("book_events").await?)
+            Some(dedup_client.insert("book_events").await?)
         } else {
             None
         };
         let mut trade_insert: Option<clickhouse::insert::Insert<TradeEventRow>> = if has_trade {
-            Some(self.client.insert("trade_events").await?)
+            Some(dedup_client.insert("trade_events").await?)
         } else {
             None
         };
         let mut ingest_insert: Option<clickhouse::insert::Insert<IngestEventRow>> = if has_ingest {
-            Some(self.client.insert("ingest_events").await?)
+            Some(dedup_client.insert("ingest_events").await?)
         } else {
             None
         };
         let mut checkpoint_insert: Option<clickhouse::insert::Insert<CheckpointRow>> =
             if has_checkpoint {
-                Some(self.client.insert("book_checkpoints").await?)
+                Some(dedup_client.insert("book_checkpoints").await?)
             } else {
                 None
             };
         let mut validation_insert: Option<clickhouse::insert::Insert<ReplayValidationRow>> =
             if has_validation {
-                Some(self.client.insert("replay_validations").await?)
+                Some(dedup_client.insert("replay_validations").await?)
             } else {
                 None
             };
         let mut execution_insert: Option<clickhouse::insert::Insert<ExecutionEventRow>> =
             if has_execution {
-                Some(self.client.insert("execution_events").await?)
+                Some(dedup_client.insert("execution_events").await?)
             } else {
                 None
             };

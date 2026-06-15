@@ -155,14 +155,21 @@ fn execution_records(asset_id: &str, order_id: &str, base_ts: u64) -> Vec<Persis
 }
 
 async fn setup_clickhouse() -> (
-    testcontainers::ContainerAsync<ClickHouse>,
+    Option<testcontainers::ContainerAsync<ClickHouse>>,
     clickhouse::Client,
     String,
     String,
 ) {
-    let container = ClickHouse::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(8123).await.unwrap();
-    let url = format!("http://127.0.0.1:{port}");
+    // Use an externally-provided ClickHouse if PB_TEST_CLICKHOUSE_URL is set
+    // (e.g. a locally-running server), otherwise spin one up via testcontainers.
+    let (container, url) = match std::env::var("PB_TEST_CLICKHOUSE_URL") {
+        Ok(external) => (None, external),
+        Err(_) => {
+            let c = ClickHouse::default().start().await.unwrap();
+            let port = c.get_host_port_ipv4(8123).await.unwrap();
+            (Some(c), format!("http://127.0.0.1:{port}"))
+        }
+    };
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,6 +202,44 @@ async fn count_rows(client: &clickhouse::Client, table: &str) -> u64 {
     let query = format!("SELECT count() AS count FROM {table}");
     let row: CountRow = client.query(&query).fetch_one().await.unwrap();
     row.count
+}
+
+#[tokio::test]
+#[ignore]
+async fn clickhouse_rewriting_identical_batch_is_deduplicated() {
+    // Re-inserting the identical batch (an operator retry, or a partial-failure
+    // re-send) must NOT double-count rows — the at-least-once-without-duplicates
+    // property from the dedup token + non_replicated_deduplication_window
+    // (A.60/A.124). Verified against a real ClickHouse server.
+    let (_container, client, _url, _db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_000_000_000;
+    let asset_id = AssetId::new("clickhouse-dedup");
+    let records = market_data_records(asset_id.as_str(), base_ts);
+
+    // First write.
+    write_records(client.clone(), &records).await;
+    let book_after_first = count_rows(&client, "book_events").await;
+    let trade_after_first = count_rows(&client, "trade_events").await;
+    assert_eq!(book_after_first, 2);
+    assert_eq!(trade_after_first, 1);
+
+    // Identical re-write — the dedup token matches, so the server drops it.
+    write_records(client.clone(), &records).await;
+    assert_eq!(
+        count_rows(&client, "book_events").await,
+        book_after_first,
+        "identical re-insert must be deduplicated, not doubled"
+    );
+    assert_eq!(count_rows(&client, "trade_events").await, trade_after_first);
+
+    // A genuinely different batch (later timestamp) is NOT deduplicated.
+    let later = market_data_records(asset_id.as_str(), base_ts + 1_000_000);
+    write_records(client.clone(), &later).await;
+    assert_eq!(
+        count_rows(&client, "book_events").await,
+        book_after_first + 2,
+        "a distinct batch must still be inserted"
+    );
 }
 
 #[tokio::test]
