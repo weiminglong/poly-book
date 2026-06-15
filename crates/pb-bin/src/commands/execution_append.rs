@@ -118,6 +118,9 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
                 value.event_timestamp_us
             );
         }
+        if value.order_id.trim().is_empty() {
+            bail!("order_id must not be empty");
+        }
         let kind = ExecutionEventKind::from_str(&value.event_kind)
             .map_err(|error| anyhow::anyhow!(error))?;
         let side = value
@@ -132,6 +135,16 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
             .map(FixedPrice::try_from)
             .transpose()?;
         let size = value.size.as_deref().map(FixedSize::try_from).transpose()?;
+
+        // A (partial) fill that carries no price or size is malformed — it would
+        // record a trade with unknown economics (part of A.144).
+        if matches!(
+            kind,
+            ExecutionEventKind::Fill | ExecutionEventKind::PartialFill
+        ) && (price.is_none() || size.is_none())
+        {
+            bail!("{kind} events require both price and size");
+        }
 
         let latency = LatencyTrace::from_optional_timestamps(
             value.market_data_recv_us,
@@ -296,6 +309,29 @@ mod tests {
     fn accepts_microsecond_timestamp() {
         let ev = ExecutionEvent::try_from(input_with_ts(1_750_000_000_000_000));
         assert!(ev.is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_order_id() {
+        let mut input = input_with_ts(1_750_000_000_000_000);
+        input.order_id = "  ".to_string();
+        assert!(ExecutionEvent::try_from(input).is_err());
+    }
+
+    #[test]
+    fn rejects_fill_without_price_or_size() {
+        let mut input = input_with_ts(1_750_000_000_000_000);
+        input.event_kind = "fill".to_string();
+        input.price = None;
+        input.size = None;
+        assert!(ExecutionEvent::try_from(input).is_err());
+
+        // A fill with both price and size is accepted.
+        let mut ok = input_with_ts(1_750_000_000_000_000);
+        ok.event_kind = "fill".to_string();
+        ok.price = Some("0.5".to_string());
+        ok.size = Some("10".to_string());
+        assert!(ExecutionEvent::try_from(ok).is_ok());
     }
 
     #[test]
