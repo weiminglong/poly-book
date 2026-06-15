@@ -35,6 +35,11 @@ pub struct ApiConfig {
     pub stale_after_secs: u64,
     pub query_max_rows: usize,
     pub query_timeout_secs: u64,
+    /// Optional bearer token. When `Some`, every API/stream route requires
+    /// `Authorization: Bearer <token>`; health probes stay open. `None` (default)
+    /// keeps the read-only workstation open on its loopback bind (audit P2-SEC-2:
+    /// auth before reachable on any non-loopback interface).
+    pub auth_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -150,19 +155,67 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(http_request_timeout))
         .layer(middleware::from_fn(http_concurrency_guard));
 
-    // Liveness/readiness and the long-lived WS stream are kept off the
-    // timeout/concurrency layers.
-    Router::new()
-        .route("/health", get(health))
-        .route("/health/live", get(health_live))
-        .route("/health/ready", get(health_ready))
-        .merge(api_routes)
+    // Liveness/readiness stay open (orchestrator probes must not need a token).
+    // The data routes + the WS stream require auth when a token is configured.
+    let protected = api_routes
         .route(
             "/api/v1/streams/orderbook",
             any(crate::streaming::ws_orderbook),
         )
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
+        .merge(protected)
         .layer(middleware::from_fn(track_request_metrics))
         .with_state(state)
+}
+
+/// Require `Authorization: Bearer <token>` when `api.auth_token` is configured.
+/// A constant-time compare avoids leaking the token via timing. When no token is
+/// configured the workstation stays open on its loopback bind (audit P2-SEC-2).
+async fn require_auth(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(expected) = state.config.auth_token.as_deref() else {
+        return next.run(req).await;
+    };
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let ok = match presented {
+        Some(token) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
+        None => false,
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(crate::dto::ApiErrorResponse {
+                error: "missing or invalid bearer token".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// Length-independent constant-time byte comparison (avoids token-timing leaks).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Reject a request that exceeds `HTTP_REQUEST_TIMEOUT` with 504 instead of
@@ -661,6 +714,7 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                auth_token: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
@@ -684,6 +738,87 @@ mod tests {
     ) -> T {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"secret", b"sekret"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_allows_requests() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_rejects_missing_and_accepts_valid_token() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.config.auth_token = Some("s3cret".to_string());
+
+        // No token → 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong token → 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .header("Authorization", "Bearer nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct token → not 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .header("Authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Health probes stay open even with auth enabled.
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1772,6 +1907,7 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                auth_token: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),

@@ -64,6 +64,17 @@ requirements:
 Keeping `serve-api` read-only makes the current workstation honest about what
 the system can support safely.
 
+### Trust boundary & authentication
+
+All surfaces bind to loopback by default (`127.0.0.1`), so the trust boundary is
+the host. Before exposing the API on any non-loopback interface, set
+`api.auth_token` (or `PB__API__AUTH_TOKEN`): when configured, every API and
+WebSocket route requires `Authorization: Bearer <token>` (constant-time compared),
+while `/health/live` and `/health/ready` stay open for orchestrator probes. With
+no token set the workstation stays open on loopback — appropriate only for a
+single-operator host. This is bearer-token authentication, not full
+authorization/RBAC, which remains out of scope for the read-only workstation.
+
 ## Configurable Historical Backend
 
 Historical routes (replay, integrity, execution) are served through `pb-service`

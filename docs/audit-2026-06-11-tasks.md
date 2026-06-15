@@ -194,7 +194,8 @@
 - **Action:** Run the workbench as a ClickHouse `readonly=2` user with table-function and `system.*` access revoked. In the guard: **allowlist** datasets/tables, reject table functions and `SETTINGS`, clamp `max_rows` server-side, enforce a top-level `LIMIT`, and set `max_execution_time`/`max_result_rows` on the CH side. Extend the request timeout to cover body download (reqwest overall timeout). Require auth before this is reachable on any non-loopback interface (pairs with P2-SEC-2). Re-enable `fuzz_query_guard` in CI with a cached corpus.
 - **Done when:** the bypass corpus (`file`/`url`/`s3`/`remote`/`system`/comment/CTE/SETTINGS/multi-statement) is rejected by tests; a CH `readonly=2` user is used; `fuzz_query_guard` runs in CI.
 
-### [ ] P2-SEC-2 — Default all surfaces to loopback; add auth; document the trust boundary
+### [x] P2-SEC-2 — Default all surfaces to loopback; add auth; document the trust boundary
+- **Progress (2026-06): done.** All surfaces default to loopback (`127.0.0.1` for HTTP/gRPC/metrics; config + ADR-style note). **Auth added (A.157)** — optional `api.auth_token`: when set, every API + WebSocket route requires `Authorization: Bearer <token>` (constant-time compare); `/health/live|ready` stay open; unset = open on loopback. Tested (401 missing/wrong, 200 valid, health open, constant_time_eq). Trust boundary documented in docs/serve-api.md + config. (The infra `0.0.0.0` metrics SG ingress / private-subnet move is part of P2-INFRA-1's AWS topology.)
 - **Severity:** medium/low · **Findings:** A.93, A.157, A.151, A.86, A.131
 - **Files:** `config/default.toml:35`, `crates/pb-api/src/server.rs:112`, `crates/pb-grpc/src/lib.rs`, `infra/vpc.tf:53` (metrics `0.0.0.0/0`)
 - **Problem:** No auth on any surface; HTTP (3000), gRPC (50051), and metrics (9090) all bind `0.0.0.0`; the trust boundary is undocumented; metrics are exposed to the public internet on a public-IP Fargate task.
