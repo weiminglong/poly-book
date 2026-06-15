@@ -53,6 +53,13 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   for server-side filtering and adds `ORDER BY` clauses on all queries.
 - ClickHouseReader uses `tokio::try_join!` to run independent queries concurrently
   (e.g., checkpoints + market data) instead of sequential awaits.
+- For integrity summaries, `ClickHouseReader::read_integrity_aggregates` pushes the
+  heavy counts to the server (`count()` on `book_events`, `count()`/`countIf(matched)`
+  on `replay_validations`) and `read_ingest_events` fetches only the bounded ingest
+  list. This avoids streaming every book/trade row back just to call `.len()` on it
+  (audit A.42); the two aggregate queries run concurrently via `try_join!`. The
+  returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
+  `validation_match_count`.
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`

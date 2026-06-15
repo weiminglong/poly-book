@@ -81,6 +81,8 @@ pub(crate) fn build_replay_result(
 }
 
 /// Build an `IntegritySummary` from a market data window and validations.
+///
+/// Used by the Parquet backend, which already materializes the full window.
 pub(crate) fn build_integrity_summary(
     asset_id: &AssetId,
     start_us: u64,
@@ -88,14 +90,40 @@ pub(crate) fn build_integrity_summary(
     window: MarketDataWindow,
     validations: Vec<ReplayValidation>,
 ) -> IntegritySummary {
-    let book_event_count = window.book_events.len();
-    let ingest_event_count = window.ingest_events.len();
+    assemble_integrity_summary(
+        asset_id,
+        start_us,
+        end_us,
+        window.book_events.len(),
+        &window.ingest_events,
+        validations.len(),
+        validations.iter().filter(|v| v.matched).count(),
+    )
+}
+
+/// Assemble an `IntegritySummary` from already-computed primitive counts plus the
+/// (bounded) ingest events needed for per-kind tallies and `continuity_events`.
+///
+/// This is the shared core used by both backends. The ClickHouse path computes
+/// `book_event_count`/validation counts server-side with `count()`/`countIf()`
+/// (audit A.42) and only materializes the small ingest-event list, so it never
+/// transfers full book/trade rows just to count them.
+pub(crate) fn assemble_integrity_summary(
+    asset_id: &AssetId,
+    start_us: u64,
+    end_us: u64,
+    book_event_count: usize,
+    ingest_events: &[IngestEvent],
+    validation_count: usize,
+    validation_match_count: usize,
+) -> IntegritySummary {
+    let ingest_event_count = ingest_events.len();
 
     let mut reconnect_count = 0usize;
     let mut gap_count = 0usize;
     let mut stale_snapshot_skip_count = 0usize;
 
-    for event in &window.ingest_events {
+    for event in ingest_events {
         match event.kind {
             IngestEventKind::ReconnectStart | IngestEventKind::ReconnectSuccess => {
                 reconnect_count += 1;
@@ -111,9 +139,6 @@ pub(crate) fn build_integrity_summary(
         }
     }
 
-    let validation_count = validations.len();
-    let validation_match_count = validations.iter().filter(|v| v.matched).count();
-
     let has_boundaries = reconnect_count > 0 || gap_count > 0;
     let completeness = if book_event_count == 0 {
         CompletenessLevel::Empty
@@ -123,11 +148,7 @@ pub(crate) fn build_integrity_summary(
         CompletenessLevel::Full
     };
 
-    let continuity_events = window
-        .ingest_events
-        .iter()
-        .map(ingest_to_continuity)
-        .collect();
+    let continuity_events = ingest_events.iter().map(ingest_to_continuity).collect();
 
     IntegritySummary {
         asset_id: asset_id.to_string(),

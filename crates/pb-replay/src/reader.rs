@@ -1095,6 +1095,18 @@ pub struct ClickHouseReader {
     client: clickhouse::Client,
 }
 
+/// Server-side aggregate counts for an integrity summary window.
+///
+/// These are computed with ClickHouse `count()`/`countIf()` so the summary never
+/// transfers full book/trade rows over the wire just to count them (audit A.42 /
+/// `query-mv-incremental`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntegrityAggregates {
+    pub book_event_count: u64,
+    pub validation_count: u64,
+    pub validation_match_count: u64,
+}
+
 impl ClickHouseReader {
     pub fn new(url: &str, database: &str) -> Self {
         let client = clickhouse::Client::default()
@@ -1102,6 +1114,113 @@ impl ClickHouseReader {
             .with_database(database);
         Self { client }
     }
+
+    /// Compute integrity-summary counts entirely server-side.
+    ///
+    /// Issues two small aggregate queries (book-event `count()`, and validation
+    /// `count()`/`countIf(matched)`) instead of materializing every book and
+    /// trade row in the window only to call `.len()` on the client. The two
+    /// queries run concurrently.
+    pub async fn read_integrity_aggregates(
+        &self,
+        asset_id: &AssetId,
+        start_us: u64,
+        end_us: u64,
+    ) -> Result<IntegrityAggregates, ReplayError> {
+        let book_query = "SELECT count() AS c FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ?";
+        let validation_query = "SELECT count() AS total, countIf(matched = 1) AS matched FROM replay_validations WHERE asset_id = ? AND persisted_at_us >= ? AND persisted_at_us <= ?";
+
+        let (book, validation) = tokio::try_join!(
+            async {
+                self.client
+                    .query(book_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_one::<CountRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+            async {
+                self.client
+                    .query(validation_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_one::<ValidationAggRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+        )?;
+
+        Ok(IntegrityAggregates {
+            book_event_count: book.c,
+            validation_count: validation.total,
+            validation_match_count: validation.matched,
+        })
+    }
+
+    /// Read only the ingest events for a window (reconnects, gaps, stale-snapshot
+    /// skips). These are bounded in practice and are needed both for the
+    /// `continuity_events` list and the per-kind counts, so unlike book/trade
+    /// rows they are materialized rather than counted server-side.
+    pub async fn read_ingest_events(
+        &self,
+        asset_id: &AssetId,
+        start_us: u64,
+        end_us: u64,
+    ) -> Result<Vec<IngestEvent>, ReplayError> {
+        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us";
+        let rows: Vec<IngestEventRow> = self
+            .client
+            .query(ingest_query)
+            .bind(start_us)
+            .bind(end_us)
+            .bind(asset_id.as_str())
+            .fetch_all()
+            .await?;
+        let mut events = rows
+            .into_iter()
+            .map(ingest_row_to_event)
+            .collect::<Result<Vec<_>, ReplayError>>()?;
+        events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+        Ok(events)
+    }
+}
+
+fn ingest_row_to_event(row: IngestEventRow) -> Result<IngestEvent, ReplayError> {
+    Ok(IngestEvent {
+        asset_id: row.asset_id.map(AssetId::new),
+        kind: parse_ingest_kind(&row.event_kind)?,
+        provenance: EventProvenance {
+            recv_timestamp_us: row.recv_timestamp_us,
+            exchange_timestamp_us: row.exchange_timestamp_us,
+            source: parse_source(&row.source)?,
+            source_event_id: row.source_event_id,
+            source_session_id: row.source_session_id,
+            sequence: row.sequence.map(Sequence::new),
+            ingest_ordinal: None,
+        },
+        expected_sequence: row.expected_sequence,
+        observed_sequence: row.observed_sequence,
+        details: row.details,
+    })
+}
+
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct CountRow {
+    c: u64,
+}
+
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct ValidationAggRow {
+    total: u64,
+    matched: u64,
 }
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1295,24 +1414,7 @@ impl EventReader for ClickHouseReader {
 
         let mut ingest_events = ingest_rows
             .into_iter()
-            .map(|row| {
-                Ok(IngestEvent {
-                    asset_id: row.asset_id.map(AssetId::new),
-                    kind: parse_ingest_kind(&row.event_kind)?,
-                    provenance: EventProvenance {
-                        recv_timestamp_us: row.recv_timestamp_us,
-                        exchange_timestamp_us: row.exchange_timestamp_us,
-                        source: parse_source(&row.source)?,
-                        source_event_id: row.source_event_id,
-                        source_session_id: row.source_session_id,
-                        sequence: row.sequence.map(Sequence::new),
-                        ingest_ordinal: None,
-                    },
-                    expected_sequence: row.expected_sequence,
-                    observed_sequence: row.observed_sequence,
-                    details: row.details,
-                })
-            })
+            .map(ingest_row_to_event)
             .collect::<Result<Vec<_>, ReplayError>>()?;
         ingest_events.sort_by_key(|event| {
             (

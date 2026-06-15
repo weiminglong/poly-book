@@ -297,6 +297,69 @@ async fn clickhouse_checkpoint_and_validation_roundtrip() {
 
 #[tokio::test]
 #[ignore]
+async fn clickhouse_integrity_summary_counts_server_side() {
+    // Audit A.42: the integrity summary must compute book-event and validation
+    // counts with server-side count()/countIf() rather than streaming every row
+    // back to count it client-side. This asserts the server-side aggregate
+    // reader and the full summary path agree with directly-counted rows.
+    use pb_service::{CompletenessLevel, IntegrityService};
+
+    let (_container, client, url, db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_300_000_000;
+    let asset_id = AssetId::new("clickhouse-integrity");
+    let mut records = market_data_records(asset_id.as_str(), base_ts);
+    // Add a validation row (matched) so validation counts are exercised.
+    records.push(PersistedRecord::Validation(ReplayValidation {
+        asset_id: asset_id.clone(),
+        mode: ReplayMode::RecvTime,
+        replay_timestamp_us: base_ts,
+        reference_timestamp_us: base_ts + 5_000,
+        matched: true,
+        mismatch_summary: None,
+        persisted_at_us: base_ts + 6_000,
+    }));
+
+    write_records(client.clone(), &records).await;
+
+    let window_end = base_ts + 20_000;
+    let reader = ClickHouseReader::new(&url, &db_name);
+
+    // The server-side aggregate reader returns the same counts as direct SQL.
+    let aggregates = reader
+        .read_integrity_aggregates(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(aggregates.book_event_count, 2);
+    assert_eq!(aggregates.validation_count, 1);
+    assert_eq!(aggregates.validation_match_count, 1);
+
+    // Only the bounded ingest events are materialized.
+    let ingest = reader
+        .read_ingest_events(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(ingest.len(), 1);
+    assert_eq!(ingest[0].kind, IngestEventKind::ReconnectSuccess);
+
+    // The full service path assembles a summary from those server-side counts.
+    let service = pb_service::ClickHouseIntegrityService::new(&url, &db_name);
+    let summary = service
+        .summary(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(summary.book_event_count, 2);
+    assert_eq!(summary.ingest_event_count, 1);
+    assert_eq!(summary.reconnect_count, 1);
+    assert_eq!(summary.gap_count, 0);
+    assert_eq!(summary.validation_count, 1);
+    assert_eq!(summary.validation_match_count, 1);
+    // A reconnect is a continuity boundary, so the window is Partial, not Full.
+    assert_eq!(summary.completeness, CompletenessLevel::Partial);
+    assert_eq!(summary.continuity_events.len(), 1);
+}
+
+#[tokio::test]
+#[ignore]
 async fn clickhouse_execution_event_roundtrip() {
     let (_container, client, url, db_name) = setup_clickhouse().await;
     let base_ts = 1_700_000_200_000_000;

@@ -4,7 +4,7 @@ use pb_replay::{ClickHouseReader, EventReader, ReplayEngine};
 use pb_types::AssetId;
 
 use crate::{
-    build_execution_timeline, build_integrity_summary, build_replay_result, map_replay_error,
+    assemble_integrity_summary, build_execution_timeline, build_replay_result, map_replay_error,
     ExecutionService, ExecutionTimeline, IntegrityService, IntegritySummary, ReplayResult,
     ReplayService, ServiceError,
 };
@@ -75,20 +75,33 @@ impl IntegrityService for ClickHouseIntegrityService {
         end_us: u64,
     ) -> Result<IntegritySummary, ServiceError> {
         let reader = ClickHouseReader::new(&self.url, &self.database);
-        let window = reader
-            .read_market_data(asset_id, start_us, end_us)
-            .await
-            .map_err(map_replay_error)?;
-        let validations = reader
-            .read_validations(asset_id, start_us, end_us)
-            .await
-            .map_err(map_replay_error)?;
-        Ok(build_integrity_summary(
+        // Push the heavy counts (book events, validations) to the server with
+        // count()/countIf() instead of streaming every row back to count it
+        // client-side (audit A.42). Only the bounded ingest-event list is
+        // materialized, since it feeds both the per-kind tallies and the
+        // continuity_events array.
+        let (aggregates, ingest_events) = tokio::try_join!(
+            async {
+                reader
+                    .read_integrity_aggregates(asset_id, start_us, end_us)
+                    .await
+                    .map_err(map_replay_error)
+            },
+            async {
+                reader
+                    .read_ingest_events(asset_id, start_us, end_us)
+                    .await
+                    .map_err(map_replay_error)
+            },
+        )?;
+        Ok(assemble_integrity_summary(
             asset_id,
             start_us,
             end_us,
-            window,
-            validations,
+            aggregates.book_event_count as usize,
+            &ingest_events,
+            aggregates.validation_count as usize,
+            aggregates.validation_match_count as usize,
         ))
     }
 }
