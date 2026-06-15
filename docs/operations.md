@@ -26,6 +26,13 @@ rate_limit_window_secs = 10
 
 # parquet_base_path accepts a local path OR a URL scheme (s3://bucket/prefix,
 # gs://..., file://...); an s3:// path is wired to a real S3 object store.
+# Cloud backends are configured from the process environment (parsed via
+# object_store::parse_url_opts(url, env::vars())): for s3://, set AWS_REGION and
+# either static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or rely on the default AWS
+# provider chain (ECS task role / instance profile). For an S3-compatible endpoint
+# (MinIO/LocalStack) also set AWS_ENDPOINT, AWS_ALLOW_HTTP=true, and
+# AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false (path-style). End-to-end persistence +
+# restart is covered by tests/integration/s3_minio_roundtrip.rs.
 [storage]
 parquet_base_path = "./data"
 parquet_flush_interval_secs = 300

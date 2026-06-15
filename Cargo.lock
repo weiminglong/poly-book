@@ -2774,6 +2774,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-util",
+ "url",
 ]
 
 [[package]]

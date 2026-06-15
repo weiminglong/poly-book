@@ -158,13 +158,20 @@ impl Supervisor {
 /// `s3://...` base path was silently handled by `LocalFileSystem` and written to
 /// a local directory literally named `s3:` on ephemeral container storage.
 ///
-/// For `s3://`, credentials and region come from the standard AWS provider chain
-/// (env vars / ECS task role / instance profile).
+/// For `s3://` (and other cloud schemes), configuration is taken from process
+/// environment variables via `object_store::parse_url_opts(url, std::env::vars())`.
+/// This is what wires in region and credentials: `AWS_REGION`, static
+/// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or — when no static keys are set —
+/// the default AWS provider chain (ECS task role / instance profile). It also
+/// honors `AWS_ENDPOINT` (+ `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`)
+/// so an S3-compatible endpoint (MinIO/LocalStack) can be targeted. Plain
+/// `object_store::parse_url` passes *no* options, so the builder would have no
+/// region/credentials/endpoint and fail against real S3 — hence `parse_url_opts`.
 pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::ObjectStore>, String)> {
     if base_path.contains("://") {
         let url = url::Url::parse(base_path)
             .map_err(|e| anyhow::anyhow!("invalid storage URL {base_path}: {e}"))?;
-        let (store, prefix) = object_store::parse_url(&url)
+        let (store, prefix) = object_store::parse_url_opts(&url, std::env::vars())
             .map_err(|e| anyhow::anyhow!("failed to build object store for {base_path}: {e}"))?;
         Ok((Arc::from(store), prefix.to_string()))
     } else {
