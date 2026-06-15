@@ -11,6 +11,10 @@ use crate::writer::ClickHouseRecordWriter;
 
 const DEFAULT_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BATCH_SIZE: usize = 10_000;
+/// Bounded flush retries before giving up, so a single transient insert failure
+/// no longer tears down the whole ingest pipeline (audit findings A.5/A.12/A.26).
+const MAX_FLUSH_RETRIES: u32 = 5;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
 pub struct ClickHouseSink {
     rx: mpsc::Receiver<PersistedRecord>,
@@ -84,11 +88,43 @@ impl ClickHouseSink {
         }
     }
 
+    /// Flush the buffer with bounded exponential-backoff retries. The buffer is
+    /// retained (not cleared) across retries and on terminal failure, so a
+    /// transient ClickHouse error does not drop the batch or instantly kill the
+    /// pipeline — only after `MAX_FLUSH_RETRIES` consecutive failures does this
+    /// return an error (audit findings A.5/A.12/A.26).
     async fn flush(&self, buffer: &mut Vec<PersistedRecord>) -> Result<(), StoreError> {
-        ClickHouseRecordWriter::new(self.client.clone())
-            .write_batch(buffer.as_slice())
-            .await?;
-        buffer.clear();
-        Ok(())
+        let mut attempt = 0u32;
+        loop {
+            match ClickHouseRecordWriter::new(self.client.clone())
+                .write_batch(buffer.as_slice())
+                .await
+            {
+                Ok(()) => {
+                    buffer.clear();
+                    return Ok(());
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt > MAX_FLUSH_RETRIES {
+                        tracing::error!(
+                            error = %e,
+                            retries = MAX_FLUSH_RETRIES,
+                            buffered = buffer.len(),
+                            "ClickHouse flush failed after retries; buffer retained"
+                        );
+                        return Err(e);
+                    }
+                    let backoff = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+                    tracing::warn!(
+                        error = %e,
+                        attempt,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "ClickHouse flush failed; retrying (buffer retained)"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
     }
 }

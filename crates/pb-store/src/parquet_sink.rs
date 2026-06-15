@@ -11,6 +11,11 @@ use crate::error::StoreError;
 use crate::writer::ParquetRecordWriter;
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(300);
+/// Bounded flush retries before giving up, so a single transient object-store
+/// write failure does not drop the buffered batch or kill the pipeline
+/// (audit findings A.5/A.12/A.26).
+const MAX_FLUSH_RETRIES: u32 = 5;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
 pub struct ParquetSink {
     rx: mpsc::Receiver<PersistedRecord>,
@@ -78,11 +83,42 @@ impl ParquetSink {
         }
     }
 
+    /// Flush the buffer with bounded exponential-backoff retries. The buffer is
+    /// retained (not cleared) across retries and on terminal failure, so a
+    /// transient object-store write error does not drop the batch or instantly
+    /// kill the pipeline (audit findings A.5/A.12/A.26).
     async fn flush(&self, buffer: &mut Vec<PersistedRecord>) -> Result<(), StoreError> {
-        ParquetRecordWriter::new(self.store.clone(), self.base_path.clone())
-            .write_batch(buffer.as_slice())
-            .await?;
-        buffer.clear();
-        Ok(())
+        let mut attempt = 0u32;
+        loop {
+            match ParquetRecordWriter::new(self.store.clone(), self.base_path.clone())
+                .write_batch(buffer.as_slice())
+                .await
+            {
+                Ok(()) => {
+                    buffer.clear();
+                    return Ok(());
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if attempt > MAX_FLUSH_RETRIES {
+                        tracing::error!(
+                            error = %e,
+                            retries = MAX_FLUSH_RETRIES,
+                            buffered = buffer.len(),
+                            "Parquet flush failed after retries; buffer retained"
+                        );
+                        return Err(e);
+                    }
+                    let backoff = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+                    tracing::warn!(
+                        error = %e,
+                        attempt,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "Parquet flush failed; retrying (buffer retained)"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
     }
 }

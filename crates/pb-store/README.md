@@ -53,6 +53,11 @@ PersistedRecord channel
   keys for efficient range queries. Tables are created via `ensure_tables()`.
 - ClickHouse insert handles are created conditionally — only for record types that
   actually have data in the current batch, avoiding empty inserts.
+- Both sinks flush with bounded exponential-backoff retries (5 attempts), keeping
+  the buffer intact across retries, so a single transient insert/write failure no
+  longer drops the batch or instantly tears down the ingest pipeline. (Full sink
+  isolation, non-zero exit on terminal failure, and WAL→storage reconciliation
+  are tracked under remaining P1-STORE work.)
 
 ## Docs to Update After Changes
 
