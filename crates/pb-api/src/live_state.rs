@@ -757,14 +757,21 @@ impl LiveReadModel {
     }
 
     /// Apply a single record and wait for it to be processed.
-    /// Primarily used in tests.
-    pub async fn apply_record(&self, record: PersistedRecord) {
+    /// Apply a record through the projector. Returns `false` if the projector
+    /// task is dead (the command channel is closed or the ack was dropped), so
+    /// the WAL tailer can stop committing consumer positions for records that
+    /// were never applied (audit finding A.45) instead of silently advancing.
+    pub async fn apply_record(&self, record: PersistedRecord) -> bool {
         let (ack_tx, ack_rx) = oneshot::channel();
-        let _ = self
+        if self
             .cmd_tx
             .send(ProjectorCommand::RecordAck(record, ack_tx))
-            .await;
-        let _ = ack_rx.await;
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.await.is_ok()
     }
 
     /// Set the active asset list. Waits for the projector to process the change.

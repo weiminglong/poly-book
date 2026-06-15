@@ -208,8 +208,18 @@ fn spawn_wal_tailer(
             match reader.next() {
                 Ok(Some(payload)) => match pb_wal::codec::decode(&payload) {
                     Ok(record) => {
-                        live.apply_record(record).await;
-                        dirty_position = true;
+                        if live.apply_record(record).await {
+                            dirty_position = true;
+                        } else {
+                            // The projector is dead. Stop committing positions —
+                            // otherwise we would advance the consumer position
+                            // past records that were never applied (A.45). Fail
+                            // fast so the supervisor restarts the serve process.
+                            tracing::error!(
+                                "live projector is not accepting records; stopping WAL tailer"
+                            );
+                            break;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to decode WAL record");
