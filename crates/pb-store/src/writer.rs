@@ -127,7 +127,11 @@ CREATE TABLE IF NOT EXISTS execution_events (
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(event_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (order_id, event_timestamp_us)
+-- Lead with event_timestamp_us: the execution timeline always filters by a time
+-- range (order_id is optional), so this matches the dominant query and avoids a
+-- full scan on time-range lookups (audit finding A.38, clickhouse rule
+-- schema-pk-prioritize-filters).
+ORDER BY (event_timestamp_us, order_id)
 "#;
 
 #[derive(Clone)]
