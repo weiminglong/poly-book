@@ -1188,6 +1188,37 @@ mod proptests {
             }
         }
 
+        /// `check_integrity` reports a crossed book exactly when
+        /// `best_bid >= best_ask`. Bids and asks are drawn from the SAME
+        /// overlapping price range so crossings actually occur — the
+        /// disjoint-range tests above can never produce one, leaving the
+        /// detector untested (audit finding A.159).
+        #[test]
+        fn check_integrity_detects_crossings(
+            bid_prices in prop_vec(1u32..=10_000u32, 1..20),
+            ask_prices in prop_vec(1u32..=10_000u32, 1..20),
+        ) {
+            let bids: Vec<_> = bid_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+            let asks: Vec<_> = ask_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            let crossed = match (book.best_bid(), book.best_ask()) {
+                (Some((b, _)), Some((a, _))) => b >= a,
+                _ => false,
+            };
+            prop_assert_eq!(
+                book.check_integrity().is_err(),
+                crossed,
+                "check_integrity disagreed with best_bid>=best_ask"
+            );
+        }
+
         /// Removing a level (size=0 delta) never increases depth.
         #[test]
         fn zero_size_delta_removes_level(

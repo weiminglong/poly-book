@@ -113,5 +113,19 @@ fuzz_target!(|input: FuzzInput| {
         }
 
         check_ordering(&book, &format!("after delta {i}"));
+
+        // check_integrity must agree with the raw best_bid/best_ask comparison
+        // after every delta: it reports an error exactly when the book is
+        // crossed (best_bid >= best_ask). Exercises the detector against
+        // adversarial delta sequences (audit finding A.159).
+        let crossed = match (book.best_bid(), book.best_ask()) {
+            (Some((b, _)), Some((a, _))) => b >= a,
+            _ => false,
+        };
+        assert_eq!(
+            book.check_integrity().is_err(),
+            crossed,
+            "check_integrity disagreed with best_bid>=best_ask after delta {i}"
+        );
     }
 });
