@@ -14,6 +14,14 @@ pub fn register_metrics() {
         "pb_book_mismatches_total",
         "Total times the reconstructed top-of-book diverged from the venue-stated best bid/ask"
     );
+    describe_counter!(
+        "pb_clock_skew_events_total",
+        "Total messages whose venue timestamp was implausibly ahead of receive time (clock skew)"
+    );
+    describe_histogram!(
+        "pb_clock_skew_us",
+        "Observed venue-ahead-of-receive clock skew in microseconds"
+    );
     describe_counter!("pb_snapshots_applied_total", "Total book snapshots applied");
     describe_counter!("pb_deltas_applied_total", "Total book deltas applied");
     describe_counter!("pb_trades_received_total", "Total trades received");
@@ -93,6 +101,15 @@ pub fn record_unknown_message_dropped() {
 /// after applying a delta — a silently dropped/corrupt update (A.74/A.109).
 pub fn record_book_mismatch() {
     counter!("pb_book_mismatches_total").increment(1);
+}
+
+/// A message's venue (exchange) timestamp was implausibly ahead of our receive
+/// timestamp — evidence of clock skew between our host and the venue, which would
+/// corrupt exchange-time replay ordering (audit finding A.76). The observed skew
+/// (µs) is also recorded as a histogram for distribution analysis.
+pub fn record_clock_skew(skew_us: u64) {
+    counter!("pb_clock_skew_events_total").increment(1);
+    histogram!("pb_clock_skew_us").record(skew_us as f64);
 }
 
 pub fn record_snapshot_applied() {

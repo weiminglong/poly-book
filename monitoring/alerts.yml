@@ -100,6 +100,19 @@ groups:
             sustained outside reconnects, investigate feed loss.
           runbook: monitoring/RUNBOOK.md#sequencegaps
 
+      - alert: ClockSkew
+        expr: increase(pb_clock_skew_events_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Venue clock skew detected on {{ $labels.instance }}"
+          description: >-
+            Venue (exchange) timestamps are arriving implausibly ahead of our
+            receive time, meaning the ingest host clock is behind the venue's.
+            Exchange-time replay ordering will be wrong until corrected.
+          runbook: monitoring/RUNBOOK.md#clockskew
+
       - alert: UnknownMessagesDropped
         expr: rate(pb_unknown_messages_dropped_total[10m]) > 0
         for: 1m

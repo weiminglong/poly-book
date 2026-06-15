@@ -90,6 +90,21 @@ Best bid ≥ best ask in the live or replayed book.
 Expected briefly around reconnects (continuity reset). Investigate only if
 sustained outside reconnect windows.
 
+## ClockSkew
+**Severity: warning.**
+
+Venue (exchange) timestamps are arriving more than the tolerance ahead of our
+receive time (`pb_clock_skew_events_total` / `pb_clock_skew_us`), i.e. the ingest
+host clock is behind the venue's.
+
+1. Check NTP/chrony on the ingest host (`chronyc tracking` / `timedatectl`);
+   resync the clock.
+2. Until corrected, prefer **RecvTime** replay (it uses our monotonic
+   receive-ordering + ingest ordinal) over ExchangeTime, whose ordering depends
+   on the venue clock.
+3. Persistent skew with NTP healthy may indicate a venue-side timestamp anomaly —
+   capture samples and compare against `pb_clock_skew_us` distribution.
+
 ## UnknownMessagesDropped
 **Severity: info.**
 

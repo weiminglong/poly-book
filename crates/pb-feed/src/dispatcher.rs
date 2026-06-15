@@ -186,6 +186,9 @@ impl Dispatcher {
             WsMessage::Book(book) => {
                 let asset_id = self.intern_asset_id(book.asset_id);
                 let exchange_ts = parse_timestamp_us(book.timestamp);
+                if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
+                    pb_metrics::record_clock_skew(skew);
+                }
                 let source_event_id = book.hash.map(str::to_string);
 
                 // Skip only *strictly older* snapshots. Polymarket emits one
@@ -338,6 +341,9 @@ impl Dispatcher {
             }
             WsMessage::PriceChange(pc) => {
                 let exchange_ts = parse_timestamp_us(pc.timestamp);
+                if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
+                    pb_metrics::record_clock_skew(skew);
+                }
                 for entry in &pc.price_changes {
                     let side = match parse_side(entry.side) {
                         Some(s) => s,
@@ -554,6 +560,23 @@ impl Dispatcher {
 /// or non-numeric input becomes `0` (the "unknown timestamp" sentinel).
 fn parse_timestamp_us(ts: Option<&str>) -> u64 {
     pb_types::time::parse_to_micros(ts).unwrap_or(0)
+}
+
+/// Tolerance before a venue (exchange) timestamp ahead of our receive timestamp
+/// is treated as clock skew. Normally network + processing latency makes recv
+/// *later* than exchange (`exchange_ts <= recv_ts`); the venue being meaningfully
+/// ahead means our host clock is behind the venue's, which corrupts exchange-time
+/// replay ordering (audit finding A.76).
+const CLOCK_SKEW_TOLERANCE_US: u64 = 2_000_000; // 2s
+
+/// Returns the skew (µs) when `exchange_us` is implausibly ahead of `recv_us`
+/// beyond tolerance, else `None`. Zero/absent timestamps can't be compared.
+fn clock_skew_us(recv_us: u64, exchange_us: u64) -> Option<u64> {
+    if recv_us == 0 || exchange_us == 0 {
+        return None;
+    }
+    let skew = exchange_us.saturating_sub(recv_us);
+    (skew > CLOCK_SKEW_TOLERANCE_US).then_some(skew)
 }
 
 /// Whether our top-of-book price disagrees with the venue-stated one. A venue
@@ -1643,6 +1666,20 @@ mod tests {
     }
 
     // ---- venue book-mismatch validation (A.74/A.109) ----
+
+    #[test]
+    fn clock_skew_detection() {
+        // Normal: exchange at or before receive → no skew.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_000_000_000), None);
+        assert_eq!(clock_skew_us(1_000_000_000, 999_000_000), None);
+        // Small exchange-ahead within tolerance → no skew.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_000_500_000), None);
+        // Exchange implausibly ahead beyond 2s tolerance → skew reported.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_003_000_000), Some(3_000_000));
+        // Missing timestamps can't be compared.
+        assert_eq!(clock_skew_us(0, 1_000_000_000), None);
+        assert_eq!(clock_skew_us(1_000_000_000, 0), None);
+    }
 
     #[test]
     fn top_price_mismatch_cases() {
