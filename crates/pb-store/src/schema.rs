@@ -11,8 +11,21 @@ use pb_types::event::{
 
 use crate::error::StoreError;
 
+/// On-disk Parquet schema version, written into every file's schema metadata so
+/// the reader can reject an incompatible (pre-split, or future) layout instead of
+/// silently returning empty rows (audit findings P1-TEST-1 / A.137).
+pub const PB_SCHEMA_VERSION: &str = "2";
+
+/// Attach the schema-version marker to a set of fields.
+fn versioned(fields: Vec<Field>) -> Schema {
+    Schema::new(fields).with_metadata(std::collections::HashMap::from([(
+        "pb_schema_version".to_string(),
+        PB_SCHEMA_VERSION.to_string(),
+    )]))
+}
+
 pub fn book_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, false),
@@ -31,7 +44,7 @@ pub fn book_event_schema() -> Schema {
 }
 
 pub fn trade_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, false),
@@ -48,7 +61,7 @@ pub fn trade_event_schema() -> Schema {
 }
 
 pub fn ingest_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, true),
@@ -64,7 +77,7 @@ pub fn ingest_event_schema() -> Schema {
 }
 
 pub fn checkpoint_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("checkpoint_timestamp_us", DataType::UInt64, false),
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
@@ -79,7 +92,7 @@ pub fn checkpoint_schema() -> Schema {
 }
 
 pub fn replay_validation_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("asset_id", DataType::Utf8, false),
         Field::new("mode", DataType::Utf8, false),
         Field::new("replay_timestamp_us", DataType::UInt64, false),
@@ -91,7 +104,7 @@ pub fn replay_validation_schema() -> Schema {
 }
 
 pub fn execution_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("event_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, true),
         Field::new("order_id", DataType::Utf8, false),

@@ -56,6 +56,25 @@ pub struct ParquetReader {
     base_path: PathBuf,
 }
 
+/// The on-disk Parquet schema version this reader understands. Files written by
+/// `pb_store` carry it in their schema metadata (`pb_store::schema::PB_SCHEMA_VERSION`).
+const EXPECTED_PARQUET_SCHEMA_VERSION: &str = "2";
+
+/// Validate a Parquet file's `pb_schema_version`. A pre-split (unversioned) or
+/// future-versioned file is a typed error rather than a silent empty/mis-mapped
+/// read (audit findings P1-TEST-1 / A.137).
+fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
+    match version {
+        Some(v) if v == EXPECTED_PARQUET_SCHEMA_VERSION => Ok(()),
+        Some(other) => Err(ReplayError::Other(format!(
+            "schema version {other}, expected {EXPECTED_PARQUET_SCHEMA_VERSION}; migrate it"
+        ))),
+        None => Err(ReplayError::Other(
+            "no pb_schema_version (pre-split/legacy layout); migrate, do not read as empty".into(),
+        )),
+    }
+}
+
 const PARQUET_READ_CONCURRENCY: usize = 8;
 const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
 
@@ -151,6 +170,18 @@ impl ParquetReader {
     {
         let file = File::open(path).await?;
         let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
+
+        // Reject an incompatible on-disk layout instead of silently yielding
+        // empty or mis-mapped rows (audit findings P1-TEST-1 / A.137).
+        check_schema_version(
+            builder
+                .schema()
+                .metadata()
+                .get("pb_schema_version")
+                .map(String::as_str),
+        )
+        .map_err(|e| ReplayError::Other(format!("Parquet file {path:?}: {e}")))?;
+
         let mut stream = builder.build()?;
         let mut rows = Vec::new();
 
@@ -1438,5 +1469,27 @@ impl EventReader for ClickHouseReader {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_current_version() {
+        assert!(check_schema_version(Some("2")).is_ok());
+    }
+
+    #[test]
+    fn rejects_old_version() {
+        let err = check_schema_version(Some("1")).unwrap_err();
+        assert!(err.to_string().contains("migrate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_version() {
+        let err = check_schema_version(None).unwrap_err();
+        assert!(err.to_string().contains("legacy"), "{err}");
     }
 }

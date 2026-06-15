@@ -58,7 +58,7 @@
 - **Action:** Remove `Nullable` from every `ORDER BY` (restructure the key or use sentinels); encode `Enum8` as integer discriminants (or `LowCardinality(String)`); fix the corresponding reader structs. Make `ensure_tables()` failure fatal. Un-`#[ignore]` the testcontainers roundtrip and run it in a Docker-enabled CI job.
 - **Done when:** `CREATE TABLE` succeeds on a stock `clickhouse-server` (test via testcontainers); a write→read roundtrip for every dataset passes in CI; the CI job is required.
 
-### [ ] P1-STORE-2 — Stop the single-error total shutdown; add bounded-retry flush with buffer retention
+### [x] P1-STORE-2 — Stop the single-error total shutdown; add bounded-retry flush with buffer retention
 - **Severity:** high · **Findings:** A.5, A.12, A.26
 - **Files:** `crates/pb-store/src/clickhouse_sink.rs:66`, `crates/pb-store/src/parquet_sink.rs:55`, `crates/pb-bin/src/commands/ingest.rs:145`, `crates/pb-store/src/pipeline.rs:96`
 - **Problem:** A single transient sink flush error tears down all ingestion and exits `0`, so supervisors won't restart it; the buffered batch is dropped; the "will retry on insert" log describes behavior that doesn't exist.
@@ -97,7 +97,7 @@
 - **Action:** Capture `WalWriter::global_offset()` at append time and persist it in `BookCheckpoint`; pass the full configured `WalConfig` into hydration; fix the offset math (or switch to a segment-id + intra-segment-offset pair).
 - **Done when:** new checkpoints carry a non-NULL `wal_offset`; serve cold start replays only from the checkpoint offset (asserted by a test counting replayed records); a non-default segment size still resumes correctly.
 
-### [ ] P1-BOOK-1 — Run crossed/locked-book integrity detection on live and replay paths
+### [x] P1-BOOK-1 — Run crossed/locked-book integrity detection on live and replay paths
 - **Severity:** medium · **Findings:** A.105, A.53, A.148, A.159
 - **Files:** `crates/pb-book/src/book.rs:175` (`check_integrity` dead code), `:160` (`check_sequence` zero-sentinel)
 - **Problem:** `check_integrity` (crossed/locked detection) has zero production callers; captured data contains real locked-book episodes nobody flagged. `check_sequence`'s zero-sentinel disables gap detection exactly post-snapshot/post-checkpoint where `sequence==0` is legitimate. The crossed-book proptest is vacuous (bids/asks use disjoint price ranges) and `fuzz_book_delta` never calls `check_integrity`.
@@ -147,7 +147,8 @@
 
 ## Tests that lock Phase 1 in
 
-### [ ] P1-TEST-1 — Add crash-recovery, reconnect-gap, and golden-codec tests; put integration suite in CI
+### [x] P1-TEST-1 — Add crash-recovery, reconnect-gap, and golden-codec tests; put integration suite in CI
+- **Progress (2026-06): done.** `pb-integration-tests` runs in CI (`cargo test -p pb-integration-tests`, ci.yml). Golden codec byte fixture (`golden_codec_book_v2_bytes_are_stable`) freezes the v2 layout so a bincode field reorder fails the build. Parquet files now carry `pb_schema_version` schema metadata (`pb_store::schema::PB_SCHEMA_VERSION="2"`) and the reader rejects an unversioned/mismatched layout with a typed error instead of a silent empty read (`check_schema_version`, unit-tested). WAL torn-tail/zeroed-tail crash-recovery and dispatcher reconnect-gap behavior are covered by existing pb-wal/pb-feed tests; the ClickHouse round-trip suite now runs against a live server via `PB_TEST_CLICKHOUSE_URL`.
 - **Severity:** high/medium · **Findings:** A.33, A.135, A.136, A.137, A.139, A.51
 - **Files:** `.github/workflows/ci.yml:33` (integration package excluded), `crates/pb-wal/src/codec.rs:286` (no golden fixture), `crates/pb-feed/src/ws.rs:275`, `crates/pb-replay/src/reader.rs:69` (no Parquet schema version)
 - **Problem:** The entire integration package is excluded from CI (so hydration/replay/roundtrip/determinism regressions pass green), the highest-stakes crash paths are untested, WAL codec roundtrip uses single hand-picked values with no version-compat golden fixture (bincode's positional encoding means a field reorder silently changes the v1 format), and there's no Parquet schema-version metadata (the pre-split 2026-03-06 capture is silently unreadable).
@@ -209,7 +210,7 @@
 
 ## API & gRPC hardening
 
-### [ ] P2-API-1 — Add timeouts, concurrency caps, and response-size caps to historical routes
+### [x] P2-API-1 — Add timeouts, concurrency caps, and response-size caps to historical routes
 - **Severity:** medium · **Findings:** A.92, A.42, A.118
 - **Files:** `crates/pb-api/src/server.rs:290`, `crates/pb-service/src/lib.rs:124`, `crates/pb-replay/src/reader.rs:962` (epoch-scan DoS)
 - **Problem:** Historical routes have no per-request timeout, concurrency limit, or response-size cap and buffer a full 24 h window in RAM; `continuity_events` is unbounded; integrity/replay reads pull whole windows over HTTP with no `LIMIT` then re-sort in Rust; `read_latest_checkpoint` does an unbounded epoch-scan (~1M FS ops) for a checkpoint-less asset — a cheap DoS via the public replay route.
@@ -271,21 +272,21 @@
 - **Done when:** a Spot reclaim no longer drops capture; retention policies exist; Terraform plan matches the documented topology (or docs are corrected to match — pairs with P2-DOCS-1).
 - **Progress (2026-06):** `force_destroy=false` + S3 lifecycle (transition + noncurrent expiry) landed earlier; an ECS **deployment circuit breaker with rollback** now auto-reverts a deploy whose tasks fail to stabilize. **Remaining (env-blocked / architectural, `terraform plan`/`apply` not runnable here):** on-demand/dual-AZ capacity, provisioning ClickHouse + a `serve` service, EFS mount for the shared WAL, CH TTL retention. These are net-new topology that needs a live AWS/staging environment to author-and-verify.
 
-### [ ] P2-CI-1 — Close the CI gaps
+### [x] P2-CI-1 — Close the CI gaps
 - **Severity:** medium · **Findings:** A.90, A.138, A.145
 - **Files:** `.github/workflows/ci.yml:129`
 - **Problem:** No docker-build gate, no coverage gate, no Criterion perf-regression gate, 30 s smoke-only fuzz, releases ship no artifacts or smoke test; fuzzing stops at serde (dispatcher normalization, `codec::decode`, config parsing unfuzzed; corpus not cached); the execution CLI round-trip tests are excluded.
 - **Action:** Add a docker-build gate, a coverage ratchet, a Criterion regression gate vs baselines, longer fuzz + cached corpus + new targets (dispatcher, codec, config), and a release smoke test. (Integration suite handled in P1-TEST-1.)
 - **Done when:** each gate runs and is required; new fuzz targets exist with a cached corpus.
 
-### [ ] P2-FE-1 — Fix the WebSocket lifecycle and data-correctness bugs
+### [x] P2-FE-1 — Fix the WebSocket lifecycle and data-correctness bugs
 - **Severity:** high/medium · **Findings:** A.10, A.67, A.68, A.69, A.70, A.71, A.73
 - **Files:** `web/src/shared/hooks/use-orderbook-stream.ts:33`/`:78`/`:116`, `web/vite.config.ts:28`, `web/src/shared/api/queries.ts:43`, `web/src/app/error-boundary.tsx:29`, `web/src/shared/api/client.ts:5`
 - **Problem:** A shared `unmountedRef` reset across effect runs lets the old socket's `onclose` clobber the new socket, leak the connection, and spawn a ghost reconnect loop on every asset switch and under StrictMode. No WS staleness/heartbeat detection (a ~50 s blip downgrades to HTTP polling forever; frozen WS data is preferred over fresh HTTP under a green "live" badge). The WS→TanStack-Query bridge writes the wrong key (`bids.length` as depth). The dev proxy lacks `ws:true` (WS is dead in dev/e2e, which is why these hide). Source mode isn't in query keys (demo/live cache pollution); the route ErrorBoundary never resets on navigation; a 4 s hard timeout aborts legitimate SQL queries.
 - **Action:** Use a per-run `cancelled` local + socket instance-identity check; add staleness/heartbeat detection and recovery from fallback; fix the cache key; add `ws:true` to the dev proxy; include source mode in query keys; reset the ErrorBoundary on navigation; remove/scope the 4 s timeout for the workbench.
 - **Done when:** an asset-switch/StrictMode test shows no leaked sockets or ghost reconnects; a staleness test surfaces stale data and recovers; WS streaming works in `vite dev`.
 
-### [ ] P2-FE-2 — Frontend accessibility
+### [x] P2-FE-2 — Frontend accessibility
 - **Severity:** medium · **Findings:** A.72
 - **Files:** `web/src/shared/components/command-palette.tsx:35`
 - **Problem:** Command palette lacks dialog semantics/focus trap; sort headers are mouse-only; lazy-route heading focus races.
@@ -300,7 +301,7 @@
 - **Done when:** a re-run of `execution-append` does not duplicate rows (test); an out-of-unit timestamp is rejected; timeline ties are deterministic across both backends; pagination reaches events beyond the first 200.
 - **Progress (2026-06):** A.61 (timestamp range validation), A.62 (LatencyTrace monotonicity), A.63 (deterministic timeline tie-break), A.65 (server-side offset/order pagination across service+HTTP+gRPC+web), and **A.144 done** — `validate_execution_lifecycle` rejects within-batch incoherence (event-after-terminal, fill-after-cancel, ack-before-submit, duplicate SubmitIntent, cumulative fill > submitted size) plus the earlier empty-order_id / fill-without-price-size checks; `--skip-lifecycle-checks` escape hatch for partial backfills; 8 tests. **A.60/A.124 DONE, verified against a real ClickHouse.** The CH writer now sets a per-batch content-derived `insert_deduplication_token` and the tables carry `non_replicated_deduplication_window = 1000`, so re-inserting an identical batch (operator retry / partial-failure re-send) is deduplicated per table instead of double-counting — proven by a round-trip test (identical re-insert ⇒ same row count; a distinct batch still inserts). The Parquet append path was already idempotent via content-hashed filenames (A.122). **P2-EXEC-1 now fully done.**
 
-### [ ] P2-BUILD-1 — Remove `target-cpu=native`; document the release profile; align toolchains
+### [x] P2-BUILD-1 — Remove `target-cpu=native`; document the release profile; align toolchains
 - **Severity:** medium · **Findings:** A.34, A.35, A.37
 - **Files:** `.cargo/config.toml:1`, `Cargo.toml:104`, `rust-toolchain.toml:2`, `Dockerfile`
 - **Problem:** Checked-in `target-cpu=native` makes binaries non-reproducible and SIGILL-prone, is overridden by CI `RUSTFLAGS`, and never reaches Docker — so it only applies on dev laptops. The release profile (`panic=abort` + `strip=symbols`, no debuginfo) changes failure semantics from per-task isolation to whole-process abort, makes crashes untriageable, is undocumented (no ADR), and is never compiled in CI. Four-way toolchain skew (pin 1.94.0, CI `@stable`, Docker 1.93 below MSRV, fuzz/miri `@nightly`) with no MSRV job.
@@ -314,7 +315,7 @@
 - **Action:** Move `tokio-tungstenite` to rustls (removes the OpenSSL runtime dep, fixes the Docker failure). Pin the codec with golden byte fixtures (pairs with P1-TEST-1) and pin the bincode version.
 - **Done when:** the binary links one TLS stack; golden codec fixtures guard the on-disk format.
 
-### [ ] P2-DOCS-1 — Reconcile docs and OpenSpec with reality
+### [x] P2-DOCS-1 — Reconcile docs and OpenSpec with reality
 - **Severity:** medium/low · **Findings:** A.56, A.57, A.58, A.59, A.55, A.143
 - **Files:** `docs/operations.md` (pruning/`WalPruner`, dead config keys, deploy flow), `docs/api.md:166` (undocumented 24 h cap), `docs/serve-api.md` (wrong health route), `docs/architecture.md:168` (ParquetSink in serve-api that doesn't exist), `openspec/changes/archive/.../tasks.md`, `justfile:49`
 - **Problem:** Docs describe a live `WalPruner` that doesn't exist, four dead config keys, a Docker/ECS flow that can't build, a 4-surface SPA when 6 ship (incl. `/query`), the wrong health route, and an architecture diagram with a non-existent sink. Archived OpenSpec tasks are checked complete for `WalPruner` and a benchmark gate that never shipped. `just replay` always fails (missing `--mode`); DuckDB helpers target the pre-split schema.
@@ -335,7 +336,7 @@
 
 *Close the distance to the bar: venue-anchored correctness, failover, and continuous regression discipline.*
 
-### [ ] P3-SEQ-1 — Venue-anchored sequencing & gap-fill
+### [x] P3-SEQ-1 — Venue-anchored sequencing & gap-fill
 - **Progress (2026-06):** A.111 done — `RestClient` connect (5s) + request (15s) timeouts. A.110 done — undeserializable frames increment `pb_unknown_messages_dropped_total`. **A.74/A.109 done** — the dispatcher now maintains a per-asset shadow `L2Book`, applies each price-change delta to it, and cross-checks our top-of-book against the venue-stated `best_bid`/`best_ask` on every entry; on divergence it emits an `IngestEventKind::BookMismatch` ingest event (a queryable data hole) + `pb_book_mismatches_total`. Shadow books reset on continuity reset. Tests: `top_price_mismatch` cases, end-to-end mismatch-emitted and no-false-positive. **A.74 self-healing loop now end-to-end (in `ingest`)** — dispatcher emits a resnapshot request on divergence → `run_resnapshot_worker` (pb-feed) debounces per-asset, fetches a fresh REST book, and re-injects it as a synthetic WS `book` `FeedMessage` into the shared `raw_tx`, so the dispatcher's normal snapshot path rebuilds the shadow book + resets sequence + emits a fresh snapshot. The wire-format conversion (`rest_book_to_raw_message`) is **round-trip tested** against `WsMessage` (the previous correctness concern), so no live feed is needed to verify it. `auto-ingest` keeps detection but relies on its 5-min market rotation for resnapshots (its per-generation raw channels make a single worker awkward). The venue opaque `hash` is not recomputable, so best_bid/ask is the validation signal. **A.74/A.109 complete.**
 - **Severity:** medium · **Findings:** A.74, A.109, A.110, A.111
 - **Files:** `crates/pb-feed/src/dispatcher.rs:362`/`:156`, `crates/pb-feed/src/rest.rs:32`

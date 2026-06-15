@@ -62,6 +62,40 @@ mod tests {
 
     use super::*;
 
+    /// A fully-fixed record (no f64, no None-vs-Some ambiguity) for the golden
+    /// byte fixture. bincode is positional, so any field reorder/insert in the
+    /// persisted types silently changes this layout — the golden test catches it
+    /// (audit finding P1-TEST-1).
+    fn golden_book_record() -> PersistedRecord {
+        PersistedRecord::Book(BookEvent {
+            asset_id: AssetId::new("tok1"),
+            kind: BookEventKind::Delta,
+            side: Side::Bid,
+            price: FixedPrice::new(5000).unwrap(),
+            size: FixedSize::new(100_000_000),
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_000_000,
+                exchange_timestamp_us: 1_699_999_999_000_000,
+                source: DataSource::WebSocket,
+                source_event_id: Some("evt-1".to_string()),
+                source_session_id: None,
+                sequence: Some(Sequence::new(42)),
+                ingest_ordinal: Some(7),
+            },
+        })
+    }
+
+    #[test]
+    fn golden_codec_book_v2_bytes_are_stable() {
+        let encoded = encode(&golden_book_record()).unwrap();
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        // Frozen v2 on-disk layout. If a persisted-type field is reordered/added,
+        // this fails — forcing a deliberate codec version bump + migration rather
+        // than a silent format change (P1-TEST-1).
+        const GOLDEN_V2_HEX: &str = "02000000000400000000000000746f6b3101000000000000000600000000000000302e353030300a000000000000003130302e30303030303000401e18240a0600c0fd0e18240a0600000000000105000000000000006576742d3100012a00000000000000010700000000000000";
+        assert_eq!(hex, GOLDEN_V2_HEX, "WAL codec v2 layout changed");
+    }
+
     fn test_book_record() -> PersistedRecord {
         PersistedRecord::Book(BookEvent {
             asset_id: AssetId::new("tok1"),
