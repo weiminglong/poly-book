@@ -377,11 +377,11 @@ async fn cross_backend_execution_equivalence() {
 
     // --- Unfiltered query ---
     let pq_timeline = pq_service
-        .timeline(None, None, start_us, end_us, 100)
+        .timeline(None, None, start_us, end_us, 100, 0, false)
         .await
         .unwrap();
     let ch_timeline = ch_service
-        .timeline(None, None, start_us, end_us, 100)
+        .timeline(None, None, start_us, end_us, 100, 0, false)
         .await
         .unwrap();
 
@@ -415,11 +415,11 @@ async fn cross_backend_execution_equivalence() {
 
     // --- Filter by asset_id ---
     let pq_filtered = pq_service
-        .timeline(Some(&asset_id), None, start_us, end_us, 100)
+        .timeline(Some(&asset_id), None, start_us, end_us, 100, 0, false)
         .await
         .unwrap();
     let ch_filtered = ch_service
-        .timeline(Some(&asset_id), None, start_us, end_us, 100)
+        .timeline(Some(&asset_id), None, start_us, end_us, 100, 0, false)
         .await
         .unwrap();
     assert_eq!(
@@ -430,11 +430,11 @@ async fn cross_backend_execution_equivalence() {
 
     // --- With limit ---
     let pq_limited = pq_service
-        .timeline(None, None, start_us, end_us, 2)
+        .timeline(None, None, start_us, end_us, 2, 0, false)
         .await
         .unwrap();
     let ch_limited = ch_service
-        .timeline(None, None, start_us, end_us, 2)
+        .timeline(None, None, start_us, end_us, 2, 0, false)
         .await
         .unwrap();
     assert_eq!(
