@@ -45,44 +45,47 @@ ingest tokens:
 auto-ingest:
     cargo run -- auto-ingest
 
-# Replay orderbook state at a timestamp (microseconds)
-replay token at:
-    cargo run -- replay --token {{token}} --at {{at}}
+# Replay orderbook state at a timestamp (microseconds). --mode is required by the
+# CLI; default to recv_time (override with `just replay TOKEN AT exchange_time`).
+replay token at mode="recv_time":
+    cargo run -- replay --token {{token}} --at {{at}} --mode {{mode}}
 
 # Backfill REST snapshots for tokens
 backfill tokens:
     cargo run -- backfill --tokens {{tokens}}
 
 # ── Data Inspection (DuckDB) ─────────────────────────────────
+# Datasets are split into separate Parquet trees with different schemas
+# (book_events, trade_events, ingest_events, book_checkpoints,
+# replay_validations, execution_events). Inspect ONE dataset at a time — globbing
+# across all of them mixes incompatible schemas. Override the dataset, e.g.
+# `just parquet-count trade_events`.
 
 # List Parquet files under data directory
 parquet-ls:
     @find {{data_dir}} -name '*.parquet' 2>/dev/null || echo "No parquet files found"
 
-# Count total rows across all Parquet files
-parquet-count:
-    @duckdb -c "SELECT count(*) AS total_rows FROM '{{data_dir}}/**/*.parquet'"
+# Count total rows in a dataset
+parquet-count dataset="book_events":
+    @duckdb -c "SELECT count(*) AS total_rows FROM '{{data_dir}}/{{dataset}}/**/*.parquet'"
 
-# Peek at first 20 rows
-parquet-peek:
-    @duckdb -c "SELECT * FROM '{{data_dir}}/**/*.parquet' LIMIT 20"
+# Peek at first 20 rows of a dataset
+parquet-peek dataset="book_events":
+    @duckdb -c "SELECT * FROM '{{data_dir}}/{{dataset}}/**/*.parquet' LIMIT 20"
 
-# Show schema of Parquet files
-parquet-schema:
-    @duckdb -c "DESCRIBE SELECT * FROM '{{data_dir}}/**/*.parquet'"
+# Show schema of a dataset
+parquet-schema dataset="book_events":
+    @duckdb -c "DESCRIBE SELECT * FROM '{{data_dir}}/{{dataset}}/**/*.parquet'"
 
-# Summary stats: count, timestamp range, distinct assets, event types
-parquet-stats:
+# Summary stats for a dataset: row count, recv-timestamp range, distinct assets
+parquet-stats dataset="book_events":
     @duckdb -c " \
         SELECT \
             count(*) AS total_rows, \
             min(recv_timestamp_us) AS min_recv_ts, \
             max(recv_timestamp_us) AS max_recv_ts, \
-            count(DISTINCT asset_id) AS distinct_assets, \
-            sum(CASE WHEN event_type = 1 THEN 1 ELSE 0 END) AS snapshots, \
-            sum(CASE WHEN event_type = 2 THEN 1 ELSE 0 END) AS deltas, \
-            sum(CASE WHEN event_type = 3 THEN 1 ELSE 0 END) AS trades \
-        FROM '{{data_dir}}/**/*.parquet' \
+            count(DISTINCT asset_id) AS distinct_assets \
+        FROM '{{data_dir}}/{{dataset}}/**/*.parquet' \
     "
 
 # ── Metrics ───────────────────────────────────────────────────
