@@ -234,9 +234,16 @@ export function useQuerySql() {
 
   return useMutation({
     mutationFn: async (sql: string) => {
-      return postAndValidate(queryResultResponseSchema, buildUrl(base, '/api/v1/query/sql'), {
-        sql,
-      })
+      // The SQL workbench runs analytic queries that can legitimately take
+      // longer than the default snappy-read timeout. Allow up to just above the
+      // server-side query timeout so valid queries are not aborted client-side
+      // (A.73).
+      return postAndValidate(
+        queryResultResponseSchema,
+        buildUrl(base, '/api/v1/query/sql'),
+        { sql },
+        { timeoutMs: 35_000 },
+      )
     },
     onSuccess: (data) => {
       queryClient.setQueryData(['query-result'], data)

@@ -77,4 +77,8 @@ export interface ExecutionRequest {
 
 export interface RequestOptions {
   signal?: AbortSignal
+  /** Per-request timeout override in ms. Defaults to a short timeout suitable
+   *  for snappy reads; analytic endpoints (e.g. the SQL workbench) pass a longer
+   *  value so legitimate queries are not aborted prematurely (A.73). */
+  timeoutMs?: number
 }

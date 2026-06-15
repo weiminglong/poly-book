@@ -26,7 +26,7 @@ export async function fetchAndValidate<T>(
   const timeoutId = window.setTimeout(() => {
     timedOut = true
     timeoutController.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, options?.timeoutMs ?? REQUEST_TIMEOUT_MS)
 
   const abortHandler = () => timeoutController.abort()
   options?.signal?.addEventListener('abort', abortHandler, { once: true })
@@ -51,7 +51,7 @@ export async function fetchAndValidate<T>(
     return schema.parse(json)
   } catch (error) {
     if (timedOut) {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`)
+      throw new Error(`Request timed out after ${options?.timeoutMs ?? REQUEST_TIMEOUT_MS}ms`)
     }
     throw error
   } finally {
@@ -71,7 +71,7 @@ export async function postAndValidate<T>(
   const timeoutId = window.setTimeout(() => {
     timedOut = true
     timeoutController.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, options?.timeoutMs ?? REQUEST_TIMEOUT_MS)
 
   const abortHandler = () => timeoutController.abort()
   options?.signal?.addEventListener('abort', abortHandler, { once: true })
@@ -101,7 +101,7 @@ export async function postAndValidate<T>(
     return schema.parse(json)
   } catch (error) {
     if (timedOut) {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`)
+      throw new Error(`Request timed out after ${options?.timeoutMs ?? REQUEST_TIMEOUT_MS}ms`)
     }
     throw error
   } finally {
