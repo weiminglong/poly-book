@@ -196,10 +196,18 @@ fn reconstruct_book(
         );
         apply_checkpoint(&mut book, &checkpoint);
         used_checkpoint = true;
+        // Compare the checkpoint boundary in the SAME clock domain as the events.
+        // `checkpoint_timestamp_us` is an exchange-clock value (backfill sets it to
+        // the venue snapshot time), so comparing it directly against an event's
+        // recv-clock `event_ordering_ts` in RecvTime mode mixed domains and, under
+        // recv-vs-exchange skew, could skip or double-apply deltas straddling the
+        // boundary (audit P1-REPLAY-2). `checkpoint_ordering_ts` projects the
+        // checkpoint into the active replay clock domain.
+        let boundary = checkpoint_ordering_ts(&checkpoint, mode);
         window
             .book_events
             .iter()
-            .position(|event| event_ordering_ts(event, mode) > checkpoint.checkpoint_timestamp_us)
+            .position(|event| event_ordering_ts(event, mode) > boundary)
             .unwrap_or(window.book_events.len())
     } else {
         let snapshot_idx = window
@@ -410,6 +418,23 @@ fn event_ordering_ts(event: &BookEvent, mode: ReplayMode) -> u64 {
     }
 }
 
+/// Project a checkpoint's boundary timestamp into the active replay clock domain
+/// so it can be compared against `event_ordering_ts` without mixing domains.
+/// `checkpoint_timestamp_us` is the exchange-clock venue snapshot time, while the
+/// checkpoint's `provenance.recv_timestamp_us` records when it was received.
+fn checkpoint_ordering_ts(checkpoint: &BookCheckpoint, mode: ReplayMode) -> u64 {
+    match mode {
+        ReplayMode::RecvTime => checkpoint.provenance.recv_timestamp_us,
+        ReplayMode::ExchangeTime => {
+            if checkpoint.provenance.exchange_timestamp_us != 0 {
+                checkpoint.provenance.exchange_timestamp_us
+            } else {
+                checkpoint.checkpoint_timestamp_us
+            }
+        }
+    }
+}
+
 fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint) {
     let bids = checkpoint
         .bids
@@ -581,6 +606,64 @@ mod sort_tests {
     fn with_ordinal(mut event: BookEvent, ordinal: u64) -> BookEvent {
         event.provenance.ingest_ordinal = Some(ordinal);
         event
+    }
+
+    /// In RecvTime mode the checkpoint boundary must be compared in the recv
+    /// clock. A delta received *before* the checkpoint arrived (recv-clock) must
+    /// not be applied on top of it, even though its recv timestamp is after the
+    /// checkpoint's exchange-clock `checkpoint_timestamp_us` (audit P1-REPLAY-2).
+    #[test]
+    fn checkpoint_boundary_uses_recv_clock_in_recv_mode() {
+        use pb_types::event::{BookCheckpoint, MarketDataWindow, PriceLevel};
+
+        // Venue snapshot at exchange t=1000, received at recv t=2000.
+        let checkpoint = BookCheckpoint {
+            asset_id: AssetId::new("tok"),
+            checkpoint_timestamp_us: 1000,
+            provenance: EventProvenance {
+                recv_timestamp_us: 2000,
+                exchange_timestamp_us: 1000,
+                source: DataSource::RestSnapshot,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            bids: vec![PriceLevel {
+                price: FixedPrice::new(5000).unwrap(),
+                size: FixedSize::new(100),
+            }],
+            asks: vec![],
+            wal_offset: None,
+        };
+
+        // Delta received at recv t=1500 — after the checkpoint's exchange time
+        // (1000) but before it was received (2000). It predates the checkpoint in
+        // the recv clock, so RecvTime replay must NOT apply it on top.
+        let stale_delta = book_event(BookEventKind::Delta, Side::Bid, 5000, 999, 1500, 1, None);
+        let window = MarketDataWindow {
+            book_events: vec![stale_delta],
+            trade_events: vec![],
+            ingest_events: vec![],
+        };
+
+        let (book, _events, used_cp) = reconstruct_book(
+            &AssetId::new("tok"),
+            3000,
+            ReplayMode::RecvTime,
+            Some(checkpoint),
+            window,
+        )
+        .unwrap();
+
+        assert!(used_cp);
+        // The bid level keeps the checkpoint size (100), proving the pre-checkpoint
+        // delta (999) was excluded. With the old exchange-vs-recv domain mix the
+        // boundary was 1000, the delta sorted after it, and the level became 999.
+        assert_eq!(
+            book.best_bid().map(|(_, size)| size),
+            Some(FixedSize::new(100))
+        );
     }
 
     /// A same-microsecond delta that arrived *before* the snapshot (lower ingest

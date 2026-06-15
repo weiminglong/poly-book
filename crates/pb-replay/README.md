@@ -74,6 +74,12 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 - Replay never mutates live observability: a sequence gap found during
   reconstruction is recorded in the returned continuity events, not pushed to the
   live `pb_gaps_detected_total` recorder (A.152).
+- **Single clock domain at the checkpoint boundary**: `checkpoint_timestamp_us`
+  is an exchange-clock value, so the post-checkpoint cutoff projects the
+  checkpoint into the active replay clock (`checkpoint_ordering_ts`) before
+  comparing it against events — in RecvTime mode it uses the checkpoint's recv
+  timestamp. Without this, recv-vs-exchange skew could skip or double-apply deltas
+  straddling the boundary (audit P1-REPLAY-2).
 
 ## Docs to Update After Changes
 
