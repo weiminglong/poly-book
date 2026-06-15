@@ -355,6 +355,17 @@ curl http://localhost:3000/health
 # {"ready":true,"hydrated":true,"wal_lag_bytes":0,"needs_resync":false}
 ```
 
+### Alerting & Runbook
+
+Prometheus metrics are served at `/metrics` (default `:9090`). Committed alerting
+config lives in [`monitoring/`](../monitoring/):
+
+- `monitoring/alerts.yml` — Prometheus alert rules (WAL append failure, sink
+  flush failure, feed silent/stale, book mismatch, crossed book, sequence gaps,
+  unknown messages, WAL consumer lag). Load via `rule_files:` and route the
+  `critical` severity to PagerDuty/Slack through Alertmanager.
+- `monitoring/RUNBOOK.md` — one on-call action section per alert.
+
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have
 advanced past are pruned automatically by the ingest/auto-ingest process (lag-

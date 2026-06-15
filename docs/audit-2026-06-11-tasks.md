@@ -252,6 +252,7 @@
 - **Problem:** Zero gauges — no feed-staleness, WAL consumer-lag (only in `/health` JSON), WAL disk/segment count, channel depth, or `wal_append_failures`/`sink_flush_failures`; no end-to-end recv→durable latency. "Histograms" are 60 s rolling summaries (no buckets), so quantiles can't aggregate across processes and the 5-min Parquet sample expires before scrape. No `run_upkeep` task, so buckets grow unbounded if scraping stalls.
 - **Action:** Add gauges (feed staleness, WAL lag, disk/segments, channel depth) and failure counters; configure explicit histogram buckets for a recv→durable latency metric; add `run_upkeep`. Commit `monitoring/` with Prometheus alert rules (feed staleness, WAL lag, sink failure, crossed-book, disk) + dashboards + a `RUNBOOK.md`.
 - **Done when:** `/metrics` exposes the gauges and bucketed histogram; `monitoring/` alert rules exist and load; a runbook covers each alert.
+- **Progress (2026-06):** failure counters + gauges (`pb_feed_staleness_seconds`, `pb_wal_consumer_lag_bytes`, `pb_wal_append_failures_total`, `pb_sink_flush_failures_total`, `pb_crossed_books_total`, `pb_book_mismatches_total`, `pb_unknown_messages_dropped_total`) landed across this work. **`monitoring/` committed** — `alerts.yml` (9 Prometheus rules: WAL append failing, sink flush failing, feed silent, feed stale, book mismatch, crossed book, sequence gaps, unknown messages, WAL consumer lag — severity-labelled, second-scale `for:` on the data-loss class) validated well-formed + every rule cross-linked to **`RUNBOOK.md`** (one actionable section per alert). **Remaining: A.114/A.115** (explicit recv→durable latency histogram *buckets* + `run_upkeep`; current histograms are rolling summaries) and Grafana dashboards.
 
 ### [x] P2-CONF-1 — Make config fail-fast and wire (or delete) dead keys
 - **Severity:** medium · **Findings:** A.102, A.103, A.54, A.87
@@ -361,6 +362,7 @@
 - **Files:** `crates/pb-api/src/live_state.rs:258`
 - **Problem:** Gap/staleness/crossed-book conditions are computed but nothing pages, and `check_integrity` is never run live (wiring done in P1-BOOK-1; this is the alerting layer).
 - **Action:** Wire live monitors (crossed-book, stale feed, WAL lag, sink failure, REST-vs-WS divergence reconciliation) to the alerting layer from P2-OBS-1 with second-scale paging.
+- **Progress (2026-06):** all the monitored conditions now emit metrics AND have committed Prometheus alert rules in `monitoring/alerts.yml` with second-scale `for:` durations and a per-alert `monitoring/RUNBOOK.md` action — incl. REST-vs-WS divergence (BookMismatch, A.74). **Remaining:** the live deployment of Alertmanager → PagerDuty/Slack and verifying a simulated incident pages within seconds (needs a running monitoring stack).
 - **Done when:** each condition fires a test alert within seconds in a simulated incident.
 
 ### [ ] P3-CHG-1 — Change safety: replay-based regression, canary, schema evolution
