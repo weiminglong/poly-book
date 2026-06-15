@@ -85,7 +85,7 @@ async fn hydrate_from_checkpoint_and_wal() {
         max_segments: 4,
         ..pb_wal::WalConfig::default()
     };
-    let mut wal_writer = pb_wal::WalWriter::open(wal_config).unwrap();
+    let mut wal_writer = pb_wal::WalWriter::open(wal_config.clone()).unwrap();
 
     // Delta: add a new bid level at 4900.
     let delta1 = PersistedRecord::Book(BookEvent {
@@ -129,7 +129,7 @@ async fn hydrate_from_checkpoint_and_wal() {
     let result = hydration::hydrate(
         &model,
         Some(&reader),
-        Some(wal_path.as_path()),
+        Some(&wal_config),
         &[asset_id_str.to_string()],
     )
     .await;
@@ -197,7 +197,7 @@ async fn hydrate_with_no_checkpoint_tails_wal_from_beginning() {
         max_segments: 4,
         ..pb_wal::WalConfig::default()
     };
-    let mut wal_writer = pb_wal::WalWriter::open(wal_config).unwrap();
+    let mut wal_writer = pb_wal::WalWriter::open(wal_config.clone()).unwrap();
 
     // Snapshot records in WAL.
     let snap_bid = PersistedRecord::Book(BookEvent {
@@ -244,7 +244,7 @@ async fn hydrate_with_no_checkpoint_tails_wal_from_beginning() {
     let result = hydration::hydrate(
         &model,
         Some(&reader),
-        Some(wal_path.as_path()),
+        Some(&wal_config),
         &[asset_id_str.to_string()],
     )
     .await;

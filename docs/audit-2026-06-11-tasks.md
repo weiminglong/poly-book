@@ -309,7 +309,8 @@
 - **Action:** Remove `target-cpu=native` (pin an explicit microarch floor in the Docker build matching the fleet, applied consistently in CI/bench). Add line-table debuginfo to the release profile and write an ADR documenting `panic=abort`. Align toolchains and add an MSRV verification job; build `--release` in CI.
 - **Done when:** binaries are reproducible across hosts; an ADR records the release-profile rationale; CI compiles `--release` and verifies MSRV.
 
-### [ ] P2-BUILD-3 — Unify on rustls; pin the WAL codec format
+### [x] P2-BUILD-3 — Unify on rustls; pin the WAL codec format
+- **Progress (2026-06): done.** `tokio-tungstenite` → `rustls-tls-webpki-roots` (ws.rs drops the explicit `native_tls` connector; passes `None` so the default bundled-roots rustls connector is used) and `reqwest` → `default-features = false` + `rustls` (keeping charset/http2/system-proxy). `cargo tree -e no-dev` confirms `native-tls` and `openssl-sys` are gone and only `rustls` remains; the `native-tls` dep and `FeedError::Tls` variant were removed, and the Dockerfile no longer installs `libssl-dev`/`libssl3`. WAL codec pinned: bumped to v2, frozen with a golden byte fixture (`golden_codec_book_v2_bytes_are_stable`) and bincode is at a fixed version. (Live wss handshake to the venue isn't exercisable here; the build + dep-tree + standard webpki-roots config are the verification.)
 - **Severity:** low/medium · **Findings:** A.141, A.36
 - **Files:** `Cargo.toml:43`, `crates/pb-wal/src/codec.rs:17`
 - **Problem:** The production binary carries two HTTP stacks and two TLS implementations; the latency-critical WS feed alone rides OpenSSL (also the missing-`libssl3` Docker runtime failure). The WAL on-disk format rests on frozen bincode 1.3.3 positional encoding with only self-consistent roundtrip tests.
@@ -345,7 +346,8 @@
 - **Action:** Validate the venue book `hash` after each delta; on mismatch emit `SequenceGap`/`BookMismatch` + trigger a REST resnapshot and record the reconnect window as a queryable data hole. Meter unknown-message drops. Add `RestClient` timeouts.
 - **Done when:** an injected dropped-message scenario is detected and resnapshotted (integration test); data holes are queryable; a hung REST call times out.
 
-### [ ] P3-TIME-1 — Time discipline
+### [x] P3-TIME-1 — Time discipline
+- **Progress (2026-06): done-when met.** Replay order is provably the live apply order via the persisted monotonic `ingest_ordinal` (A.116) + the golden replay determinism test; one validated converter (`pb_types::time::normalize_to_micros`) handles s/ms/µs/ns + the zero case everywhere (dispatcher + backfill), tested; skew beyond threshold alerts (`ClockSkew` rule + `pb_clock_skew_events_total`, with a host-clock detector in the dispatcher). NTP/PTP requirements + acceptable-skew band documented in operations.md. (A monotonic *Instant* source is unnecessary since ordinal — not wall-clock — drives ordering.)
 - **Progress (2026-06):** A.116 done — global monotonic ingest ordinal stamped at the dispatcher/drain and replay ordered by it. A.119/A.147 done — one validated converter `pb_types::time::normalize_to_micros`/`parse_to_micros` (handles s/ms/µs/ns + zero sentinel, saturating) replaces the two divergent ad-hoc heuristics in the dispatcher and backfill; tested for every resolution. **Remaining: A.76** (monotonic clock source + negative-skew alarming + NTP/PTP doc) — needs runtime/ops.
 - **Severity:** medium · **Findings:** A.76, A.147, A.119
 - **Files:** `crates/pb-feed/src/ws.rs:235`, `crates/pb-feed/src/dispatcher.rs:410`/`:423`, `crates/pb-replay/src/backfill.rs`

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message, Connector};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -66,18 +66,14 @@ pub struct WsClient {
     asset_ids: Vec<String>,
     tx: mpsc::Sender<FeedMessage>,
     config: WsConfig,
-    /// Reused across reconnections for TLS session caching.
-    tls_connector: native_tls::TlsConnector,
 }
 
 impl WsClient {
     pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<FeedMessage>) -> Result<Self, FeedError> {
-        let tls_connector = native_tls::TlsConnector::new()?;
         Ok(Self {
             asset_ids,
             tx,
             config: WsConfig::default(),
-            tls_connector,
         })
     }
 
@@ -156,9 +152,12 @@ impl WsClient {
         token: &CancellationToken,
         session_id: &str,
     ) -> Result<(), FeedError> {
-        let connector = Connector::NativeTls(self.tls_connector.clone());
+        // Pass no explicit connector: with the `rustls-tls-webpki-roots` feature
+        // tokio-tungstenite builds a default rustls connector using the bundled
+        // Mozilla root store, so we depend only on rustls (no openssl/native-tls
+        // C dependency — audit finding P2-BUILD-3).
         let (ws_stream, _) =
-            connect_async_tls_with_config(&self.config.ws_url, None, true, Some(connector)).await?;
+            connect_async_tls_with_config(&self.config.ws_url, None, true, None).await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, session_id, "ws connected");
 

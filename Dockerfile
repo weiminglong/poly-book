@@ -11,12 +11,10 @@ RUN npx vite build
 # Must be >= the workspace MSRV (rust-version = "1.94"); rust:1.93 fails to build.
 FROM rust:1.94-slim AS builder
 
-# pb-grpc's build script needs protoc; native-tls (WS feed) needs OpenSSL dev
-# headers + pkg-config to compile.
+# pb-grpc's build script needs protoc. TLS is rustls (no OpenSSL), so no
+# libssl-dev/pkg-config are needed to compile (audit finding P2-BUILD-3).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
-    pkg-config \
-    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -31,10 +29,12 @@ RUN cargo build --release --bin poly-book
 # --- Stage 3: Final runtime image ---
 FROM debian:bookworm-slim
 
-# libssl3 is required at runtime because the binary links OpenSSL via native-tls.
+# No libssl3 at runtime: TLS is rustls with bundled webpki (Mozilla) roots, so
+# the binary neither links OpenSSL nor needs the system CA store (audit finding
+# P2-BUILD-3). ca-certificates is kept as harmless belt-and-suspenders for any
+# tooling that consults the system trust store.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /home/poly poly
 

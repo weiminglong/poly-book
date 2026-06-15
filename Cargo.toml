@@ -40,10 +40,18 @@ pb-grpc = { path = "crates/pb-grpc" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+# rustls (no openssl/native-tls C dependency) — audit finding P2-BUILD-3.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
-# HTTP
-reqwest = { version = "0.13", features = ["json"] }
+# HTTP — rustls instead of the default native-tls; keep the other defaults
+# (charset, http2, system-proxy) that `default-features = false` would drop.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }

@@ -369,6 +369,22 @@ config lives in [`monitoring/`](../monitoring/):
   staleness, WAL lag, recv→durable p50/p99, durability/storage failures,
   data-quality events, snapshots/deltas).
 
+### Time discipline (NTP/PTP)
+
+Replay ordering does **not** depend on host clock accuracy: events carry a
+process-monotonic `ingest_ordinal` stamped at ingest, and replay sorts by it, so
+the reconstructed book is deterministic regardless of wall-clock skew. The clock
+*does* matter for two things:
+
+- **Exchange-time replay** (`mode=exchange_time`) and the recv→durable latency
+  metric compare host time against venue timestamps. Run **NTP (chrony/ntpd)** on
+  every ingest host; keep offset within **±100 ms** for meaningful latency
+  figures (PTP if you need tighter). The `ClockSkew` alert fires when venue
+  timestamps run >2 s ahead of receive time — resync NTP (see RUNBOOK).
+- **Partition placement**: a wildly-wrong clock would file events into the wrong
+  hour partition; out-of-range timestamps are quarantined to `invalid_timestamp`
+  rather than silently misfiled (A.123).
+
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have
 advanced past are pruned automatically by the ingest/auto-ingest process (lag-
