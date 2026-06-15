@@ -130,7 +130,7 @@ pub async fn run(
     let mut wal_unsynced = false;
 
     loop {
-        let event = tokio::select! {
+        let mut event = tokio::select! {
             biased;
             _ = shutdown.cancelled() => break,
             _ = flush_tick.tick() => {
@@ -165,6 +165,13 @@ pub async fn run(
                 }
             },
         };
+        // Stamp the WAL offset onto checkpoints just before they are written, so
+        // a serve cold start can resume WAL tailing from the checkpoint instead
+        // of replaying the entire retained WAL (A.13/A.52 — checkpoints were
+        // always persisted with wal_offset = NULL).
+        if let pb_types::PersistedRecord::Checkpoint(ref mut checkpoint) = event {
+            checkpoint.wal_offset = Some(wal_writer.global_offset());
+        }
         // Write to WAL before fan-out to sinks. Encode failure skips the whole
         // record (both WAL and sinks) so the WAL and the storage datasets never
         // diverge; append failure is fatal — the durability backbone is gone.

@@ -94,7 +94,7 @@ pub async fn run(
         let mut wal_unsynced = false;
 
         loop {
-            let event = tokio::select! {
+            let mut event = tokio::select! {
                 biased;
                 _ = prune_tick.tick() => {
                     // Reclaim WAL segments all consumers have advanced past
@@ -139,6 +139,11 @@ pub async fn run(
                 },
             };
 
+            // Stamp the WAL offset onto checkpoints just before writing so serve
+            // can resume tailing from the checkpoint (A.13/A.52).
+            if let pb_types::PersistedRecord::Checkpoint(ref mut checkpoint) = event {
+                checkpoint.wal_offset = Some(wal_writer.global_offset());
+            }
             // WAL first, then fan-out. Encode failure drops the record from both
             // WAL and sinks (keeps them consistent); append failure is fatal.
             match pb_wal::codec::encode(&event) {
