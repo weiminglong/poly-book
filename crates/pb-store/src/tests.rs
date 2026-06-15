@@ -338,6 +338,43 @@ async fn writer_single_book_event_creates_file() {
 }
 
 #[tokio::test]
+async fn writer_different_content_same_timestamp_does_not_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    // Two book events at the same timestamp (so same asset/hour/first_ts) but
+    // different content must produce two distinct files, not silently overwrite
+    // each other (A.122).
+    let mut ev_a = make_book_event(FIXED_TS_US);
+    ev_a.price = FixedPrice::new(5000).unwrap();
+    let mut ev_b = make_book_event(FIXED_TS_US);
+    ev_b.price = FixedPrice::new(6000).unwrap();
+
+    writer
+        .write_record(PersistedRecord::Book(ev_a))
+        .await
+        .unwrap();
+    writer
+        .write_record(PersistedRecord::Book(ev_b))
+        .await
+        .unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "different content at the same timestamp must not overwrite"
+    );
+}
+
+#[tokio::test]
 async fn writer_path_includes_date_partition() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);

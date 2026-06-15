@@ -178,10 +178,6 @@ impl ParquetRecordWriter {
 
         for ((dataset, asset, hour_key), records) in &groups {
             let first_ts_us = records[0].partition_timestamp_us();
-            let path = format!(
-                "{}/{}/{}/{}_{}.parquet",
-                self.base_path, dataset, hour_key, asset, first_ts_us
-            );
 
             let batch = records_to_record_batch(records)?;
             let schema = Arc::new(schema_for_record(records[0]));
@@ -209,6 +205,22 @@ impl ParquetRecordWriter {
             let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
             writer.write(&batch)?;
             writer.close()?;
+
+            // Append a content-derived suffix so two batches that land in the
+            // same (asset, hour) bucket with the same first-record timestamp
+            // (quiet books, checkpoints, execution-append re-runs) do not
+            // silently overwrite each other (A.122). Identical content hashes to
+            // the same name, making a true retry idempotent.
+            let content_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                buf.hash(&mut hasher);
+                hasher.finish()
+            };
+            let path = format!(
+                "{}/{}/{}/{}_{}_{:016x}.parquet",
+                self.base_path, dataset, hour_key, asset, first_ts_us, content_hash
+            );
 
             let object_path = ObjectPath::from(path.as_str());
             self.store.put(&object_path, PutPayload::from(buf)).await?;

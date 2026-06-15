@@ -45,6 +45,11 @@ PersistedRecord channel
   local disk, S3, and GCS without code changes.
 - Parquet files are partitioned by event type and time window. The flush interval
   (5 minutes) balances write amplification against data freshness for replay.
+- Parquet object names are `{asset}_{first_ts}_{content_hash}.parquet`. The
+  content-hash suffix means two batches that land in the same (asset, hour) bucket
+  with the same first-record timestamp cannot silently overwrite each other;
+  identical content maps to the same name (idempotent retry). Readers list by the
+  `{asset}_` prefix, so multiple files per bucket are read transparently.
 - Parquet encoding uses explicit Zstd compression at level 3 and `DELTA_BINARY_PACKED`
   encoding on timestamp, price, size, and sequence columns for better compression ratios.
 - A pre-allocated 256 KB byte buffer avoids repeated heap allocation during Parquet writes.
