@@ -89,6 +89,14 @@ resource "aws_ecs_service" "app" {
     assign_public_ip = true
   }
 
+  # Auto-roll-back a deployment whose new tasks fail to start/stabilize, instead
+  # of leaving the service stuck on a broken task definition with no operator
+  # signal (audit finding P2-INFRA-1: no deployment circuit breaker).
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   lifecycle {
     ignore_changes = [task_definition]
   }

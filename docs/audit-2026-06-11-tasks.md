@@ -268,6 +268,7 @@
 - **Problem:** Infra is a single Fargate Spot task (routine reclaim = capture gap) with no ClickHouse, no `serve` service, no EFS, no health check, no circuit breaker — zero backing for the multi-replica WAL story. No data retention anywhere (no CH TTL, no Parquet/WAL expiry; `force_destroy=true`).
 - **Action:** Move ingest to on-demand (or dual-AZ) capacity with a health check + deployment circuit breaker; provision ClickHouse and a `serve` service; mount EFS (pairs with P1-INFRA-1); add data-retention (CH TTL, Parquet/WAL lifecycle, S3 lifecycle) and remove `force_destroy=true` (pairs with P2-SEC-3).
 - **Done when:** a Spot reclaim no longer drops capture; retention policies exist; Terraform plan matches the documented topology (or docs are corrected to match — pairs with P2-DOCS-1).
+- **Progress (2026-06):** `force_destroy=false` + S3 lifecycle (transition + noncurrent expiry) landed earlier; an ECS **deployment circuit breaker with rollback** now auto-reverts a deploy whose tasks fail to stabilize. **Remaining (env-blocked / architectural, `terraform plan`/`apply` not runnable here):** on-demand/dual-AZ capacity, provisioning ClickHouse + a `serve` service, EFS mount for the shared WAL, CH TTL retention. These are net-new topology that needs a live AWS/staging environment to author-and-verify.
 
 ### [ ] P2-CI-1 — Close the CI gaps
 - **Severity:** medium · **Findings:** A.90, A.138, A.145
