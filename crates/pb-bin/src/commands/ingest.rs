@@ -72,16 +72,13 @@ pub async fn run(
     // Open WAL writer for durable event streaming.
     // The writer is only accessed on this task's event loop so no Arc/Mutex needed.
     let wal_config = pipeline::wal_config_from_settings(&settings);
-    let mut wal_writer = match pb_wal::WalWriter::open(wal_config) {
-        Ok(w) => {
-            tracing::info!("WAL writer opened");
-            Some(w)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to open WAL writer, continuing without WAL");
-            None
-        }
-    };
+    let wal_flush_interval = std::time::Duration::from_millis(wal_config.flush_interval_ms);
+    let wal_sync_interval = std::time::Duration::from_millis(wal_config.sync_interval_ms);
+    // The WAL is the durability backbone: a failure to open it is fatal, not a
+    // "continue without WAL" warning that silently disables durability (A.129).
+    let mut wal_writer = pb_wal::WalWriter::open(wal_config)
+        .map_err(|e| anyhow::anyhow!("failed to open WAL writer: {e}"))?;
+    tracing::info!("WAL writer opened");
 
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
 
@@ -117,10 +114,37 @@ pub async fn run(
     // Drop the original sender so the channel closes when dispatcher stops.
     drop(event_tx);
 
+    // Steady-state durability cadence: flush the BufWriter frequently so a
+    // tailing serve reader sees records promptly, and fdatasync less often so
+    // the OS-crash data-loss window is bounded to ~one sync interval (A.11/A.29).
+    let mut flush_tick = tokio::time::interval(wal_flush_interval);
+    let mut sync_tick = tokio::time::interval(wal_sync_interval);
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut wal_unflushed = false;
+    let mut wal_unsynced = false;
+
     loop {
         let event = tokio::select! {
             biased;
             _ = shutdown.cancelled() => break,
+            _ = flush_tick.tick() => {
+                if wal_unflushed {
+                    wal_writer.flush()
+                        .map_err(|e| anyhow::anyhow!("WAL flush failed: {e}"))?;
+                    wal_unflushed = false;
+                }
+                continue;
+            }
+            _ = sync_tick.tick() => {
+                if wal_unsynced {
+                    wal_writer.sync()
+                        .map_err(|e| anyhow::anyhow!("WAL sync failed: {e}"))?;
+                    wal_unsynced = false;
+                    wal_unflushed = false;
+                }
+                continue;
+            }
             event = event_rx.recv() => match event {
                 Some(e) => e,
                 None => {
@@ -129,17 +153,20 @@ pub async fn run(
                 }
             },
         };
-        // Write to WAL before fan-out to sinks.
-        if let Some(ref mut wal) = wal_writer {
-            match pb_wal::codec::encode(&event) {
-                Ok(payload) => {
-                    if let Err(e) = wal.append(&payload) {
-                        tracing::warn!(error = %e, "WAL append failed");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "WAL encode failed");
-                }
+        // Write to WAL before fan-out to sinks. Encode failure skips the whole
+        // record (both WAL and sinks) so the WAL and the storage datasets never
+        // diverge; append failure is fatal — the durability backbone is gone.
+        match pb_wal::codec::encode(&event) {
+            Ok(payload) => {
+                wal_writer
+                    .append(&payload)
+                    .map_err(|e| anyhow::anyhow!("WAL append failed: {e}"))?;
+                wal_unflushed = true;
+                wal_unsynced = true;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "WAL encode failed, dropping record from both WAL and sinks");
+                continue;
             }
         }
         if !pipeline::fanout_event(event, &fanout_txs).await {
@@ -147,11 +174,10 @@ pub async fn run(
         }
     }
 
-    // Flush WAL before shutdown.
-    if let Some(ref mut wal) = wal_writer {
-        if let Err(e) = wal.flush() {
-            tracing::warn!(error = %e, "WAL flush failed during shutdown");
-        }
+    // Durably flush + fsync the WAL before shutdown so no acknowledged record
+    // is lost on a clean stop.
+    if let Err(e) = wal_writer.sync() {
+        tracing::error!(error = %e, "WAL sync failed during shutdown");
     }
 
     drop(fanout_txs);

@@ -20,12 +20,14 @@ impl WalWriter {
         let ids = segment::list_segment_ids(&config.base_path)?;
 
         let (active, next_id) = if let Some(&last_id) = ids.last() {
-            // Resume appending to the last segment.
+            // Resume appending to the last segment (recovering a torn tail).
             let seg = Segment::open_append(last_id, &config.base_path)?;
             (seg, last_id + 1)
         } else {
-            // No segments exist — create the first one.
+            // No segments exist — create the first one and fsync the directory
+            // so the new file's directory entry survives a power loss.
             let seg = Segment::create(0, &config.base_path)?;
+            segment::fsync_dir(&config.base_path)?;
             (seg, 1)
         };
 
@@ -148,10 +150,16 @@ impl WalWriter {
     }
 
     fn rotate(&mut self) -> Result<(), WalError> {
-        self.active.flush()?;
+        // Durably seal the segment we are leaving: flush + fdatasync so its
+        // records cannot be lost on a later power failure, before we move on.
+        self.active.sync()?;
         let id = self.next_segment_id;
         self.next_segment_id += 1;
         self.active = Segment::create(id, &self.config.base_path)?;
+        // fsync the directory so the new segment's directory entry is durable;
+        // otherwise a power loss right after rotation can make the freshly
+        // created segment vanish (audit finding A.29).
+        segment::fsync_dir(&self.config.base_path)?;
         info!(segment_id = id, "rotated to new WAL segment");
         Ok(())
     }

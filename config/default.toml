@@ -30,6 +30,12 @@ max_segments = 16
 max_consumer_lag_bytes = 268435456  # 256 MB
 # How often separated `serve` durably commits its live WAL reader position.
 position_commit_interval_ms = 1000
+# How often the ingest writer flushes buffered records to the OS page cache so a
+# tailing `serve` reader sees them promptly (records are read from disk).
+flush_interval_ms = 20
+# How often the ingest writer issues fdatasync. Bounds the data-loss window on
+# OS crash / power loss to roughly this interval's worth of records.
+sync_interval_ms = 200
 
 [api]
 listen_addr = "0.0.0.0:3000"

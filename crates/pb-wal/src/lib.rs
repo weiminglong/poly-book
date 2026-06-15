@@ -33,6 +33,14 @@ pub struct WalConfig {
     /// How often live readers should durably commit their consumer position
     /// during steady-state tailing. Default: 1000 ms.
     pub position_commit_interval_ms: u64,
+    /// How often the writer flushes its `BufWriter` to the OS page cache during
+    /// steady-state ingest. This bounds how stale a tailing reader can be (it
+    /// reads from disk, so unflushed records are invisible). Default: 20 ms.
+    pub flush_interval_ms: u64,
+    /// How often the writer issues `fdatasync` during steady-state ingest. This
+    /// bounds the data-loss window on OS crash / power loss to roughly this
+    /// interval's worth of records. Default: 200 ms.
+    pub sync_interval_ms: u64,
 }
 
 impl Default for WalConfig {
@@ -43,6 +51,8 @@ impl Default for WalConfig {
             max_segments: 16,
             max_consumer_lag_bytes: 256 * 1024 * 1024, // 256 MB
             position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
         }
     }
 }
@@ -289,6 +299,8 @@ mod tests {
             max_segments: 100,
             max_consumer_lag_bytes: 0,
             position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -339,6 +351,8 @@ mod tests {
             max_segments: 4,
             max_consumer_lag_bytes: 256 * 1024 * 1024,
             position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -371,6 +385,8 @@ mod tests {
             // Set a very large retention window so no segments are pruned.
             max_consumer_lag_bytes: 1024 * 1024,
             position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();
@@ -711,6 +727,72 @@ mod tests {
         assert!(reader.next().unwrap().is_none());
     }
 
+    // ---- Reader: recovers from empty-dir startup (no permanent stall) ----
+
+    #[test]
+    fn reader_recovers_when_opened_before_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..WalConfig::default()
+        };
+
+        // Open the reader on a directory with no segments yet (serve deployed
+        // before ingest). It must return None now but NOT latch into a
+        // permanent stall.
+        let mut reader = WalReader::open(config.clone(), "early-bird").unwrap();
+        assert!(reader.next().unwrap().is_none());
+
+        // Now the writer starts and appends.
+        let mut writer = WalWriter::open(config).unwrap();
+        writer.append(b"first-after-start").unwrap();
+        writer.append(b"second-after-start").unwrap();
+        writer.flush().unwrap();
+
+        // The reader must pick the records up on the next poll.
+        let r1 = reader.next().unwrap().expect("reader should recover");
+        assert_eq!(r1, b"first-after-start");
+        let r2 = reader.next().unwrap().unwrap();
+        assert_eq!(r2, b"second-after-start");
+        assert!(reader.next().unwrap().is_none());
+    }
+
+    // ---- Reader: incremental tailing of the active segment ----
+
+    #[test]
+    fn reader_tails_appended_records_incrementally() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            // Large segment so everything stays in one active segment (exercises
+            // the top-up path rather than rotation).
+            segment_size: 1024 * 1024,
+            max_segments: 4,
+            ..WalConfig::default()
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        writer.append(b"batch-1-a").unwrap();
+        writer.append(b"batch-1-b").unwrap();
+        writer.flush().unwrap();
+
+        let mut reader = WalReader::open(config, "tailer").unwrap();
+        assert_eq!(reader.next().unwrap().unwrap(), b"batch-1-a");
+        assert_eq!(reader.next().unwrap().unwrap(), b"batch-1-b");
+        // Caught up: a poll with no new data returns None and reads nothing.
+        assert!(reader.next().unwrap().is_none());
+
+        // Append more to the same active segment.
+        writer.append(b"batch-2-a").unwrap();
+        writer.flush().unwrap();
+
+        // The reader picks up only the new record.
+        assert_eq!(reader.next().unwrap().unwrap(), b"batch-2-a");
+        assert!(reader.next().unwrap().is_none());
+    }
+
     // ---- Reader: needs_resync is false for fresh reader ----
 
     #[test]
@@ -809,6 +891,8 @@ mod tests {
             max_segments: 100,
             max_consumer_lag_bytes: 0,
             position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
         };
 
         let mut writer = WalWriter::open(config.clone()).unwrap();

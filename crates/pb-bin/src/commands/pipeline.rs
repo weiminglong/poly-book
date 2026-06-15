@@ -161,12 +161,22 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
         .get_int("wal.position_commit_interval_ms")
         .unwrap_or(1_000)
         .max(1) as u64;
+    let flush_interval_ms = settings
+        .get_int("wal.flush_interval_ms")
+        .unwrap_or(20)
+        .max(1) as u64;
+    let sync_interval_ms = settings
+        .get_int("wal.sync_interval_ms")
+        .unwrap_or(200)
+        .max(1) as u64;
     pb_wal::WalConfig {
         base_path: std::path::PathBuf::from(base_path),
         segment_size: segment_size_mb * 1024 * 1024,
         max_segments,
         max_consumer_lag_bytes,
         position_commit_interval_ms,
+        flush_interval_ms,
+        sync_interval_ms,
     }
 }
 

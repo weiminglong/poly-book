@@ -134,6 +134,14 @@ impl WalReader {
                     Err(e) => return Err(e),
                 }
             } else {
+                // The current segment is not loaded — either an empty-dir
+                // startup before the writer created segment 0, or the segment
+                // was pruned out from under us. Try to (re)load before giving
+                // up so the live tail recovers instead of stalling forever
+                // (audit finding A.32).
+                if self.reload_when_unloaded()? {
+                    continue;
+                }
                 return Ok(None);
             }
         }
@@ -265,24 +273,75 @@ impl WalReader {
                 self.current_offset = 0;
                 self.load_segment(next_id)
             }
-            None => {
-                // Reload current segment to check for new data appended since last read.
-                // Compare against the previously loaded data length (not current_offset)
-                // to detect actual file growth. Using current_offset would loop forever
-                // when corruption produces a zero-length record or other Ok(None) at a
-                // position before the end of the file.
-                let path = segment::segment_path(&self.config.base_path, self.current_segment_id);
-                if path.exists() {
-                    let prev_len = self.current_data.as_ref().map_or(0, |d| d.len());
-                    let data = std::fs::read(&path).map_err(|e| WalError::io(&path, e))?;
-                    if data.len() > prev_len {
-                        self.current_data = Some(data);
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
+            // No later segment exists yet: the active segment may have grown
+            // since we last read it. Top it up incrementally.
+            None => self.top_up_current_segment(),
+        }
+    }
+
+    /// Incrementally pick up bytes appended to the current (active) segment
+    /// since it was last read.
+    ///
+    /// This stats the file first and returns `false` without reading anything
+    /// when it has not grown — so a caught-up reader polling every 50 ms does
+    /// O(0) I/O instead of re-reading the entire (up to 64 MB) segment on every
+    /// poll (audit finding A.31). When the file has grown, only the new suffix
+    /// `[prev_len, file_len)` is read and appended to the cached buffer, never
+    /// the whole file.
+    ///
+    /// Growth is compared against the previously loaded data length (not
+    /// `current_offset`) so a zero-length record or other mid-file `Ok(None)`
+    /// from corruption cannot cause an infinite reload loop.
+    fn top_up_current_segment(&mut self) -> Result<bool, WalError> {
+        let path = segment::segment_path(&self.config.base_path, self.current_segment_id);
+        let file_len = match std::fs::metadata(&path) {
+            Ok(m) => m.len(),
+            // Segment disappeared (pruned). Leave state as-is; the caller's
+            // resync detection handles the gap.
+            Err(_) => return Ok(false),
+        };
+        let prev_len = self.current_data.as_ref().map_or(0, |d| d.len()) as u64;
+        if file_len <= prev_len {
+            // Stat-only fast path: nothing new to read.
+            return Ok(false);
+        }
+
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(&path).map_err(|e| WalError::io(&path, e))?;
+        file.seek(SeekFrom::Start(prev_len))
+            .map_err(|e| WalError::io(&path, e))?;
+        let mut suffix = Vec::with_capacity((file_len - prev_len) as usize);
+        file.read_to_end(&mut suffix)
+            .map_err(|e| WalError::io(&path, e))?;
+        match self.current_data {
+            Some(ref mut d) => d.extend_from_slice(&suffix),
+            None => self.current_data = Some(suffix),
+        }
+        Ok(true)
+    }
+
+    /// Recover when `current_data` is `None`: either an empty WAL directory at
+    /// startup (the writer has not created segment 0 yet) or the current
+    /// segment was pruned. Refreshes the listing and reloads, rather than
+    /// returning `Ok(None)` forever (audit finding A.32).
+    fn reload_when_unloaded(&mut self) -> Result<bool, WalError> {
+        self.available_segments = segment::list_segment_ids(&self.config.base_path)?;
+        let path = segment::segment_path(&self.config.base_path, self.current_segment_id);
+        if path.exists() {
+            // The segment now exists (or reappeared) — load and resume.
+            return self.load_segment(self.current_segment_id);
+        }
+        // The current segment is gone. If later segments exist, jump to the
+        // earliest available one; `needs_resync()` will report the gap so the
+        // caller can re-hydrate from a checkpoint.
+        if let Some(&earliest) = self.available_segments.first() {
+            if earliest > self.current_segment_id {
+                self.current_segment_id = earliest;
+                self.current_offset = 0;
+                return self.load_segment(earliest);
             }
         }
+        Ok(false)
     }
 }
 

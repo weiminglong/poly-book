@@ -1,5 +1,7 @@
 use anyhow::Result;
 use config::Config;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -63,19 +65,95 @@ pub async fn run(
         }));
     }
 
+    // Open the WAL writer. auto-ingest is the production rotating-market mode,
+    // so it must persist to the WAL like `ingest` does — otherwise the
+    // documented ingest→serve topology has no live tail (audit finding A.75/A.98).
+    // A failure to open the durability backbone is fatal.
+    let wal_config = pipeline::wal_config_from_settings(&settings);
+    let wal_flush_interval = Duration::from_millis(wal_config.flush_interval_ms);
+    let wal_sync_interval = Duration::from_millis(wal_config.sync_interval_ms);
+    let mut wal_writer = pb_wal::WalWriter::open(wal_config)
+        .map_err(|e| anyhow::anyhow!("failed to open WAL writer: {e}"))?;
+    tracing::info!("WAL writer opened");
+
+    // Set when the drain task hits a fatal WAL error so run() can exit non-zero
+    // and the supervisor restarts us instead of limping on without durability.
+    let wal_failed = Arc::new(AtomicBool::new(false));
+
+    let drain_shutdown = shutdown.clone();
+    let drain_wal_failed = wal_failed.clone();
     let fanout_handle = tokio::spawn(async move {
+        let mut flush_tick = tokio::time::interval(wal_flush_interval);
+        let mut sync_tick = tokio::time::interval(wal_sync_interval);
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut wal_unflushed = false;
+        let mut wal_unsynced = false;
+
         loop {
-            match event_rx.recv().await {
-                Some(event) => {
-                    if !pipeline::fanout_event(event, fanout_txs.as_slice()).await {
+            let event = tokio::select! {
+                biased;
+                _ = flush_tick.tick() => {
+                    if wal_unflushed {
+                        if let Err(e) = wal_writer.flush() {
+                            tracing::error!(error = %e, "WAL flush failed — aborting ingest");
+                            drain_wal_failed.store(true, Ordering::SeqCst);
+                            drain_shutdown.cancel();
+                            break;
+                        }
+                        wal_unflushed = false;
+                    }
+                    continue;
+                }
+                _ = sync_tick.tick() => {
+                    if wal_unsynced {
+                        if let Err(e) = wal_writer.sync() {
+                            tracing::error!(error = %e, "WAL sync failed — aborting ingest");
+                            drain_wal_failed.store(true, Ordering::SeqCst);
+                            drain_shutdown.cancel();
+                            break;
+                        }
+                        wal_unsynced = false;
+                        wal_unflushed = false;
+                    }
+                    continue;
+                }
+                ev = event_rx.recv() => match ev {
+                    Some(e) => e,
+                    None => {
+                        tracing::info!("event channel closed, fan-out stopping");
                         break;
                     }
+                },
+            };
+
+            // WAL first, then fan-out. Encode failure drops the record from both
+            // WAL and sinks (keeps them consistent); append failure is fatal.
+            match pb_wal::codec::encode(&event) {
+                Ok(payload) => {
+                    if let Err(e) = wal_writer.append(&payload) {
+                        tracing::error!(error = %e, "WAL append failed — aborting ingest");
+                        drain_wal_failed.store(true, Ordering::SeqCst);
+                        drain_shutdown.cancel();
+                        break;
+                    }
+                    wal_unflushed = true;
+                    wal_unsynced = true;
                 }
-                None => {
-                    tracing::info!("event channel closed, fan-out stopping");
-                    break;
+                Err(e) => {
+                    tracing::error!(error = %e, "WAL encode failed, dropping record");
+                    continue;
                 }
             }
+
+            if !pipeline::fanout_event(event, fanout_txs.as_slice()).await {
+                break;
+            }
+        }
+
+        // Durably flush + fsync remaining buffered records on shutdown.
+        if let Err(e) = wal_writer.sync() {
+            tracing::error!(error = %e, "WAL sync failed during shutdown");
         }
     });
 
@@ -97,7 +175,7 @@ pub async fn run(
 
     let ws_config = pipeline::ws_config_from_settings(&settings);
 
-    let mut front_token: Option<CancellationToken> = None;
+    let mut front: Option<Generation> = None;
     let mut active_bucket: Option<u64> = None;
 
     tracing::info!("auto-ingest pipeline running, press Ctrl+C to stop");
@@ -160,18 +238,16 @@ pub async fn run(
         populate_registry(&slug_registry, &discovery);
         let token_ids = discovery.token_ids;
 
-        if let Some(old) = front_token.take() {
-            old.cancel();
-            tokio::task::yield_now().await;
-        }
-
+        // Subscribe to the NEW market while the OLD one keeps running, so the
+        // expiring market's final ~10 seconds are still captured instead of
+        // being dropped by an early unsubscribe (audit finding A.19/A.75).
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<pb_feed::FeedMessage>(2_048);
         let new_token = shutdown.child_token();
 
         let ws_client =
             pb_feed::WsClient::new(token_ids.clone(), raw_tx)?.with_config(ws_config.clone());
         let ws_cancel = new_token.child_token();
-        tokio::spawn(async move {
+        let ws_handle = tokio::spawn(async move {
             if let Err(e) = ws_client.run_with_token(ws_cancel).await {
                 tracing::error!(error = %e, "websocket client failed");
             }
@@ -179,23 +255,46 @@ pub async fn run(
 
         let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx.clone());
         let dispatcher_cancel = new_token.child_token();
-        tokio::spawn(async move {
+        let disp_handle = tokio::spawn(async move {
             if let Err(e) = dispatcher.run_with_token(dispatcher_cancel).await {
                 tracing::error!(error = %e, "dispatcher failed");
             }
         });
 
-        front_token = Some(new_token);
+        // Cut over the previous market only after its bucket boundary (when it
+        // actually expires), then join its tasks so they are not orphaned
+        // (audit finding A.50).
+        if let Some(old) = front.take() {
+            let wait = target_bucket.saturating_sub(current_unix_secs());
+            if wait > 0 {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                    _ = shutdown.cancelled() => {}
+                }
+            }
+            old.token.cancel();
+            pipeline::shutdown_handles(old.handles, "rotated-out feed task").await;
+        }
+
+        front = Some(Generation {
+            token: new_token,
+            handles: vec![ws_handle, disp_handle],
+        });
         active_bucket = Some(target_bucket);
         let _ = active_assets_tx.send(token_ids.clone());
         pb_metrics::record_rotation();
         tracing::info!(slug = %target_slug, tokens = ?token_ids, "rotated to new market");
+
+        if shutdown.is_cancelled() {
+            break;
+        }
     }
 
     tracing::info!("shutting down auto-ingest pipeline");
 
-    if let Some(old) = front_token.take() {
-        old.cancel();
+    if let Some(old) = front.take() {
+        old.token.cancel();
+        pipeline::shutdown_handles(old.handles, "feed task").await;
     }
     let _ = active_assets_tx.send(Vec::new());
 
@@ -210,8 +309,22 @@ pub async fn run(
         pipeline::shutdown_handles(vec![handle], "checkpoint producer").await;
     }
 
+    // If the drain task aborted on a WAL durability failure, exit non-zero so
+    // the supervisor restarts us rather than running on without persistence.
+    if wal_failed.load(Ordering::SeqCst) {
+        anyhow::bail!("auto-ingest aborted: WAL durability failure");
+    }
+
     tracing::info!("graceful shutdown complete");
     Ok(())
+}
+
+/// A single market-subscription generation: its cancellation token and the
+/// feed/dispatcher task handles, kept together so the generation can be cleanly
+/// cancelled and joined on rotation or shutdown.
+struct Generation {
+    token: CancellationToken,
+    handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(test)]
