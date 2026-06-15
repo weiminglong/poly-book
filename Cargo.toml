@@ -106,6 +106,9 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+# Trap integer overflow in release too. For a fixed-point orderbook system a
+# silent wrap is data corruption, not a performance win worth taking (A.140).
+overflow-checks = true
 
 [profile.release-full]
 inherits = "release"
@@ -114,3 +117,4 @@ lto = "fat"
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+overflow-checks = true

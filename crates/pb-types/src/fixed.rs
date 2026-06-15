@@ -6,6 +6,54 @@ use crate::error::TypesError;
 const PRICE_SCALE: u32 = 10_000;
 const SIZE_SCALE: u64 = 1_000_000;
 
+/// Parse a non-negative decimal string into an integer scaled by `10^decimals`,
+/// computed exactly with integer arithmetic — no floating point.
+///
+/// Returns `None` for: empty input, a sign or any non-digit character,
+/// scientific notation, more than `decimals` fractional digits (excess
+/// precision is rejected rather than silently rounded), or a value that
+/// overflows `u128`. Using `u128` plus checked arithmetic means the result is
+/// exact for every value representable by `FixedPrice`/`FixedSize` — the old
+/// `f64` path silently lost precision above 2^53 and saturated huge sizes to
+/// `u64::MAX` (audit findings A.82/A.125/A.155).
+fn parse_scaled_decimal(s: &str, decimals: u32) -> Option<u128> {
+    if s.is_empty() {
+        return None;
+    }
+    let (int_str, frac_str) = match s.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (s, ""),
+    };
+    // "." alone, or any non-digit (including '-', '+', 'e') is invalid.
+    if int_str.is_empty() && frac_str.is_empty() {
+        return None;
+    }
+    if !int_str.bytes().all(|b| b.is_ascii_digit()) || !frac_str.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    // Reject more fractional digits than the scale can represent exactly.
+    if frac_str.len() > decimals as usize {
+        return None;
+    }
+
+    let scale = 10u128.pow(decimals);
+    let int_val: u128 = if int_str.is_empty() {
+        0
+    } else {
+        int_str.parse().ok()?
+    };
+    let frac_digits: u128 = if frac_str.is_empty() {
+        0
+    } else {
+        frac_str.parse().ok()?
+    };
+    // Left-pad the fraction to exactly `decimals` digits, then combine.
+    let pad = decimals as usize - frac_str.len();
+    let frac_val = frac_digits.checked_mul(10u128.pow(pad as u32))?;
+    int_val.checked_mul(scale)?.checked_add(frac_val)
+}
+
 /// Write `integer_part.fraction_part` into `buf` with exactly `decimals` fraction digits.
 /// Returns the number of bytes written. Avoids heap allocation entirely.
 fn write_fixed_decimal(buf: &mut [u8], integer: u64, fraction: u64, decimals: u32) -> usize {
@@ -40,18 +88,19 @@ fn write_fixed_decimal(buf: &mut [u8], integer: u64, fraction: u64, decimals: u3
 /// Fixed-point price representation: value * 10,000.
 /// Polymarket prices are 0.00–1.00, so range is 0–10,000.
 /// 4 bytes, `Copy`, trivial `Ord`.
+///
+/// The inner field is private so the `[0, SCALE]` range invariant cannot be
+/// violated by constructing `FixedPrice(raw)` or assigning `.0` directly — an
+/// out-of-range value would serialize successfully but fail to deserialize,
+/// poisoning persisted records (audit finding A.154). Construct via [`new`],
+/// [`from_f64`], or `TryFrom<&str>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct FixedPrice(pub u32);
+pub struct FixedPrice(u32);
 
 impl FixedPrice {
     pub const ZERO: Self = Self(0);
     pub const ONE: Self = Self(PRICE_SCALE);
     pub const SCALE: u32 = PRICE_SCALE;
-
-    #[inline]
-    pub const fn new_unchecked(raw: u32) -> Self {
-        Self(raw)
-    }
 
     #[inline]
     pub fn new(raw: u32) -> Result<Self, TypesError> {
@@ -110,10 +159,15 @@ impl TryFrom<&str> for FixedPrice {
     type Error = TypesError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let v: f64 = s.parse().map_err(|_| TypesError::PriceParse {
+        let raw = parse_scaled_decimal(s, 4).ok_or_else(|| TypesError::PriceParse {
             input: s.to_string(),
         })?;
-        Self::from_f64(v)
+        if raw > PRICE_SCALE as u128 {
+            return Err(TypesError::InvalidPriceValue {
+                value: s.to_string(),
+            });
+        }
+        Ok(Self(raw as u32))
     }
 }
 
@@ -167,7 +221,15 @@ impl FixedSize {
                 input: v.to_string(),
             });
         }
-        Ok(Self((v * SIZE_SCALE as f64).round() as u64))
+        let scaled = (v * SIZE_SCALE as f64).round();
+        // `as u64` saturates on overflow; reject instead of silently clamping
+        // to u64::MAX (audit finding A.82).
+        if scaled > u64::MAX as f64 {
+            return Err(TypesError::SizeParse {
+                input: v.to_string(),
+            });
+        }
+        Ok(Self(scaled as u64))
     }
 
     #[inline]
@@ -208,10 +270,14 @@ impl TryFrom<&str> for FixedSize {
     type Error = TypesError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let v: f64 = s.parse().map_err(|_| TypesError::SizeParse {
+        let raw = parse_scaled_decimal(s, 6).ok_or_else(|| TypesError::SizeParse {
             input: s.to_string(),
         })?;
-        Self::from_f64(v)
+        // Reject sizes that overflow u64 instead of silently saturating.
+        let raw: u64 = raw.try_into().map_err(|_| TypesError::SizeParse {
+            input: s.to_string(),
+        })?;
+        Ok(Self(raw))
     }
 }
 
@@ -386,13 +452,6 @@ mod tests {
     #[test]
     fn fixed_price_new_rejects_u32_max() {
         assert!(FixedPrice::new(u32::MAX).is_err());
-    }
-
-    #[test]
-    fn fixed_price_new_unchecked_allows_any_u32() {
-        // new_unchecked bypasses validation — verify it stores raw faithfully
-        let p = FixedPrice::new_unchecked(u32::MAX);
-        assert_eq!(p.raw(), u32::MAX);
     }
 
     #[test]
@@ -595,6 +654,53 @@ mod tests {
         assert!(FixedSize::try_from("-1.0").is_err());
     }
 
+    // --- Exact integer-decimal parsing (no f64 precision loss) ---
+
+    #[test]
+    fn fixed_size_parse_is_exact_above_f64_mantissa() {
+        // 9_007_199_254_740_993 raw = 2^53 + 1, which f64 cannot represent
+        // exactly. Integer parsing must round-trip it precisely.
+        let raw = 9_007_199_254_740_993u64; // 9_007_199_254.740993 units
+        let s = FixedSize::new(raw);
+        let text = format!("{s}");
+        let parsed = FixedSize::try_from(text.as_str()).unwrap();
+        assert_eq!(
+            parsed.raw(),
+            raw,
+            "exact integer parse must not lose precision"
+        );
+    }
+
+    #[test]
+    fn fixed_size_parse_rejects_excess_precision() {
+        // 7 fractional digits exceeds the 6-decimal size scale.
+        assert!(FixedSize::try_from("1.0000001").is_err());
+    }
+
+    #[test]
+    fn fixed_price_parse_rejects_excess_precision() {
+        // 5 fractional digits exceeds the 4-decimal price scale, and used to be
+        // silently rounded.
+        assert!(FixedPrice::try_from("0.12345").is_err());
+    }
+
+    #[test]
+    fn fixed_size_parse_rejects_overflow_instead_of_saturating() {
+        // A value far beyond u64::MAX must error, not saturate to u64::MAX.
+        assert!(FixedSize::try_from("99999999999999999999.0").is_err());
+    }
+
+    #[test]
+    fn fixed_size_parse_rejects_scientific_notation() {
+        assert!(FixedSize::try_from("1e6").is_err());
+    }
+
+    #[test]
+    fn fixed_price_parse_leading_dot_and_trailing_dot() {
+        assert_eq!(FixedPrice::try_from(".5").unwrap().raw(), 5000);
+        assert_eq!(FixedPrice::try_from("1.").unwrap().raw(), 10000);
+    }
+
     #[test]
     fn fixed_size_serde_roundtrip_zero() {
         let s = FixedSize::ZERO;
@@ -731,6 +837,18 @@ mod proptests {
             let display = format!("{s}");
             let s2 = FixedSize::try_from(display.as_str()).unwrap();
             prop_assert_eq!(s, s2);
+        }
+
+        /// Exact Display→parse roundtrip across the ENTIRE u64 range, including
+        /// values above 2^53 that f64 cannot represent. This is the property the
+        /// old f64-based parser violated (A.125): the WAL codec and checkpoint
+        /// JSON both round-trip sizes through this path.
+        #[test]
+        fn fixed_size_display_parse_roundtrip_full_u64(raw in 0u64..=u64::MAX) {
+            let s = FixedSize::new(raw);
+            let display = format!("{s}");
+            let s2 = FixedSize::try_from(display.as_str()).unwrap();
+            prop_assert_eq!(s.raw(), s2.raw());
         }
 
         /// FixedPrice serde roundtrip for all valid raws including boundary values.

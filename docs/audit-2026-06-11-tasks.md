@@ -120,14 +120,14 @@
 
 ## Numerics & data integrity
 
-### [ ] P1-NUM-1 — Replace f64 string parsing with exact integer-decimal fixed-point parsing
+### [x] P1-NUM-1 — Replace f64 string parsing with exact integer-decimal fixed-point parsing
 - **Severity:** medium · **Findings:** A.82, A.125, A.155, A.66
 - **Files:** `crates/pb-types/src/fixed.rs:210`, `:170`, `:71`, `:112`
 - **Problem:** All string→fixed-point parsing routes through `f64`: it breaks serde roundtrip above 2^53 raw (and the WAL bincode codec + checkpoint JSON use exactly this serde — a direct zero-data-loss violation), silently saturates oversized sizes to `u64::MAX`, and silently rounds sub-tick digits. The same path rounds execution fill prices by up to half a tick.
 - **Action:** Parse decimals as integers (split on `.`, scale by 10^4 / 10^6, reject overflow and excess precision explicitly). Apply to price, size, and the execution append path.
 - **Done when:** a proptest asserts `parse(display(x)) == x` for all representable `FixedPrice`/`FixedSize` including values > 2^53 raw; oversized/over-precise inputs return an error instead of saturating/rounding.
 
-### [ ] P1-NUM-2 — Enforce the `FixedPrice` range invariant and enable release overflow checks
+### [x] P1-NUM-2 — Enforce the `FixedPrice` range invariant and enable release overflow checks
 - **Severity:** medium/low · **Findings:** A.154, A.140, A.146, A.149
 - **Files:** `crates/pb-types/src/fixed.rs:44` (public tuple field / `new_unchecked`), `Cargo.toml:104` (`overflow-checks` off in release), `crates/pb-book/src/book.rs:97` (unchecked `u64` running totals)
 - **Problem:** The `FixedPrice` range invariant is bypassable via the public field, and out-of-range values serialize but fail to deserialize (write-OK / read-FAIL poison). `overflow-checks` is off in release while `L2Book` totals use unchecked `u64` arithmetic reachable from feed-controlled saturated sizes — wraps silently in production, panics in debug.

@@ -9,8 +9,8 @@ the system.
 
 | Type | Description |
 |------|-------------|
-| `FixedPrice(u32)` | Price scaled by 10,000 (4 decimal places). `const fn` on `raw()`, `is_zero()`. Never use `f64`. See [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md). |
-| `FixedSize(u64)` | Size scaled by 1,000,000 (6 decimal places). `const fn` on `new()`, `raw()`, `is_zero()`. |
+| `FixedPrice` | Price scaled by 10,000 (4 decimal places); private `u32` field. `const fn` on `raw()`, `is_zero()`. Never use `f64`. See [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md). |
+| `FixedSize` | Size scaled by 1,000,000 (6 decimal places); private `u64` field. `const fn` on `new()`, `raw()`, `is_zero()`. |
 | `AssetId` | Typed newtype wrapping a string identifier for a market asset. |
 | `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
@@ -51,6 +51,15 @@ pb-types ◄── pb-feed    (wire deserialization)
 - **Zero-alloc serde**: `FixedPrice` and `FixedSize` serialize via `itoa` +
   stack buffers and deserialize via a custom `Visitor`, avoiding heap allocation
   on the hot path. Dependency: `itoa = "1"`.
+- **Exact decimal parsing**: `TryFrom<&str>` (used by serde and the WAL codec)
+  parses with integer arithmetic, not `f64`, so it is exact across the full
+  `u64` size range — no precision loss above 2^53 and no silent saturation.
+  Excess fractional precision (more than 4 price / 6 size decimals) and overflow
+  are rejected, not rounded or clamped.
+- **Invariant safety**: the `FixedPrice`/`FixedSize` inner fields are private;
+  construct via `new`, `from_f64`, or `TryFrom<&str>` so the price range
+  invariant cannot be bypassed (an out-of-range value would serialize but fail
+  to deserialize).
 - `#[inline]` on all hot-path accessors for `FixedPrice`, `FixedSize`, and
   `Sequence`.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization
