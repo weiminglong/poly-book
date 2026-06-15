@@ -17,6 +17,7 @@ to the appropriate subsystem.
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
 | `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
+| `reconcile` | Offline recovery: rebuild Parquet partitions from the durable WAL after a crash lost a buffered window. Idempotent (per-partition replace). |
 
 ## Config Layering
 
@@ -55,6 +56,11 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   continuing with a dead component or exiting 0. In `auto_ingest` the rotating
   per-market feed generations are deliberately *not* supervised this way (their
   cycling is the expected steady state and is managed via `Generation`).
+- **WAL→storage reconciliation**: `reconcile` reads the durable WAL and rebuilds
+  the Parquet partitions it covers via `ParquetRecordWriter::write_batch_replacing`
+  (per-`(dataset, asset, hour)` delete-then-write), so a storage window lost when
+  a crash dropped the in-memory Parquet buffer is recoverable from the WAL (A.27).
+  Run it offline (ingest stopped); it is idempotent.
 
 ## Docs to Update After Changes
 

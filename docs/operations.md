@@ -276,6 +276,25 @@ The `serve` process hydrates from the latest `BookCheckpoint`, replays WAL
 records from that offset, then live-tails the WAL. It can be killed and
 restarted without data loss.
 
+### Storage Recovery (`reconcile`)
+
+The Parquet sink buffers up to `storage.parquet_flush_interval_secs` (default
+300s) in memory. A crash, OOM, or SIGKILL drops that buffered window from
+Parquet — but the WAL captured the same records durably. To rebuild the lost
+storage window from the WAL:
+
+```bash
+# Stop the ingest process first (reconcile must run offline — it replaces whole
+# (dataset, asset, hour) partitions and would race a live sink).
+cargo run -- reconcile
+```
+
+`reconcile` reads the retained WAL and, for every `(dataset, asset, hour)`
+partition it covers, deletes the existing Parquet files and rewrites the complete
+partition from the WAL. It is idempotent (safe to re-run) and authoritative for
+any partition it touches. It does not commit a consumer position, so each run
+reconciles the full retained WAL. ClickHouse is not rebuilt by this command.
+
 ### Historical Backend Selection
 
 Set `api.historical_backend` to choose the query backend for replay, integrity,

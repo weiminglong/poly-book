@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use clickhouse::Client;
+use futures_util::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
@@ -213,65 +214,148 @@ impl ParquetRecordWriter {
         }
 
         for ((dataset, asset, hour_key), records) in &groups {
-            let first_ts_us = records[0].partition_timestamp_us();
-
-            let batch = records_to_record_batch(records)?;
-            let schema = Arc::new(schema_for_record(records[0]));
-            let props = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(
-                    ZstdLevel::try_new(3).expect("valid zstd level"),
-                ))
-                .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-                .set_column_encoding("recv_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding(
-                    "exchange_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
-                .set_column_encoding(
-                    "checkpoint_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
-                .set_column_encoding("event_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)
-                .build();
-
-            let mut buf = Vec::with_capacity(256 * 1024);
-            let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
-            writer.write(&batch)?;
-            writer.close()?;
-
-            // Append a content-derived suffix so two batches that land in the
-            // same (asset, hour) bucket with the same first-record timestamp
-            // (quiet books, checkpoints, execution-append re-runs) do not
-            // silently overwrite each other (A.122). Identical content hashes to
-            // the same name, making a true retry idempotent.
-            let content_hash = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                buf.hash(&mut hasher);
-                hasher.finish()
-            };
-            let path = format!(
-                "{}/{}/{}/{}_{}_{:016x}.parquet",
-                self.base_path, dataset, hour_key, asset, first_ts_us, content_hash
-            );
-
-            let object_path = ObjectPath::from(path.as_str());
-            self.store.put(&object_path, PutPayload::from(buf)).await?;
-
-            tracing::debug!(
-                dataset = %dataset,
-                asset = %asset,
-                rows = records.len(),
-                path = %path,
-                "flushed parquet file"
-            );
+            self.write_group(dataset, asset, hour_key, records).await?;
         }
 
         pb_metrics::record_storage_flush("parquet");
         pb_metrics::record_flush_duration_ms(flush_start.elapsed().as_millis() as f64);
+        Ok(())
+    }
+
+    /// Rebuild Parquet partitions from an authoritative record stream (the WAL),
+    /// so a storage window lost to a crash mid-buffer can be recovered (A.27).
+    ///
+    /// For every `(dataset, asset, hour)` group present in `records`, the existing
+    /// Parquet files for that group are deleted and replaced with the complete
+    /// group rebuilt from `records`. This makes the source stream authoritative
+    /// for each touched partition and makes re-running idempotent (a second run
+    /// deletes and rewrites byte-identical content), avoiding the duplicate-rows
+    /// hazard of merging differently-batched files into the same hour.
+    ///
+    /// Intended for **offline** recovery (ingest stopped): a concurrent live sink
+    /// writing the same partitions would race the per-group delete. `records`
+    /// should be the full set for the reconciled window (the caller accumulates
+    /// the WAL replay) so each group is written complete in one pass.
+    pub async fn write_batch_replacing(
+        &self,
+        records: &[PersistedRecord],
+    ) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut groups: HashMap<(String, String, String), Vec<&PersistedRecord>> = HashMap::new();
+        for record in records {
+            let hour_key = partition_hour_key(record.partition_timestamp_us());
+            groups
+                .entry((
+                    record.dataset_name().to_string(),
+                    record.asset_partition().to_string(),
+                    hour_key,
+                ))
+                .or_default()
+                .push(record);
+        }
+
+        for ((dataset, asset, hour_key), records) in &groups {
+            self.delete_group(dataset, asset, hour_key).await?;
+            self.write_group(dataset, asset, hour_key, records).await?;
+        }
+        Ok(())
+    }
+
+    /// Delete all existing Parquet files for one `(dataset, asset, hour)` group so
+    /// it can be rewritten authoritatively from the WAL (A.27). Files are named
+    /// `{asset}_{ts}_{hash}.parquet`, so we match on the `{asset}_` prefix within
+    /// the hour directory to avoid touching other assets in the same hour.
+    async fn delete_group(
+        &self,
+        dataset: &str,
+        asset: &str,
+        hour_key: &str,
+    ) -> Result<(), StoreError> {
+        let dir = format!("{}/{}/{}", self.base_path, dataset, hour_key);
+        let dir_path = ObjectPath::from(dir.as_str());
+        let file_prefix = format!("{asset}_");
+        let existing = self.store.list(Some(&dir_path)).collect::<Vec<_>>().await;
+        for meta in existing {
+            let meta = meta?;
+            let is_match = meta
+                .location
+                .filename()
+                .map(|name| name.starts_with(&file_prefix) && name.ends_with(".parquet"))
+                .unwrap_or(false);
+            if is_match {
+                self.store.delete(&meta.location).await?;
+                tracing::debug!(path = %meta.location, "reconcile: deleted stale parquet file");
+            }
+        }
+        Ok(())
+    }
+
+    /// Write one `(dataset, asset, hour)` group as a single content-hashed Parquet
+    /// file (shared by the live flush path and reconciliation).
+    async fn write_group(
+        &self,
+        dataset: &str,
+        asset: &str,
+        hour_key: &str,
+        records: &[&PersistedRecord],
+    ) -> Result<(), StoreError> {
+        let first_ts_us = records[0].partition_timestamp_us();
+
+        let batch = records_to_record_batch(records)?;
+        let schema = Arc::new(schema_for_record(records[0]));
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(
+                ZstdLevel::try_new(3).expect("valid zstd level"),
+            ))
+            .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+            .set_column_encoding("recv_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding(
+                "exchange_timestamp_us".into(),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_encoding(
+                "checkpoint_timestamp_us".into(),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_encoding("event_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)
+            .build();
+
+        let mut buf = Vec::with_capacity(256 * 1024);
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        // Append a content-derived suffix so two batches that land in the same
+        // (asset, hour) bucket with the same first-record timestamp (quiet books,
+        // checkpoints, execution-append re-runs) do not silently overwrite each
+        // other (A.122). Identical content hashes to the same name, making a true
+        // retry idempotent.
+        let content_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            buf.hash(&mut hasher);
+            hasher.finish()
+        };
+        let path = format!(
+            "{}/{}/{}/{}_{}_{:016x}.parquet",
+            self.base_path, dataset, hour_key, asset, first_ts_us, content_hash
+        );
+
+        let object_path = ObjectPath::from(path.as_str());
+        self.store.put(&object_path, PutPayload::from(buf)).await?;
+
+        tracing::debug!(
+            dataset = %dataset,
+            asset = %asset,
+            rows = records.len(),
+            path = %path,
+            "flushed parquet file"
+        );
         Ok(())
     }
 }

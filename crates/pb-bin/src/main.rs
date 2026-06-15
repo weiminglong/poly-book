@@ -135,6 +135,8 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
+    /// Rebuild Parquet storage partitions from the durable WAL (offline recovery)
+    Reconcile,
 }
 
 #[tokio::main]
@@ -313,6 +315,9 @@ async fn main() -> Result<()> {
         }
         Commands::Serve { tokens, metrics } => {
             commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
+        }
+        Commands::Reconcile => {
+            commands::reconcile::run(settings).await?;
         }
     }
 
@@ -555,6 +560,12 @@ mod tests {
             }
             _ => panic!("expected Serve"),
         }
+    }
+
+    #[test]
+    fn parse_reconcile() {
+        let cli = Cli::try_parse_from(["poly-book", "reconcile"]).unwrap();
+        assert!(matches!(cli.command, Commands::Reconcile));
     }
 
     // --- CLI parsing: invalid / missing args ---

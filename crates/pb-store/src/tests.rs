@@ -538,6 +538,47 @@ async fn writer_multiple_flushes_produce_separate_files() {
 }
 
 #[tokio::test]
+async fn reconcile_replaces_hour_partitions_idempotently() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    async fn count_files(store: &Arc<dyn ObjectStore>) -> usize {
+        store
+            .list(None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .count()
+    }
+
+    // Two separate live flushes for the same (asset, hour) produce two files
+    // that, read together, would double-count the window (the A.27 hazard).
+    let r1 = PersistedRecord::Book(make_book_event(FIXED_TS_US));
+    let r2 = PersistedRecord::Book(make_book_event(FIXED_TS_US + 1_000_000));
+    writer.write_record(r1.clone()).await.unwrap();
+    writer.write_record(r2.clone()).await.unwrap();
+    assert_eq!(count_files(&store).await, 2);
+
+    // Reconciling from the authoritative WAL stream rebuilds the hour as one
+    // complete file, replacing the fragmented live-sink files.
+    writer
+        .write_batch_replacing(&[r1.clone(), r2.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        count_files(&store).await,
+        1,
+        "reconcile should collapse the hour to a single authoritative file"
+    );
+
+    // Re-running is idempotent: the same single file, no duplication.
+    writer.write_batch_replacing(&[r1, r2]).await.unwrap();
+    assert_eq!(count_files(&store).await, 1, "reconcile must be idempotent");
+}
+
+#[tokio::test]
 async fn writer_all_record_types_produce_valid_parquet() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);

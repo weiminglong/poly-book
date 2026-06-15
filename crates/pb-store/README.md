@@ -54,6 +54,12 @@ PersistedRecord channel
   with the same first-record timestamp cannot silently overwrite each other;
   identical content maps to the same name (idempotent retry). Readers list by the
   `{asset}_` prefix, so multiple files per bucket are read transparently.
+- `write_batch_replacing` rebuilds partitions authoritatively from a record
+  stream (WAL replay) for crash recovery (A.27): for each `(dataset, asset, hour)`
+  group it deletes the existing `{asset}_*` files and writes the complete group,
+  so the source stream is authoritative and re-running is idempotent. It is the
+  storage half of the `reconcile` command and is meant for offline use (ingest
+  stopped) to avoid racing live-sink writes to the same partitions.
 - Parquet encoding uses explicit Zstd compression at level 3 and `DELTA_BINARY_PACKED`
   encoding on timestamp, price, size, and sequence columns for better compression ratios.
 - A pre-allocated 256 KB byte buffer avoids repeated heap allocation during Parquet writes.

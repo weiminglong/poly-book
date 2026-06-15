@@ -7,6 +7,7 @@ pub mod execution_replay;
 pub mod ingest;
 pub mod market_discovery;
 pub mod pipeline;
+pub mod reconcile;
 pub mod replay;
 pub mod serve;
 pub mod serve_api;
