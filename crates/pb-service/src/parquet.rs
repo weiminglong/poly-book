@@ -115,13 +115,17 @@ impl ExecutionService for ParquetExecutionService {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> Result<ExecutionTimeline, ServiceError> {
         let reader = ParquetReader::new(&self.base_path);
         let events = reader
             .read_execution_events(order_id, start_us, end_us)
             .await
             .map_err(map_replay_error)?;
-        Ok(build_execution_timeline(events, asset_id, limit))
+        Ok(build_execution_timeline(
+            events, asset_id, limit, offset, descending,
+        ))
     }
 }
 
@@ -387,7 +391,7 @@ mod tests {
         let service = ParquetExecutionService::new(&base_path);
         let end_ts = base_ts + 1_000_000;
         let timeline = service
-            .timeline(None, None, base_ts, end_ts, 100)
+            .timeline(None, None, base_ts, end_ts, 100, 0, false)
             .await
             .unwrap();
 
@@ -441,7 +445,7 @@ mod tests {
         let asset_id = AssetId::new("tok1");
         let end_ts = base_ts + 1_000_000;
         let timeline = service
-            .timeline(Some(&asset_id), None, base_ts, end_ts, 100)
+            .timeline(Some(&asset_id), None, base_ts, end_ts, 100, 0, false)
             .await
             .unwrap();
 
@@ -478,14 +482,15 @@ mod tests {
         let service = ParquetExecutionService::new(&base_path);
         let end_ts = base_ts + 1_000_000;
         let timeline = service
-            .timeline(None, None, base_ts, end_ts, 2)
+            .timeline(None, None, base_ts, end_ts, 2, 0, true)
             .await
             .unwrap();
 
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 2);
-        // The two most recent events are kept, not the two oldest (A.65).
-        assert_eq!(timeline.events[0].order_id, "order-3");
-        assert_eq!(timeline.events[1].order_id, "order-4");
+        // Descending (most-recent-first) paging returns the two newest events,
+        // newest first, not the two oldest (A.65).
+        assert_eq!(timeline.events[0].order_id, "order-4");
+        assert_eq!(timeline.events[1].order_id, "order-3");
     }
 }

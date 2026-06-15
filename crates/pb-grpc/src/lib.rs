@@ -200,6 +200,8 @@ impl WorkstationService for GrpcWorkstationService {
                 req.start_us,
                 req.end_us,
                 req.limit as usize,
+                req.offset as usize,
+                req.descending,
             )
             .await
             .map_err(service_error_to_status)?;
@@ -465,6 +467,8 @@ mod tests {
                 start_us: 1,
                 end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()
@@ -808,6 +812,8 @@ mod tests {
                 start_us: 1,
                 end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()
@@ -847,6 +853,8 @@ mod tests {
                 start_us: 1,
                 end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 50,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()

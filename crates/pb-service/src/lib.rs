@@ -150,6 +150,8 @@ pub(crate) fn build_execution_timeline(
     mut events: Vec<ExecutionEvent>,
     asset_id: Option<&AssetId>,
     limit: usize,
+    offset: usize,
+    descending: bool,
 ) -> ExecutionTimeline {
     if let Some(filter_id) = asset_id {
         events.retain(|e| {
@@ -161,13 +163,17 @@ pub(crate) fn build_execution_timeline(
     }
 
     let total_count = events.len();
-    // Keep the MOST RECENT `limit` events, not the oldest. Events are sorted
-    // ascending by timestamp, so truncating the front silently hid recent
-    // activity once a window exceeded the limit (A.65); total_count still
-    // reports the true total so callers know more exist.
-    if events.len() > limit {
-        events.drain(0..events.len() - limit);
+    // Events arrive sorted ascending by the execution total-order tie-break
+    // (event_timestamp_us, order_id, event_kind). To page from the most recent
+    // event (what an execution inspector usually wants) reverse first, then apply
+    // offset/limit. With `descending` + `offset = 0` this yields the most recent
+    // `limit` events; increasing `offset` pages backwards in time. Ascending
+    // order pages forward from the window start. `total_count` always reports the
+    // true filtered total so callers know more exist beyond the page (A.65).
+    if descending {
+        events.reverse();
     }
+    let events: Vec<ExecutionEvent> = events.into_iter().skip(offset).take(limit).collect();
 
     ExecutionTimeline {
         events,
@@ -339,6 +345,11 @@ pub struct ContinuityEvent {
 /// Execution event timeline queries.
 pub trait ExecutionService: Send + Sync {
     /// Query execution events over a time range with optional filters.
+    ///
+    /// `offset` skips that many events from the start of the ordered page and
+    /// `descending` selects most-recent-first ordering, together providing
+    /// server-side pagination over the full window (A.65).
+    #[allow(clippy::too_many_arguments)]
     fn timeline(
         &self,
         asset_id: Option<&AssetId>,
@@ -346,6 +357,8 @@ pub trait ExecutionService: Send + Sync {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> impl std::future::Future<Output = Result<ExecutionTimeline, ServiceError>> + Send;
 }
 
@@ -448,6 +461,8 @@ impl ExecutionService for AnyExecutionService {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> Result<ExecutionTimeline, ServiceError> {
         validate_time_window(start_us, end_us)?;
         // Clamp the caller-supplied limit so a gRPC client cannot request an
@@ -459,12 +474,16 @@ impl ExecutionService for AnyExecutionService {
         };
         match self {
             Self::Parquet(s) => {
-                s.timeline(asset_id, order_id, start_us, end_us, limit)
-                    .await
+                s.timeline(
+                    asset_id, order_id, start_us, end_us, limit, offset, descending,
+                )
+                .await
             }
             Self::ClickHouse(s) => {
-                s.timeline(asset_id, order_id, start_us, end_us, limit)
-                    .await
+                s.timeline(
+                    asset_id, order_id, start_us, end_us, limit, offset, descending,
+                )
+                .await
             }
         }
     }
@@ -747,7 +766,7 @@ mod tests {
 
     #[test]
     fn build_execution_timeline_empty() {
-        let timeline = build_execution_timeline(vec![], None, 10);
+        let timeline = build_execution_timeline(vec![], None, 10, 0, false);
         assert_eq!(timeline.total_count, 0);
         assert!(timeline.events.is_empty());
     }
@@ -755,7 +774,7 @@ mod tests {
     #[test]
     fn build_execution_timeline_no_filter() {
         let events = make_execution_events(5, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100);
+        let timeline = build_execution_timeline(events, None, 100, 0, false);
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 5);
     }
@@ -765,7 +784,7 @@ mod tests {
         let mut events = make_execution_events(3, Some("tok1"));
         events.extend(make_execution_events(2, Some("tok2")));
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
         assert_eq!(timeline.total_count, 3);
         assert!(timeline
             .events
@@ -791,14 +810,14 @@ mod tests {
             latency: pb_types::event::LatencyTrace::default(),
         });
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
         assert_eq!(timeline.total_count, 2);
     }
 
     #[test]
     fn build_execution_timeline_respects_limit() {
         let events = make_execution_events(10, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 3);
+        let timeline = build_execution_timeline(events, None, 3, 0, false);
         assert_eq!(timeline.total_count, 10);
         assert_eq!(timeline.events.len(), 3);
     }
@@ -806,7 +825,7 @@ mod tests {
     #[test]
     fn build_execution_timeline_limit_larger_than_events() {
         let events = make_execution_events(2, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100);
+        let timeline = build_execution_timeline(events, None, 100, 0, false);
         assert_eq!(timeline.total_count, 2);
         assert_eq!(timeline.events.len(), 2);
     }
@@ -816,9 +835,47 @@ mod tests {
         let mut events = make_execution_events(5, Some("tok1"));
         events.extend(make_execution_events(5, Some("tok2")));
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 2);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 2, 0, false);
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 2);
+    }
+
+    #[test]
+    fn build_execution_timeline_descending_returns_most_recent_first() {
+        // make_execution_events stamps event_timestamp_us = 1000 + i, so
+        // ascending order is 1000..1010. Descending with offset 0 must return the
+        // newest events first.
+        let events = make_execution_events(10, Some("tok1"));
+        let timeline = build_execution_timeline(events, None, 3, 0, true);
+        assert_eq!(timeline.total_count, 10);
+        let ts: Vec<u64> = timeline
+            .events
+            .iter()
+            .map(|e| e.event_timestamp_us)
+            .collect();
+        assert_eq!(ts, vec![1009, 1008, 1007]);
+    }
+
+    #[test]
+    fn build_execution_timeline_offset_pages_forward() {
+        let events = make_execution_events(10, Some("tok1"));
+        // Ascending, skip the first 4, take 3 → timestamps 1004,1005,1006.
+        let timeline = build_execution_timeline(events, None, 3, 4, false);
+        assert_eq!(timeline.total_count, 10);
+        let ts: Vec<u64> = timeline
+            .events
+            .iter()
+            .map(|e| e.event_timestamp_us)
+            .collect();
+        assert_eq!(ts, vec![1004, 1005, 1006]);
+    }
+
+    #[test]
+    fn build_execution_timeline_offset_beyond_total_is_empty() {
+        let events = make_execution_events(5, Some("tok1"));
+        let timeline = build_execution_timeline(events, None, 10, 100, false);
+        assert_eq!(timeline.total_count, 5);
+        assert!(timeline.events.is_empty());
     }
 
     // -----------------------------------------------------------------------

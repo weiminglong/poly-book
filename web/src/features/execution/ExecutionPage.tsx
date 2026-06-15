@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useExecutionTimeline } from '../../shared/api/queries'
 import {
   Badge,
@@ -13,14 +13,29 @@ import { formatPrice, formatSize, formatTimestamp, titleCase } from '../../share
 import type { ExecutionEventView, ExecutionRequest } from '../../types'
 import { LatencyWaterfall } from './components/latency-waterfall'
 
+const PAGE_SIZE = 50
+
+/** The query fields fixed at submit time; the page offset is layered on top. */
+type ExecutionBaseRequest = Pick<ExecutionRequest, 'orderId' | 'assetId' | 'startUs' | 'endUs'>
+
 export default function ExecutionPage() {
   const [orderId, setOrderId] = useState('')
   const [assetId, setAssetId] = useState('')
   const [windowMinutes, setWindowMinutes] = useState(5)
-  const [request, setRequest] = useState<ExecutionRequest | null>(null)
+  const [baseRequest, setBaseRequest] = useState<ExecutionBaseRequest | null>(null)
   const [expandedRow, setExpandedRow] = useState<number | null>(null)
   const [page, setPage] = useState(0)
-  const PAGE_SIZE = 50
+
+  // Server-side pagination: each page is fetched with its own limit+offset so
+  // events beyond the first page are reachable (previously the UI fetched a
+  // hard-coded 200 and paged client-side, hiding everything past 200 — A.65).
+  const request = useMemo<ExecutionRequest | null>(
+    () =>
+      baseRequest
+        ? { ...baseRequest, limit: PAGE_SIZE, offset: page * PAGE_SIZE, order: 'desc' }
+        : null,
+    [baseRequest, page],
+  )
 
   const execQuery = useExecutionTimeline(request)
   const result = execQuery.data
@@ -29,12 +44,11 @@ export default function ExecutionPage() {
     (e: React.FormEvent) => {
       e.preventDefault()
       const now = Date.now() * 1000
-      setRequest({
+      setBaseRequest({
         orderId: orderId || undefined,
         assetId: assetId || undefined,
         startUs: now - windowMinutes * 60_000_000,
         endUs: now,
-        limit: 200,
       })
       setPage(0)
       setExpandedRow(null)
@@ -42,11 +56,17 @@ export default function ExecutionPage() {
     [orderId, assetId, windowMinutes],
   )
 
-  const events = result?.events ?? []
+  const goToPage = useCallback((next: number) => {
+    setPage(next)
+    setExpandedRow(null)
+  }, [])
+
+  // `events` is the current server-side page (≤ PAGE_SIZE); totals come from the
+  // server's full count so pagination spans the entire window.
+  const pagedEvents = result?.events ?? []
+  const totalCount = result?.total_count ?? 0
   const pageStart = page * PAGE_SIZE
-  const pageEnd = pageStart + PAGE_SIZE
-  const pagedEvents = events.slice(pageStart, pageEnd)
-  const totalPages = Math.ceil(events.length / PAGE_SIZE)
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
 
   return (
     <div className="grid gap-[var(--density-gap)]">
@@ -104,10 +124,14 @@ export default function ExecutionPage() {
       {result ? (
         <>
           <div className="grid grid-cols-2 gap-[var(--density-gap-sm)]">
-            <MetricCard label="Total events" value={String(result.total_count)} />
+            <MetricCard label="Total events" value={String(totalCount)} />
             <MetricCard
               label="Showing"
-              value={`${pageStart + 1}–${Math.min(pageEnd, events.length)} of ${events.length}`}
+              value={
+                totalCount === 0
+                  ? '0 of 0'
+                  : `${pageStart + 1}–${pageStart + pagedEvents.length} of ${totalCount} (newest first)`
+              }
             />
           </div>
 
@@ -158,7 +182,7 @@ export default function ExecutionPage() {
               </table>
             </div>
 
-            {/* Pagination */}
+            {/* Pagination (server-side: each page is a fresh fetch) */}
             {totalPages > 1 && (
               <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
                 <span>
@@ -168,16 +192,16 @@ export default function ExecutionPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setPage((p) => p - 1)}
-                    disabled={page === 0}
+                    onClick={() => goToPage(page - 1)}
+                    disabled={page === 0 || execQuery.isFetching}
                   >
                     Previous
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setPage((p) => p + 1)}
-                    disabled={page >= totalPages - 1}
+                    onClick={() => goToPage(page + 1)}
+                    disabled={page >= totalPages - 1 || execQuery.isFetching}
                   >
                     Next
                   </Button>

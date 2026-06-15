@@ -202,13 +202,23 @@ Query params:
   - optional
   - defaults to `100`
   - must be between `1` and `1000`
+- `order`
+  - optional; `desc` (default) returns most-recent-first, `asc` returns
+    chronological order; any other value returns `400`
+- `offset`
+  - optional; defaults to `0`
+  - skips that many events from the start of the ordered page, enabling
+    server-side pagination over the whole window (use with `limit` + `total_count`)
 
 Returns:
 
-- execution events ordered by timestamp
+- a page of execution events in the requested order (`desc` by default)
 - each event includes kind, side, price, size, status, reason, and latency
   trace fields
-- total count (before limit truncation)
+- `total_count`: the full filtered total **before** `limit`/`offset` are applied,
+  so a client knows how many pages exist
+- the same window cap, result-limit clamp, `offset`, and `descending` paging are
+  available on the gRPC `ExecutionTimeline` RPC
 
 ### `WS /api/v1/streams/orderbook`
 

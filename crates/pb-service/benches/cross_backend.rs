@@ -313,7 +313,7 @@ fn bench_execution(c: &mut Criterion, setup: &SetupResult) {
         b.iter(|| {
             rt.block_on(async {
                 let _ = service
-                    .timeline(Some(&asset_id), None, start_us, end_us, 100)
+                    .timeline(Some(&asset_id), None, start_us, end_us, 100, 0, true)
                     .await;
             });
         });
@@ -324,7 +324,7 @@ fn bench_execution(c: &mut Criterion, setup: &SetupResult) {
         b.iter(|| {
             rt.block_on(async {
                 let _ = service
-                    .timeline(Some(&asset_id), None, start_us, end_us, 100)
+                    .timeline(Some(&asset_id), None, start_us, end_us, 100, 0, true)
                     .await;
             });
         });

@@ -81,6 +81,10 @@ struct ExecutionQuery {
     start_us: u64,
     end_us: u64,
     limit: Option<usize>,
+    /// Server-side pagination offset into the ordered result set (A.65).
+    offset: Option<usize>,
+    /// Result ordering: `desc` (default, most recent first) or `asc`.
+    order: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +442,18 @@ async fn execution_orders(
             "limit must be between 1 and {EXECUTION_MAX_LIMIT}"
         )));
     }
+    let offset = query.offset.unwrap_or(0);
+    // Default to most-recent-first, which is what an execution inspector usually
+    // wants; `order=asc` pages forward from the window start (A.65).
+    let descending = match query.order.as_deref() {
+        None | Some("desc") => true,
+        Some("asc") => false,
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "order must be 'asc' or 'desc', got '{other}'"
+            )));
+        }
+    };
 
     let asset_id = query
         .asset_id
@@ -452,6 +468,8 @@ async fn execution_orders(
             query.start_us,
             query.end_us,
             limit,
+            offset,
+            descending,
         )
         .await?;
 
@@ -1072,11 +1090,12 @@ mod tests {
 
         let app = router(test_state(base_path).await);
         let end_ts = base_ts + 1_000_000;
+        // order=asc to assert chronological ordering explicitly.
         let response = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}"
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&order=asc"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -1091,6 +1110,93 @@ mod tests {
         assert_eq!(timeline.events[0].order_id, "order-1");
         assert_eq!(timeline.events[0].kind, "submit_intent");
         assert_eq!(timeline.events[1].kind, "exchange_ack");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_defaults_to_most_recent_first_and_paginates() {
+        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        let records: Vec<PersistedRecord> = (0..5)
+            .map(|i| {
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts + i * 10,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: format!("order-{i}"),
+                    client_order_id: None,
+                    venue_order_id: None,
+                    kind: ExecutionEventKind::SubmitIntent,
+                    side: Some(Side::Bid),
+                    price: None,
+                    size: None,
+                    status: None,
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                })
+            })
+            .collect();
+        writer.write_batch(&records).await.unwrap();
+
+        let state = test_state(base_path).await;
+        let end_ts = base_ts + 1_000_000;
+
+        // Default order (desc) + limit 2 → the two most recent, newest first.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page1: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(page1.total_count, 5);
+        assert_eq!(page1.events.len(), 2);
+        assert_eq!(page1.events[0].order_id, "order-4");
+        assert_eq!(page1.events[1].order_id, "order-3");
+
+        // Next page via offset=2 → the next two most recent.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2&offset=2"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page2: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(page2.total_count, 5);
+        assert_eq!(page2.events.len(), 2);
+        assert_eq!(page2.events[0].order_id, "order-2");
+        assert_eq!(page2.events[1].order_id, "order-1");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_rejects_invalid_order_param() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/execution/orders?start_us=1&end_us=2&order=sideways")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

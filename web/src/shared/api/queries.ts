@@ -47,7 +47,16 @@ export const queryKeys = {
   replay: (req: ReplayRequest) => ['replay', req.assetId, req.atUs, req.mode, req.depth] as const,
   integrity: (req: IntegrityRequest) => ['integrity', req.assetId, req.startUs, req.endUs] as const,
   execution: (req: ExecutionRequest) =>
-    ['execution', req.orderId, req.assetId, req.startUs, req.endUs, req.limit] as const,
+    [
+      'execution',
+      req.orderId,
+      req.assetId,
+      req.startUs,
+      req.endUs,
+      req.limit,
+      req.offset,
+      req.order,
+    ] as const,
   datasets: ['datasets'] as const,
 }
 
@@ -199,6 +208,8 @@ export function useExecutionTimeline(
           if (request.orderId) params.order_id = request.orderId
           if (request.assetId) params.asset_id = request.assetId
           if (request.limit !== undefined) params.limit = String(request.limit)
+          if (request.offset !== undefined) params.offset = String(request.offset)
+          if (request.order !== undefined) params.order = request.order
           return fetchAndValidate(
             executionTimelineResponseSchema,
             buildUrl(base, '/api/v1/execution/orders', params),

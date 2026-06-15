@@ -46,6 +46,10 @@ listen_addr = "0.0.0.0:50051"
   chokepoint), so gRPC inherits the same 24h window cap and result-limit clamp as
   HTTP — a hostile far-future `end_us` can no longer drive `hour_paths` into
   billions of iterations and OOM the process.
+- `ExecutionTimelineRequest` carries `offset` and `descending` fields for
+  server-side pagination (mirrors HTTP `offset`/`order`), so callers can page
+  through the full window instead of being capped at the first/last `limit` events
+  (A.65).
 - Proto definitions live in `proto/workstation.proto`
 
 ## Docs to Update After Changes

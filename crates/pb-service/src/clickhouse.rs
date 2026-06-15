@@ -121,12 +121,16 @@ impl ExecutionService for ClickHouseExecutionService {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> Result<ExecutionTimeline, ServiceError> {
         let reader = ClickHouseReader::new(&self.url, &self.database);
         let events = reader
             .read_execution_events(order_id, start_us, end_us)
             .await
             .map_err(map_replay_error)?;
-        Ok(build_execution_timeline(events, asset_id, limit))
+        Ok(build_execution_timeline(
+            events, asset_id, limit, offset, descending,
+        ))
     }
 }

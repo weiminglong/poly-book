@@ -73,6 +73,10 @@ export interface ExecutionRequest {
   startUs: number
   endUs: number
   limit?: number
+  /** Pagination offset into the ordered result set (A.65). */
+  offset?: number
+  /** Result ordering: 'desc' (most recent first, default) or 'asc'. */
+  order?: 'asc' | 'desc'
 }
 
 export interface RequestOptions {
