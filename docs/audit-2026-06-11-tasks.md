@@ -234,7 +234,7 @@
 - **Action:** Map internal errors to opaque client messages + log server-side with a correlation id; split `/health/live` and `/health/ready` with correct status codes; make gRPC bind failure fatal and log after a successful bind.
 - **Done when:** a forced internal error returns no internals and is logged; `/health/ready` returns non-200 until hydrated; a gRPC bind failure exits non-zero.
 
-### [ ] P2-GRPC-1 — Move input validation into pb-service so gRPC can't bypass it
+### [x] P2-GRPC-1 — Move input validation into pb-service so gRPC can't bypass it
 - **Severity:** high (impact) · **Findings:** A.22, A.64
 - **Files:** `crates/pb-grpc/src/lib.rs:107`, `:187`
 - **Problem:** gRPC RPCs bypass every HTTP-layer guard: a far-future `end_us` drives `hour_paths` into billions of iterations (remote OOM); `limit` is unclamped; `ExecutionTimeline` buffers the whole window.

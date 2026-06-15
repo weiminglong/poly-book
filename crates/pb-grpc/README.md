@@ -42,6 +42,10 @@ listen_addr = "0.0.0.0:50051"
 - `start_grpc_server` binds the listener up front and returns a bind error to the
   caller (which fails fast), instead of logging "bound" and swallowing the failure
   inside the serve task.
+- Time-window and limit validation lives in `pb-service` (the enum-dispatch
+  chokepoint), so gRPC inherits the same 24h window cap and result-limit clamp as
+  HTTP — a hostile far-future `end_us` can no longer drive `hour_paths` into
+  billions of iterations and OOM the process.
 - Proto definitions live in `proto/workstation.proto`
 
 ## Docs to Update After Changes

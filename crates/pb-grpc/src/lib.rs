@@ -462,8 +462,8 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: None,
                 order_id: None,
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
             })
             .await
@@ -805,8 +805,8 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: Some("test-asset".into()),
                 order_id: None,
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
             })
             .await
@@ -844,8 +844,8 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: None,
                 order_id: Some("order-xyz".into()),
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 50,
             })
             .await

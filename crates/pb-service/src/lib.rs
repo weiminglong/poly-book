@@ -351,6 +351,35 @@ pub struct ExecutionTimeline {
 }
 
 // ---------------------------------------------------------------------------
+// Shared request validation (enforced for ALL callers — HTTP and gRPC)
+// ---------------------------------------------------------------------------
+
+/// Maximum queryable time window. Bounds work (and `hour_paths` iteration) so a
+/// hostile `end_us` cannot drive billions of iterations / OOM the process. This
+/// lives in the service layer rather than the HTTP handler so gRPC inherits it
+/// too (audit findings A.22/A.64).
+pub const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
+
+/// Maximum number of execution events returned in a single timeline query.
+pub const MAX_EXECUTION_LIMIT: usize = 10_000;
+
+/// Validate a `[start_us, end_us)` query window.
+pub fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ServiceError> {
+    if start_us >= end_us {
+        return Err(ServiceError::InvalidParams(
+            "start_us must be less than end_us".to_string(),
+        ));
+    }
+    if end_us - start_us > MAX_QUERY_WINDOW_US {
+        return Err(ServiceError::InvalidParams(format!(
+            "time window exceeds maximum of {} hours",
+            MAX_QUERY_WINDOW_US / 3_600_000_000
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Backend dispatch enums (enum-based polymorphism for non-dyn traits)
 // ---------------------------------------------------------------------------
 
@@ -390,6 +419,7 @@ impl IntegrityService for AnyIntegrityService {
         start_us: u64,
         end_us: u64,
     ) -> Result<IntegritySummary, ServiceError> {
+        validate_time_window(start_us, end_us)?;
         match self {
             Self::Parquet(s) => s.summary(asset_id, start_us, end_us).await,
             Self::ClickHouse(s) => s.summary(asset_id, start_us, end_us).await,
@@ -413,6 +443,14 @@ impl ExecutionService for AnyExecutionService {
         end_us: u64,
         limit: usize,
     ) -> Result<ExecutionTimeline, ServiceError> {
+        validate_time_window(start_us, end_us)?;
+        // Clamp the caller-supplied limit so a gRPC client cannot request an
+        // unbounded result set (A.64). 0 is treated as "use the max".
+        let limit = if limit == 0 {
+            MAX_EXECUTION_LIMIT
+        } else {
+            limit.min(MAX_EXECUTION_LIMIT)
+        };
         match self {
             Self::Parquet(s) => {
                 s.timeline(asset_id, order_id, start_us, end_us, limit)
@@ -430,6 +468,25 @@ impl ExecutionService for AnyExecutionService {
 mod tests {
     use super::*;
     use pb_types::event::{DataSource, EventProvenance, IngestEventKind};
+
+    // -----------------------------------------------------------------------
+    // validate_time_window
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_time_window_accepts_valid_range() {
+        assert!(validate_time_window(1, 1 + MAX_QUERY_WINDOW_US).is_ok());
+        assert!(validate_time_window(1_000, 2_000).is_ok());
+    }
+
+    #[test]
+    fn validate_time_window_rejects_inverted_and_oversized() {
+        assert!(validate_time_window(5, 5).is_err());
+        assert!(validate_time_window(10, 5).is_err());
+        // A far-future end_us (the OOM vector) must be rejected.
+        assert!(validate_time_window(0, u64::MAX).is_err());
+        assert!(validate_time_window(0, MAX_QUERY_WINDOW_US + 1).is_err());
+    }
 
     // -----------------------------------------------------------------------
     // map_replay_error
