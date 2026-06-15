@@ -211,6 +211,8 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
+- `promtool check rules` + `promtool test rules` — Prometheus alert-rule
+  validation and offline incident unit tests (`monitoring` job)
 - Web CI — `eslint`, `tsc -b`, `vitest run`, `vite build` in `web/`
 - Fuzz smoke test — `fuzz_wal_corruption` and `fuzz_book_delta` (30s each, nightly)
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
@@ -445,6 +447,13 @@ config lives in [`monitoring/`](../monitoring/):
 - `monitoring/grafana-dashboard.json` — importable dashboard (message rate, feed
   staleness, WAL lag, recv→durable p50/p99, durability/storage failures,
   data-quality events, snapshots/deltas).
+- `monitoring/alerts_test.yml` — `promtool` rule unit tests that simulate
+  incidents offline (e.g. WAL append failing, silent/stale feed, crossed book,
+  WAL lag) and assert the matching alert fires. The CI `monitoring` job runs both
+  `promtool check rules monitoring/alerts.yml` and
+  `promtool test rules monitoring/alerts_test.yml`, so rule rot is caught without
+  a live Prometheus. (Live PagerDuty paging-within-seconds still needs a running
+  Alertmanager.)
 
 ### Time discipline (NTP/PTP)
 

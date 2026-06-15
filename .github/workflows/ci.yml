@@ -75,6 +75,28 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  monitoring:
+    name: Monitoring Rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # Validate the Prometheus alert rules parse (PromQL + structure) and that a
+      # simulated incident fires each alert (offline rule unit tests). Catches
+      # alert-rule rot without needing a live Prometheus/Alertmanager (audit
+      # P3-MON-1).
+      - name: Install promtool
+        env:
+          PROM_VERSION: "3.1.0"
+        run: |
+          curl -fsSL -o /tmp/prom.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          tar xzf /tmp/prom.tar.gz -C /tmp
+          echo "/tmp/prometheus-${PROM_VERSION}.linux-amd64" >> "$GITHUB_PATH"
+      - name: Check alert rules
+        run: promtool check rules monitoring/alerts.yml
+      - name: Test alert rules (simulated incidents)
+        run: promtool test rules monitoring/alerts_test.yml
+
   web:
     name: Web (lint, typecheck, test, build)
     runs-on: ubuntu-latest

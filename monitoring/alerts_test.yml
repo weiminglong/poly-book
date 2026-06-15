@@ -1,0 +1,115 @@
+# promtool rule unit tests for alerts.yml (audit P3-MON-1).
+#
+# Run: promtool test rules monitoring/alerts_test.yml
+#
+# These simulate incidents offline by feeding synthetic series and asserting the
+# corresponding alert fires (and that a healthy signal does NOT fire). This is the
+# "a simulated incident fires the alert" half of P3-MON-1 that does not need a
+# live Prometheus/Alertmanager; live PagerDuty paging-within-seconds still needs a
+# running stack.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- Data-loss class (critical) ---
+  # 30s interval so the increase()[1m] window always holds >=2 samples.
+  - interval: 30s
+    name: WAL append failures page immediately
+    input_series:
+      - series: 'pb_wal_append_failures_total{instance="ingest-1"}'
+        values: "0 0 1 2 3 4 5 6"
+    alert_rule_test:
+      # Healthy prefix: counter flat at 0, no increase, no alert.
+      - eval_time: 30s
+        alertname: WalAppendFailing
+        exp_alerts: []
+      # Incident: the counter is climbing, increase[1m] > 0, for:0s -> fires.
+      - eval_time: 3m
+        alertname: WalAppendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: ingest-1
+            exp_annotations:
+              summary: "WAL append is failing on ingest-1"
+              description: "The write-ahead log — the durability backbone — failed to append. Records are being lost. Almost always disk-full or a permissions/IO error on the WAL volume."
+              runbook: monitoring/RUNBOOK.md#walappendfailing
+
+  - interval: 1m
+    name: Silent feed pages
+    input_series:
+      # A flat counter means rate == 0: no messages are being received.
+      - series: 'pb_messages_received_total{instance="ingest-1"}'
+        values: "100 100 100 100 100 100"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FeedSilent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: ingest-1
+            exp_annotations:
+              summary: "No WebSocket messages received for 2m on ingest-1"
+              description: "The feed has gone silent — either the venue WS is down or the client is stuck. Every second of silence is a capture gap."
+              runbook: monitoring/RUNBOOK.md#feedsilent
+
+  # --- Data-quality class (warning/info) ---
+  - interval: 1m
+    name: Stale feed warns
+    input_series:
+      - series: 'pb_feed_staleness_seconds{instance="ingest-1"}'
+        values: "2 2 20 20 20 20"
+    alert_rule_test:
+      # Below threshold early: no alert.
+      - eval_time: 1m
+        alertname: FeedStale
+        exp_alerts: []
+      # Sustained above 15s past the for:5s window: fires.
+      - eval_time: 5m
+        alertname: FeedStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: ingest-1
+            exp_annotations:
+              summary: "Feed staleness 20s on ingest-1"
+              description: "Time since the last applied update exceeds the staleness threshold. Sustained staleness during market hours indicates a stalled feed."
+              runbook: monitoring/RUNBOOK.md#feedstale
+
+  - interval: 1m
+    name: Crossed book warns
+    input_series:
+      - series: 'pb_crossed_books_total{instance="ingest-1"}'
+        values: "0 0 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrossedBook
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: ingest-1
+            exp_annotations:
+              summary: "Crossed/locked book detected (best_bid >= best_ask)"
+              description: "The live or replayed book crossed. Usually a missed delta or a stale-vs-fresh ordering problem; cross-check with BookMismatch."
+              runbook: monitoring/RUNBOOK.md#crossedbook
+
+  # --- Backpressure class (warning) ---
+  - interval: 1m
+    name: WAL consumer lag warns after sustained breach
+    input_series:
+      # 300 MB > 256 MB threshold, sustained beyond the for:1m window.
+      - series: 'pb_wal_consumer_lag_bytes{instance="serve-1"}'
+        values: "300000000 300000000 300000000 300000000"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WalConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: serve-1
+            exp_annotations:
+              summary: "WAL consumer lag 286.1MiB on serve-1"
+              description: "A WAL consumer (serve replica) is lagging beyond the retention window; if it falls behind pruning it will need a resync/re-hydrate."
+              runbook: monitoring/RUNBOOK.md#walconsumerlaghigh

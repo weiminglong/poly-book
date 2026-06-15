@@ -129,6 +129,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `clippy` — `cargo clippy --all-targets -- -D warnings`
 - `fmt` — `cargo fmt --all -- --check`
 - `audit` — rustsec dependency vulnerability scan
+- `monitoring` — `promtool check rules` + `promtool test rules` (alert-rule syntax + offline incident unit tests)
 - `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
 - `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta); additional local target `fuzz_query_guard`
