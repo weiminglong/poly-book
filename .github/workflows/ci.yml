@@ -31,6 +31,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-protobuf
       - run: cargo test --workspace --exclude pb-integration-tests
+      # Integration suite (A.135). The ClickHouse-backed cases are #[ignore]d and
+      # skipped here; the Parquet/hydration/replay roundtrips run.
+      - run: cargo test -p pb-integration-tests
 
   clippy:
     name: Clippy
@@ -126,10 +129,30 @@ jobs:
         run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
       - name: Fuzz book delta (30s)
         run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
-      # fuzz_query_guard removed from CI — the sanitizer/inject_limit interaction
-      # has multiple edge cases (unclosed quotes, trailing comments, embedded
-      # semicolons with quoted content) that need a thorough query guard rewrite.
-      # Run locally: cargo +nightly fuzz run fuzz_query_guard
+      # Re-enabled after the query-guard hardening (A.89/P2-SEC-1): identifier
+      # blocklist + server-side readonly/limit enforcement.
+      - name: Fuzz query guard (30s)
+        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
+
+  release-build:
+    name: Release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-protobuf
+      # Compile the release profile (panic=abort, overflow-checks, LTO) so
+      # release-only breakage surfaces in CI, not at deploy time (A.35/A.90).
+      - run: cargo build --release --bin poly-book
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Verify the production image actually builds (A.2/A.55/A.90).
+      - run: docker build -t poly-book:ci .
 
   miri:
     name: Miri (undefined behavior)
