@@ -332,6 +332,7 @@
 *Close the distance to the bar: venue-anchored correctness, failover, and continuous regression discipline.*
 
 ### [ ] P3-SEQ-1 — Venue-anchored sequencing & gap-fill
+- **Progress (2026-06):** A.111 done — `RestClient` has connect (5s) + request (15s) timeouts. A.110 done — frames that deserialize to no known message type now increment `pb_unknown_messages_dropped_total` instead of vanishing at debug (covered by the existing 8 drop-path dispatch tests). **Remaining: A.74/A.109** (validate the venue book `hash`/`best_bid`/`best_ask` after each delta → emit `BookMismatch` + REST resnapshot, mark the window a queryable data hole) — needs per-asset book-state tracking in the dispatcher and the venue's opaque hash algorithm, so it is a larger ingest-correctness feature rather than a contained fix.
 - **Severity:** medium · **Findings:** A.74, A.109, A.110, A.111
 - **Files:** `crates/pb-feed/src/dispatcher.rs:362`/`:156`, `crates/pb-feed/src/rest.rs:32`
 - **Problem:** Sequences are locally synthesized (gap-free by construction), so `SequenceGap`/`record_gap_detected()` are dead at ingest and silent WS loss is undetectable; the venue `hash`/`best_bid`/`best_ask` fields are parsed but never validated; unknown messages are dropped at debug with no metric; `RestClient` has no HTTP timeouts.

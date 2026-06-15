@@ -6,6 +6,10 @@ pub fn register_metrics() {
         "pb_messages_received_total",
         "Total WebSocket messages received"
     );
+    describe_counter!(
+        "pb_unknown_messages_dropped_total",
+        "Total WebSocket frames dropped because they did not deserialize into a known message type"
+    );
     describe_counter!("pb_snapshots_applied_total", "Total book snapshots applied");
     describe_counter!("pb_deltas_applied_total", "Total book deltas applied");
     describe_counter!("pb_trades_received_total", "Total trades received");
@@ -72,6 +76,13 @@ pub fn register_metrics() {
 
 pub fn record_message_received(event_type: &'static str) {
     counter!("pb_messages_received_total", "event_type" => event_type).increment(1);
+}
+
+/// A WebSocket frame that did not deserialize into any known message type was
+/// dropped. Previously silent (debug-only), so genuine silent loss of new/unknown
+/// venue message types was invisible to operators (audit finding A.110).
+pub fn record_unknown_message_dropped() {
+    counter!("pb_unknown_messages_dropped_total").increment(1);
 }
 
 pub fn record_snapshot_applied() {

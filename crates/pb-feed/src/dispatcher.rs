@@ -162,6 +162,10 @@ impl Dispatcher {
         let msg: WsMessage<'_> = match serde_json::from_str(&raw.text) {
             Ok(m) => m,
             Err(e) => {
+                // A frame that matches no known message type is dropped. Meter it
+                // so silent loss of new/unknown venue message types is visible
+                // (audit finding A.110) instead of vanishing at debug level.
+                pb_metrics::record_unknown_message_dropped();
                 debug!("skipping non-event message: {e}");
                 return Ok(());
             }
