@@ -8,6 +8,15 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Current wall-clock time in microseconds since the Unix epoch, for measuring
+/// recv→durable latency. Saturates to 0 before the epoch (never in practice).
+pub fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 pub async fn start_metrics_server(settings: &Config) -> Result<()> {
     let metrics_addr: SocketAddr = settings
         .get_string("metrics.listen_addr")

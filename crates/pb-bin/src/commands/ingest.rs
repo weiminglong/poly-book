@@ -4,6 +4,7 @@ use pb_types::SlugRegistry;
 use tokio_util::sync::CancellationToken;
 
 use super::pipeline;
+use super::pipeline::now_micros;
 
 pub async fn run(
     settings: Config,
@@ -220,6 +221,12 @@ pub async fn run(
                 }
                 wal_unflushed = true;
                 wal_unsynced = true;
+                // Record end-to-end recv→durable(WAL append) latency (A.113).
+                if let Some(recv) = event.recv_timestamp_us() {
+                    if recv > 0 {
+                        pb_metrics::record_recv_to_durable_us(now_micros().saturating_sub(recv));
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "WAL encode failed, dropping record from both WAL and sinks");

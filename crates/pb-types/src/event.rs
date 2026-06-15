@@ -393,6 +393,19 @@ impl PersistedRecord {
         }
     }
 
+    /// The feed-receive timestamp (µs) for records that carry provenance, used to
+    /// measure end-to-end recv→durable latency at ingest (audit finding A.113).
+    /// `ReplayValidation`/`ExecutionEvent` have no feed-receive provenance.
+    pub fn recv_timestamp_us(&self) -> Option<u64> {
+        match self {
+            PersistedRecord::Book(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Trade(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Ingest(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Checkpoint(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Validation(_) | PersistedRecord::Execution(_) => None,
+        }
+    }
+
     /// Mutable access to the record's `EventProvenance`, if it carries one.
     /// `ReplayValidation` and `ExecutionEvent` have no provenance and return
     /// `None`. Used at the single ingest serialization point to stamp the

@@ -22,6 +22,10 @@ pub fn register_metrics() {
         "pb_clock_skew_us",
         "Observed venue-ahead-of-receive clock skew in microseconds"
     );
+    describe_histogram!(
+        "pb_recv_to_durable_us",
+        "End-to-end latency from feed receive to durable WAL append, in microseconds"
+    );
     describe_counter!("pb_snapshots_applied_total", "Total book snapshots applied");
     describe_counter!("pb_deltas_applied_total", "Total book deltas applied");
     describe_counter!("pb_trades_received_total", "Total trades received");
@@ -110,6 +114,13 @@ pub fn record_book_mismatch() {
 pub fn record_clock_skew(skew_us: u64) {
     counter!("pb_clock_skew_events_total").increment(1);
     histogram!("pb_clock_skew_us").record(skew_us as f64);
+}
+
+/// End-to-end latency (µs) from feed receive to durable WAL append, the headline
+/// ingest-path latency the audit found missing (A.113). Bucketed via the `_us`
+/// histogram-bucket policy.
+pub fn record_recv_to_durable_us(latency_us: u64) {
+    histogram!("pb_recv_to_durable_us").record(latency_us as f64);
 }
 
 pub fn record_snapshot_applied() {
