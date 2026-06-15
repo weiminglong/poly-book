@@ -336,6 +336,35 @@ partition from the WAL. It is idempotent (safe to re-run) and authoritative for
 any partition it touches. It does not commit a consumer position, so each run
 reconciles the full retained WAL. ClickHouse is not rebuilt by this command.
 
+### Failover & Recovery (RTO/RPO)
+
+The current deployment is **single-feed, single-writer** by design: exactly one
+`ingest` process owns the WAL at a time, enforced by an advisory `flock` on
+`<wal.base_path>/.wal.lock`. This is the correctness foundation for failover — a
+standby can never interleave appends into the shared WAL while the primary is
+alive (`WalWriter::open` fails fast with `WriterLocked`), and the lock is released
+crash-safely on process exit, so a standby can take over without a stale lock to
+clear. The takeover semantics (standby reads everything the primary durably
+synced, then continues appending — no data loss across the handoff) are covered by
+the `standby_writer_takes_over_shared_wal_after_primary_exit` unit test.
+
+Recovery objectives by failure mode:
+
+| Failure | Recovery action | RPO (data loss) | RTO (time to serve) |
+|---|---|---|---|
+| `serve` (API) process crash | Restart; re-hydrate from latest checkpoint + WAL tail | 0 (read-only; no data originates here) | seconds — bounded by checkpoint hydration + WAL replay |
+| `ingest` process crash, same host | Restart `ingest`; flock is already released; it resumes appending to the last segment | ≤ `wal.sync_interval_ms` of un-`fdatasync`'d records (default 200 ms) on OS-crash/power-loss; **0** on a clean process kill | seconds — process start + lock acquire |
+| Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` rebuilds affected partitions from the durable WAL (offline) | 0 for any window the WAL still retains | minutes — offline rebuild, scales with window |
+| Host loss (WAL on durable/EFS volume) | Start a standby `ingest` against the shared WAL volume; it acquires the released lock and resumes | ≤ last synced records, as above | minutes — host/standby provisioning |
+| Host loss (WAL on ephemeral storage) | Parquet on S3 is durable; the in-flight WAL tail is lost | the un-flushed Parquet window not yet mirrored to the WAL volume | minutes |
+
+**Still manual / deferred** (needs a real multi-replica deployment to author and
+verify, tracked under audit P3-HA-1 / A.78): a redundant second feed with
+arbitration, *automatic* standby promotion (the takeover above is a documented
+runbook step, not an automated election), and a measured wall-clock RTO from a
+live failover drill. Until then, the single-writer flock + durable storage +
+`reconcile` is the supported recovery path.
+
 ### Historical Backend Selection
 
 Set `api.historical_backend` to choose the query backend for replay, integrity,

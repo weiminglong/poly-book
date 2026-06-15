@@ -660,6 +660,63 @@ mod tests {
     }
 
     #[test]
+    fn standby_writer_takes_over_shared_wal_after_primary_exit() {
+        // Writer-failover mechanism (audit P3-HA-1 / A.78): the flock makes a
+        // standby ingest writer fail fast while the primary is alive, and lets it
+        // take over the *same* WAL after the primary exits — reading everything
+        // the primary durably wrote (no data loss across the handoff) and
+        // continuing to append. This is the in-process correctness core of the
+        // failover story; the RTO wall-clock claim still needs a real deployment.
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..WalConfig::default()
+        };
+
+        // Primary writes and durably syncs two records.
+        {
+            let mut primary = WalWriter::open(config.clone()).unwrap();
+            primary.append(b"primary-record-1").unwrap();
+            primary.append(b"primary-record-2").unwrap();
+            primary.sync().unwrap();
+
+            // While the primary holds the lease, a standby must be refused rather
+            // than interleave appends into the shared WAL.
+            let blocked = WalWriter::open(config.clone()).unwrap_err();
+            assert!(
+                matches!(blocked, WalError::WriterLocked { .. }),
+                "standby must be refused while primary is alive: {blocked:?}"
+            );
+            // Primary "process exit" releases the flock on drop.
+        }
+
+        // Standby takes over the shared WAL, sees the primary's durable records,
+        // and appends its own.
+        let mut standby = WalWriter::open(config.clone()).unwrap();
+        standby.append(b"standby-record-3").unwrap();
+        standby.sync().unwrap();
+
+        // A fresh consumer reads the full, ordered, gap-free history across the
+        // handoff: both primary records followed by the standby's record.
+        let mut reader = WalReader::open(config, "failover-consumer").unwrap();
+        let mut records = Vec::new();
+        while let Some(data) = reader.next().unwrap() {
+            records.push(data);
+        }
+        assert_eq!(
+            records,
+            vec![
+                b"primary-record-1".to_vec(),
+                b"primary-record-2".to_vec(),
+                b"standby-record-3".to_vec(),
+            ],
+            "standby takeover must preserve the primary's records and append after them"
+        );
+    }
+
+    #[test]
     fn writer_resumes_from_last_segment() {
         let dir = tempfile::tempdir().unwrap();
         let config = WalConfig {

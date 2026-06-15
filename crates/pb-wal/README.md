@@ -107,10 +107,15 @@ and feeds decoded records into the live read model.
   `max_segments` count cap so the WAL cannot grow without bound when the byte
   budget is generous. When a lagging consumer blocks pruning below the cap, a
   needs-resync warning is logged instead of letting the disk fill.
-- **Single-writer mutual exclusion**: `WalWriter::open` acquires an exclusive
-  advisory `flock` on `<base>/.wal.lock`; a second writer on the same directory
-  fails fast with `WalError::WriterLocked` rather than interleaving appends. The
-  lock auto-releases on process exit (crash-safe, no stale lock file).
+- **Single-writer mutual exclusion / writer leasing**: `WalWriter::open` acquires
+  an exclusive advisory `flock` on `<base>/.wal.lock`; a second writer on the same
+  directory fails fast with `WalError::WriterLocked` rather than interleaving
+  appends. The lock auto-releases on process exit (crash-safe, no stale lock file).
+  This doubles as the writer-failover mechanism: after the primary exits, a standby
+  acquires the released lease, reads everything the primary durably synced, and
+  resumes appending with no data loss across the handoff
+  (`standby_writer_takes_over_shared_wal_after_primary_exit`). RTO/RPO targets per
+  failure mode are documented in `docs/operations.md` ("Failover & Recovery").
 - **Gap detection**: `WalReader::needs_resync()` returns `true` if the reader's
   committed position references a segment that has been pruned, indicating the
   consumer should re-hydrate from a checkpoint.
