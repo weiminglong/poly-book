@@ -21,6 +21,10 @@ pub struct L2Book {
     pub last_update_us: u64,
     total_bid_raw: u64,
     total_ask_raw: u64,
+    /// Whether any snapshot/delta has established a sequence yet. Distinguishes
+    /// "no sequence seen" from a legitimate sequence value of 0, so gap detection
+    /// is not silently disabled right after a snapshot/checkpoint (A.148).
+    seq_initialized: bool,
 }
 
 /// A snapshot of one side of the book: Vec<(price, size)>.
@@ -36,6 +40,7 @@ impl L2Book {
             last_update_us: 0,
             total_bid_raw: 0,
             total_ask_raw: 0,
+            seq_initialized: false,
         }
     }
 
@@ -69,6 +74,7 @@ impl L2Book {
         }
 
         self.sequence = sequence;
+        self.seq_initialized = true;
         self.last_update_us = timestamp_us;
     }
 
@@ -110,6 +116,7 @@ impl L2Book {
         }
 
         self.sequence = sequence;
+        self.seq_initialized = true;
         self.last_update_us = timestamp_us;
     }
 
@@ -156,8 +163,13 @@ impl L2Book {
     }
 
     /// Check if there's a sequence gap.
+    ///
+    /// Gap detection is active once any snapshot/delta has established a
+    /// sequence, including when that sequence is 0 — previously the `> 0`
+    /// sentinel disabled detection exactly post-snapshot/post-checkpoint where
+    /// `sequence == 0` is legitimate (A.148).
     pub fn check_sequence(&self, incoming: Sequence) -> Result<(), BookError> {
-        if self.sequence.raw() > 0 && incoming.raw() != self.sequence.raw() + 1 {
+        if self.seq_initialized && incoming.raw() != self.sequence.raw() + 1 {
             let expected = self.sequence.raw() + 1;
             let got = incoming.raw();
             return Err(BookError::SequenceGap {
@@ -857,6 +869,7 @@ mod tests {
     fn check_sequence_gap_error_fields() {
         let mut book = L2Book::new(AssetId::new("my-asset"));
         book.sequence = Sequence::new(10);
+        book.seq_initialized = true;
         let err = book.check_sequence(Sequence::new(15)).unwrap_err();
         match err {
             BookError::SequenceGap {
@@ -878,6 +891,7 @@ mod tests {
     fn check_sequence_duplicate_is_gap() {
         let mut book = L2Book::new(AssetId::new("seq"));
         book.sequence = Sequence::new(5);
+        book.seq_initialized = true;
         // Receiving the same sequence number is a "gap" (got 5, expected 6)
         assert!(book.check_sequence(Sequence::new(5)).is_err());
     }
@@ -886,7 +900,18 @@ mod tests {
     fn check_sequence_backwards_is_gap() {
         let mut book = L2Book::new(AssetId::new("seq"));
         book.sequence = Sequence::new(10);
+        book.seq_initialized = true;
         assert!(book.check_sequence(Sequence::new(3)).is_err());
+    }
+
+    #[test]
+    fn check_sequence_detects_gap_right_after_snapshot_at_zero() {
+        // A snapshot establishes sequence 0; a first delta of 5 (not 1) is a gap
+        // that the old `> 0` sentinel silently ignored (A.148).
+        let mut book = L2Book::new(AssetId::new("seq"));
+        book.apply_snapshot(&[], &[], Sequence::new(0), 1_000);
+        assert!(book.check_sequence(Sequence::new(1)).is_ok());
+        assert!(book.check_sequence(Sequence::new(5)).is_err());
     }
 
     // --- Weighted mid price edge cases ---
@@ -1312,6 +1337,7 @@ mod proptests {
         fn sequence_gap_detection(current in 1u64..1_000_000, incoming in 1u64..1_000_000) {
             let mut book = L2Book::new(AssetId::new("prop"));
             book.sequence = Sequence::new(current);
+            book.seq_initialized = true;
             let result = book.check_sequence(Sequence::new(incoming));
             if incoming == current + 1 {
                 prop_assert!(result.is_ok());
