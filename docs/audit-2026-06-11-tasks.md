@@ -213,7 +213,7 @@
 - **Action:** Add `TimeoutLayer` + `ConcurrencyLimitLayer`; cap response arrays and the queryable window; push `LIMIT`/aggregation server-side; bound the checkpoint scan.
 - **Done when:** an oversized window request is rejected with a typed 4xx; a checkpoint-less asset returns promptly without an epoch scan (test).
 
-### [ ] P2-API-2 — Bound WebSocket fan-out
+### [x] P2-API-2 — Bound WebSocket fan-out
 - **Severity:** medium · **Findings:** A.94, A.49
 - **Files:** `crates/pb-api/src/streaming.rs:96`, `crates/pb-feed/src/ws.rs:88`/`:224`
 - **Problem:** WS fan-out is unbounded — no connection cap, no heartbeat/idle timeout, default ~64 MB message limit; half-open peers on quiet assets leak sessions. (The client-side feed reconnect backoff also never resets and jitter is nullified at the cap — fix alongside.)

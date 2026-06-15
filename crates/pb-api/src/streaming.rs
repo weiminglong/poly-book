@@ -1,11 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, warn};
 
 use crate::dto::BookUpdateMessage;
@@ -13,6 +14,23 @@ use crate::error::ApiError;
 use crate::server::AppState;
 
 const BROADCAST_CAPACITY: usize = 256;
+/// Max concurrent WebSocket sessions across all assets; excess upgrades are
+/// rejected with 503 so a fan-out flood cannot exhaust memory/sockets (A.94).
+const MAX_WS_CONNECTIONS: usize = 512;
+/// Cap inbound WS message/frame size. This is a read-only stream; clients only
+/// ever send ping/close, so a small limit is safe and replaces the ~64 MB
+/// default (A.94).
+const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// Server ping cadence and the idle deadline after which a session with no
+/// client traffic (pong/message) is closed, reaping half-open peers (A.94).
+const WS_PING_INTERVAL: Duration = Duration::from_secs(20);
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn ws_connection_limiter() -> Arc<Semaphore> {
+    static SEM: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEM.get_or_init(|| Arc::new(Semaphore::new(MAX_WS_CONNECTIONS)))
+        .clone()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -105,6 +123,12 @@ pub async fn ws_orderbook(
         .map(|id| id.to_string())
         .unwrap_or(raw_asset_id.clone());
 
+    // Bound the total number of live WS sessions. The permit is held for the
+    // session's lifetime and released when it ends.
+    let permit = ws_connection_limiter()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::ServiceUnavailable("too many streaming connections".to_string()))?;
+
     let is_active = state.live.is_asset_active(&asset_id).await;
     if !is_active {
         return Err(ApiError::NotFound(format!(
@@ -127,19 +151,24 @@ pub async fn ws_orderbook(
     let default_depth = state.config.default_depth;
     let slug = state.slug_registry.slug_for_str(&asset_id);
 
-    Ok(ws.on_upgrade(move |socket| {
-        handle_ws_session(
-            socket,
-            rx,
-            live,
-            asset_id,
-            slug,
-            default_depth,
-            stale_after_secs,
-        )
-    }))
+    Ok(ws
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            handle_ws_session(
+                socket,
+                rx,
+                live,
+                asset_id,
+                slug,
+                default_depth,
+                stale_after_secs,
+                permit,
+            )
+        }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ws_session(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<BookUpdateMessage>,
@@ -148,6 +177,8 @@ async fn handle_ws_session(
     slug: Option<String>,
     depth: usize,
     stale_after_secs: u64,
+    // Held for the session lifetime; releasing it frees a connection slot.
+    _permit: OwnedSemaphorePermit,
 ) {
     // Send initial full snapshot.
     match live.snapshot(&asset_id, depth, stale_after_secs).await {
@@ -171,8 +202,22 @@ async fn handle_ws_session(
         }
     }
 
+    let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_client_activity = Instant::now();
+
     loop {
         tokio::select! {
+            _ = ping_interval.tick() => {
+                // Reap a half-open peer that has stopped responding entirely.
+                if last_client_activity.elapsed() >= WS_IDLE_TIMEOUT {
+                    debug!(asset_id, "ws idle timeout, closing session");
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             msg = rx.recv() => {
                 match msg {
                     Ok(mut update) => {
@@ -207,6 +252,8 @@ async fn handle_ws_session(
                 }
             }
             ws_msg = socket.recv() => {
+                // Any inbound frame proves the client is alive.
+                last_client_activity = Instant::now();
                 match ws_msg {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
@@ -214,7 +261,7 @@ async fn handle_ws_session(
                             break;
                         }
                     }
-                    Some(Ok(_)) => {} // ignore text/binary from client
+                    Some(Ok(_)) => {} // ignore pong/text/binary from client
                     Some(Err(_)) => break,
                 }
             }

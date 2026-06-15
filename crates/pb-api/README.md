@@ -68,6 +68,9 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   re-materializing every tracked book on each update.
 - WebSocket streaming uses a broadcast channel with capacity 256. Slow consumers
   that fall behind receive a fresh full snapshot to re-sync.
+- WS fan-out is bounded: a global cap on concurrent sessions (excess upgrades get
+  503), a small inbound message/frame size limit (it is a read-only stream), and
+  a server heartbeat with an idle timeout that reaps half-open peers.
 - Both `serve-api` and separated `serve` mode route projector updates through
   the same broadcast fanout, so WAL-tail updates are streamed to WS clients as
   incremental book messages instead of snapshot-only sessions.
