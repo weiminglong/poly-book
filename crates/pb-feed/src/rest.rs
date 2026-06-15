@@ -1,9 +1,17 @@
+use std::time::Duration;
+
 use reqwest::{Client, StatusCode};
 use tracing::debug;
 
 use crate::error::FeedError;
 use crate::rate_limiter::RateLimiter;
 use pb_types::wire::{ClobMarketInfo, GammaEvent, RestBookResponse};
+
+/// TCP connect timeout for REST calls.
+const REST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Overall per-request timeout. Without this a hung venue request stalls
+/// discovery/backfill (and `auto-ingest` market rotation) indefinitely (A.111).
+const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct RestConfig {
@@ -28,8 +36,13 @@ pub struct RestClient {
 
 impl RestClient {
     pub fn new(rate_limiter: RateLimiter) -> Self {
+        let client = Client::builder()
+            .connect_timeout(REST_CONNECT_TIMEOUT)
+            .timeout(REST_REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             rate_limiter,
             config: RestConfig::default(),
         }

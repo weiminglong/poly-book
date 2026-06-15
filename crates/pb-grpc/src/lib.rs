@@ -255,11 +255,18 @@ pub async fn start_grpc_server(
     let server =
         tonic::transport::Server::builder().add_service(WorkstationServiceServer::new(service));
 
+    // Bind up front so a bind failure (e.g. port in use) is returned to the
+    // caller instead of being swallowed inside the spawned task while we log
+    // "bound" and let `serve` run on silently without gRPC (audit finding A.112).
+    let incoming = tonic::transport::server::TcpIncoming::bind(addr)?;
     info!(%addr, "gRPC server bound");
 
     let handle = tokio::spawn(async move {
         let shutdown_signal = shutdown.cancelled_owned();
-        if let Err(e) = server.serve_with_shutdown(addr, shutdown_signal).await {
+        if let Err(e) = server
+            .serve_with_incoming_shutdown(incoming, shutdown_signal)
+            .await
+        {
             tracing::error!(error = %e, "gRPC server error");
         }
     });

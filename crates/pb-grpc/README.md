@@ -39,6 +39,9 @@ listen_addr = "0.0.0.0:50051"
 - `completeness_to_str()` returns `&'static str` instead of a heap-allocated `String`
   for zero-allocation completeness level formatting.
 - Backend selection (Parquet/ClickHouse) applies equally to gRPC and HTTP
+- `start_grpc_server` binds the listener up front and returns a bind error to the
+  caller (which fails fast), instead of logging "bound" and swallowing the failure
+  inside the serve task.
 - Proto definitions live in `proto/workstation.proto`
 
 ## Docs to Update After Changes
