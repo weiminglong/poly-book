@@ -41,7 +41,12 @@ export function CommandPalette({ onToggleTheme, onSetDensity, onSetSource }: Com
       />
 
       {/* Command dialog */}
-      <div className="absolute left-1/2 top-[20%] w-full max-w-lg -translate-x-1/2">
+      <div
+        className="absolute left-1/2 top-[20%] w-full max-w-lg -translate-x-1/2"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+      >
         <Command
           className="rounded-xl border border-card-border bg-card shadow-lg"
           onKeyDown={(e) => {
