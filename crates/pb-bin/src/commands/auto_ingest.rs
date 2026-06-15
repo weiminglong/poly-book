@@ -72,6 +72,7 @@ pub async fn run(
     let wal_config = pipeline::wal_config_from_settings(&settings);
     let wal_flush_interval = Duration::from_millis(wal_config.flush_interval_ms);
     let wal_sync_interval = Duration::from_millis(wal_config.sync_interval_ms);
+    let wal_base_path = wal_config.base_path.clone();
     let mut wal_writer = pb_wal::WalWriter::open(wal_config)
         .map_err(|e| anyhow::anyhow!("failed to open WAL writer: {e}"))?;
     tracing::info!("WAL writer opened");
@@ -85,14 +86,25 @@ pub async fn run(
     let fanout_handle = tokio::spawn(async move {
         let mut flush_tick = tokio::time::interval(wal_flush_interval);
         let mut sync_tick = tokio::time::interval(wal_sync_interval);
+        let mut prune_tick = tokio::time::interval(Duration::from_secs(60));
         flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut wal_unflushed = false;
         let mut wal_unsynced = false;
 
         loop {
             let event = tokio::select! {
                 biased;
+                _ = prune_tick.tick() => {
+                    // Reclaim WAL segments all consumers have advanced past
+                    // (A.17/A.20/A.47).
+                    let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
+                    if let Err(e) = wal_writer.prune_with_backpressure(&consumers) {
+                        tracing::warn!(error = %e, "WAL prune failed");
+                    }
+                    continue;
+                }
                 _ = flush_tick.tick() => {
                     if wal_unflushed {
                         if let Err(e) = wal_writer.flush() {

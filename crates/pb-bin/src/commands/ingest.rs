@@ -74,6 +74,7 @@ pub async fn run(
     let wal_config = pipeline::wal_config_from_settings(&settings);
     let wal_flush_interval = std::time::Duration::from_millis(wal_config.flush_interval_ms);
     let wal_sync_interval = std::time::Duration::from_millis(wal_config.sync_interval_ms);
+    let wal_base_path = wal_config.base_path.clone();
     // The WAL is the durability backbone: a failure to open it is fatal, not a
     // "continue without WAL" warning that silently disables durability (A.129).
     let mut wal_writer = pb_wal::WalWriter::open(wal_config)
@@ -119,8 +120,12 @@ pub async fn run(
     // the OS-crash data-loss window is bounded to ~one sync interval (A.11/A.29).
     let mut flush_tick = tokio::time::interval(wal_flush_interval);
     let mut sync_tick = tokio::time::interval(wal_sync_interval);
+    // Periodically reclaim WAL segments all consumers have advanced past so disk
+    // usage stays bounded under 24/7 ingest (A.17/A.20/A.47).
+    let mut prune_tick = tokio::time::interval(std::time::Duration::from_secs(60));
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut wal_unflushed = false;
     let mut wal_unsynced = false;
 
@@ -142,6 +147,13 @@ pub async fn run(
                         .map_err(|e| anyhow::anyhow!("WAL sync failed: {e}"))?;
                     wal_unsynced = false;
                     wal_unflushed = false;
+                }
+                continue;
+            }
+            _ = prune_tick.tick() => {
+                let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
+                if let Err(e) = wal_writer.prune_with_backpressure(&consumers) {
+                    tracing::warn!(error = %e, "WAL prune failed");
                 }
                 continue;
             }

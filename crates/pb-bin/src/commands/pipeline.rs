@@ -171,6 +171,25 @@ pub fn start_checkpoint_producer(
     ))
 }
 
+/// List committed consumer position files (`consumer_*.pos`) in the WAL
+/// directory. These tell the pruner how far each consumer has read so it never
+/// prunes a segment a live reader still needs.
+pub fn wal_consumer_position_files(wal_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(wal_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("consumer_") && name.ends_with(".pos"))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
     let base_path = settings
         .get_string("wal.base_path")
@@ -450,6 +469,31 @@ mod tests {
         // The directory is created and the prefix is an absolute canonical path.
         assert!(std::path::Path::new(&prefix).is_absolute());
         assert!(sub.exists(), "local base path should be created");
+    }
+
+    #[test]
+    fn wal_consumer_position_files_lists_only_pos_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("consumer_serve-live.pos"), "0:0").unwrap();
+        std::fs::write(dir.path().join("consumer_other.pos"), "1:0").unwrap();
+        std::fs::write(dir.path().join("segment_00000000000000000000.wal"), b"x").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+
+        let mut files = wal_consumer_position_files(dir.path());
+        files.sort();
+        assert_eq!(files.len(), 2, "should list only consumer_*.pos files");
+        assert!(files.iter().all(|p| p
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("consumer_")));
+    }
+
+    #[test]
+    fn wal_consumer_position_files_missing_dir_is_empty() {
+        let files = wal_consumer_position_files(std::path::Path::new("/no/such/wal/dir"));
+        assert!(files.is_empty());
     }
 
     // --- wal_config_from_settings ---
