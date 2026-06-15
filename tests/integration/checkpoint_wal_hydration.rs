@@ -21,6 +21,7 @@ fn provenance(recv: u64, exchange: u64, seq: u64) -> EventProvenance {
         source_event_id: None,
         source_session_id: Some("session-1".to_string()),
         sequence: Some(Sequence::new(seq)),
+        ingest_ordinal: None,
     }
 }
 
@@ -46,6 +47,7 @@ async fn hydrate_from_checkpoint_and_wal() {
             source_event_id: Some("cp-1".to_string()),
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         wal_offset: Some(0),
         bids: vec![PriceLevel {

@@ -105,6 +105,10 @@ pub async fn run(
         prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut wal_unflushed = false;
         let mut wal_unsynced = false;
+        // Monotonic ingest ordinal — this drain loop is the single serialization
+        // point for all market generations, so the counter is globally monotonic
+        // across rotations, giving replay a true-arrival total order (A.116).
+        let mut ingest_ordinal: u64 = 0;
 
         loop {
             let mut event = tokio::select! {
@@ -152,6 +156,12 @@ pub async fn run(
                 },
             };
 
+            // Stamp the monotonic ingest ordinal before persistence so replay can
+            // order same-microsecond events by true arrival (A.116).
+            if let Some(prov) = event.provenance_mut() {
+                prov.ingest_ordinal = Some(ingest_ordinal);
+                ingest_ordinal += 1;
+            }
             // Stamp the WAL offset onto checkpoints just before writing so serve
             // can resume tailing from the checkpoint (A.13/A.52).
             if let pb_types::PersistedRecord::Checkpoint(ref mut checkpoint) = event {
@@ -402,6 +412,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,

@@ -328,6 +328,7 @@ mod tests {
                 source_event_id: Some("ev-1".into()),
                 source_session_id: Some("ses-1".into()),
                 sequence: Some(pb_types::Sequence::new(1)),
+                ingest_ordinal: None,
             },
         }))
         .await
@@ -346,6 +347,7 @@ mod tests {
                 source_event_id: Some("ev-1".into()),
                 source_session_id: Some("ses-1".into()),
                 sequence: Some(pb_types::Sequence::new(1)),
+                ingest_ordinal: None,
             },
         }))
         .await

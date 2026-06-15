@@ -30,6 +30,7 @@ fn provenance(ts: u64, seq: u64) -> EventProvenance {
         source_event_id: Some("bench-event".to_string()),
         source_session_id: Some("bench-session".to_string()),
         sequence: Some(Sequence::new(seq)),
+        ingest_ordinal: None,
     }
 }
 
@@ -118,6 +119,7 @@ fn generate_ingest_events() -> Vec<PersistedRecord> {
                     source_event_id: None,
                     source_session_id: Some("bench-session".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: if *kind == IngestEventKind::SequenceGap {
                     Some(i as u64 * 10)

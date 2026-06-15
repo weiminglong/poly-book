@@ -141,6 +141,10 @@ pub async fn run(
     prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut wal_unflushed = false;
     let mut wal_unsynced = false;
+    // Monotonic ingest ordinal stamped on every record at this single
+    // serialization point, giving replay a total order that respects true
+    // arrival even when per-asset `sequence` resets on snapshots (A.116).
+    let mut ingest_ordinal: u64 = 0;
     // Set if a supervised background task exits unexpectedly: ingestion cannot
     // safely continue with a dead feed/dispatcher/sink, so we shut down and
     // propagate a non-zero exit instead of returning Ok.
@@ -192,6 +196,12 @@ pub async fn run(
                 }
             },
         };
+        // Stamp the monotonic ingest ordinal before persistence so replay can
+        // order same-microsecond events by true arrival (A.116).
+        if let Some(prov) = event.provenance_mut() {
+            prov.ingest_ordinal = Some(ingest_ordinal);
+            ingest_ordinal += 1;
+        }
         // Stamp the WAL offset onto checkpoints just before they are written, so
         // a serve cold start can resume WAL tailing from the checkpoint instead
         // of replaying the entire retained WAL (A.13/A.52 — checkpoints were

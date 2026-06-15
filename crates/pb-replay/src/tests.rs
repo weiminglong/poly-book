@@ -28,6 +28,7 @@ fn test_provenance(recv_ts: u64, seq: u64) -> EventProvenance {
         source_event_id: Some("evt-1".into()),
         source_session_id: Some("sess-1".into()),
         sequence: Some(Sequence::new(seq)),
+        ingest_ordinal: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn make_checkpoint(
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         bids: bids
             .into_iter()
@@ -191,6 +193,7 @@ fn source_reset_event(recv_ts: u64) -> pb_types::IngestEvent {
             source_event_id: None,
             source_session_id: Some("sess-reset".into()),
             sequence: None,
+            ingest_ordinal: None,
         },
         expected_sequence: None,
         observed_sequence: None,
@@ -771,6 +774,40 @@ async fn parquet_reader_reads_book_events() {
     assert_eq!(window.book_events[0].kind, BookEventKind::Snapshot);
     assert_eq!(window.book_events[0].side, Side::Bid);
     assert_eq!(window.book_events[0].price, FixedPrice::new(5000).unwrap());
+}
+
+#[tokio::test]
+async fn parquet_reader_preserves_ingest_ordinal() {
+    // The ingest ordinal must survive the Parquet write→read round-trip so replay
+    // can use it as the authoritative arrival-order tiebreaker (A.116).
+    let dir = TempDir::new().unwrap();
+    let base_path = dir.path();
+    let t0 = BASE_TS;
+
+    let mut prov = test_provenance(t0, 1);
+    prov.ingest_ordinal = Some(987_654);
+    let book = BookEvent {
+        asset_id: test_asset_id(),
+        kind: BookEventKind::Snapshot,
+        side: Side::Bid,
+        price: FixedPrice::new(5000).unwrap(),
+        size: FixedSize::new(1_000_000),
+        provenance: prov,
+    };
+    write_parquet_records(base_path, &[pb_types::PersistedRecord::Book(book)]).await;
+
+    let reader = ParquetReader::new(base_path);
+    let window = reader
+        .read_market_data(&test_asset_id(), t0 - 1000, t0 + 1000)
+        .await
+        .unwrap();
+
+    assert_eq!(window.book_events.len(), 1);
+    assert_eq!(
+        window.book_events[0].provenance.ingest_ordinal,
+        Some(987_654),
+        "ingest_ordinal must round-trip through Parquet"
+    );
 }
 
 #[tokio::test]

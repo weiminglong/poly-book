@@ -159,6 +159,7 @@ mod tests {
             source_event_id: Some("snap-1".to_string()),
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(seq)),
+            ingest_ordinal: None,
         }
     }
 

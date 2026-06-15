@@ -24,6 +24,9 @@ pub fn book_event_schema() -> Schema {
         Field::new("source", DataType::Utf8, false),
         Field::new("source_event_id", DataType::Utf8, true),
         Field::new("source_session_id", DataType::Utf8, true),
+        // Monotonic ingest ordinal — replay's authoritative arrival-order
+        // tiebreaker (A.116). Nullable for rows written before this column.
+        Field::new("ingest_ordinal", DataType::UInt64, true),
     ])
 }
 
@@ -261,6 +264,12 @@ pub fn book_event_refs_to_record_batch(events: &[&BookEvent]) -> Result<RecordBa
             .map(|e| e.provenance.source_session_id.as_deref())
             .collect::<Vec<_>>(),
     ));
+    let ingest_ordinals: ArrayRef = Arc::new(UInt64Array::from(
+        events
+            .iter()
+            .map(|e| e.provenance.ingest_ordinal)
+            .collect::<Vec<_>>(),
+    ));
 
     RecordBatch::try_new(
         schema,
@@ -276,6 +285,7 @@ pub fn book_event_refs_to_record_batch(events: &[&BookEvent]) -> Result<RecordBa
             sources,
             source_event_ids,
             source_session_ids,
+            ingest_ordinals,
         ],
     )
     .map_err(StoreError::from)

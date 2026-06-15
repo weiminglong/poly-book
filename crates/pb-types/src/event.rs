@@ -52,6 +52,15 @@ pub struct EventProvenance {
     pub source_event_id: Option<String>,
     pub source_session_id: Option<String>,
     pub sequence: Option<Sequence>,
+    /// Process-monotonic ordinal stamped at the single ingest serialization
+    /// point, strictly increasing in true arrival order across snapshots and
+    /// reconnects (unlike `sequence`, which resets to 0 on every snapshot). This
+    /// is the authoritative replay tiebreaker so a same-microsecond pre-snapshot
+    /// delta sorts before its snapshot (audit finding A.116). `None` for records
+    /// produced before this field existed or outside the ingest path (e.g. replay
+    /// reconstructs `IngestEvent`s for surfaced gaps).
+    #[serde(default)]
+    pub ingest_ordinal: Option<u64>,
 }
 
 /// Book event type.
@@ -378,6 +387,21 @@ impl PersistedRecord {
             PersistedRecord::Execution(event) => event.event_timestamp_us,
         }
     }
+
+    /// Mutable access to the record's `EventProvenance`, if it carries one.
+    /// `ReplayValidation` and `ExecutionEvent` have no provenance and return
+    /// `None`. Used at the single ingest serialization point to stamp the
+    /// monotonic `ingest_ordinal` (audit A.116).
+    pub fn provenance_mut(&mut self) -> Option<&mut EventProvenance> {
+        match self {
+            PersistedRecord::Book(event) => Some(&mut event.provenance),
+            PersistedRecord::Trade(event) => Some(&mut event.provenance),
+            PersistedRecord::Ingest(event) => Some(&mut event.provenance),
+            PersistedRecord::Checkpoint(event) => Some(&mut event.provenance),
+            PersistedRecord::Validation(_) => None,
+            PersistedRecord::Execution(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +456,7 @@ mod tests {
             source_event_id: Some("abc".to_string()),
             source_session_id: Some("session-1".to_string()),
             sequence: Some(Sequence::new(42)),
+            ingest_ordinal: None,
         }
     }
 
@@ -1065,6 +1090,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
 
         // Book uses provenance recv_timestamp_us
@@ -1237,6 +1263,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
         let json = serde_json::to_string(&prov).unwrap();
         let prov2: EventProvenance = serde_json::from_str(&json).unwrap();
@@ -1252,6 +1279,7 @@ mod tests {
             source_event_id: Some("max".to_string()),
             source_session_id: Some("max-session".to_string()),
             sequence: Some(Sequence::new(u64::MAX)),
+            ingest_ordinal: None,
         };
         let json = serde_json::to_string(&prov).unwrap();
         let prov2: EventProvenance = serde_json::from_str(&json).unwrap();

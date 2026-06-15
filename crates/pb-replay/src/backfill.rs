@@ -135,6 +135,7 @@ pub fn checkpoint_from_rest(book: &RestBookResponse) -> Result<BookCheckpoint, R
             source_event_id: book.hash.clone(),
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         bids,
         asks,

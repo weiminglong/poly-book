@@ -558,6 +558,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,
@@ -621,6 +622,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
             })
             .collect();

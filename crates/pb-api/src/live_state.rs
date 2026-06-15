@@ -970,6 +970,7 @@ mod tests {
             source_event_id: Some("snapshot-a".to_string()),
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(sequence)),
+            ingest_ordinal: None,
         }
     }
 
@@ -1016,6 +1017,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: Some(Sequence::new(sequence)),
+                ingest_ordinal: None,
             },
         })
     }
@@ -1041,6 +1043,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1107,6 +1110,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1135,6 +1139,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: Some(2),
                 observed_sequence: Some(5),
@@ -1172,6 +1177,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("session-42".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1198,6 +1204,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1296,6 +1303,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             wal_offset: None,
         };
@@ -1322,6 +1330,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: Some(1),
                 observed_sequence: Some(5),
@@ -1358,6 +1367,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1380,6 +1390,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: Some(Sequence::new(2)),
+                    ingest_ordinal: None,
                 },
             }))
             .await;
@@ -1411,6 +1422,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1459,6 +1471,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,

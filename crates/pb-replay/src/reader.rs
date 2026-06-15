@@ -373,6 +373,12 @@ fn extract_book_events(
         .column_by_name("source_session_id")
         .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
+    // Optional for backward compatibility: Parquet files written before A.116 do
+    // not have this column. When absent, ingest_ordinal stays None and replay
+    // falls back to the sequence/content tiebreakers (A.117).
+    let ingest_ordinal_col = batch
+        .column_by_name("ingest_ordinal")
+        .map(|c| c.as_primitive::<UInt64Type>());
 
     let mut rows = Vec::new();
     for i in 0..batch.num_rows() {
@@ -408,6 +414,9 @@ fn extract_book_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: ingest_ordinal_col
+                    .filter(|c| !c.is_null(i))
+                    .map(|c| c.value(i)),
             },
         });
     }
@@ -517,6 +526,7 @@ fn extract_trade_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: None,
             },
         });
     }
@@ -612,6 +622,7 @@ fn extract_ingest_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: None,
             },
             expected_sequence: if expected_col.is_null(i) {
                 None
@@ -703,6 +714,7 @@ fn extract_checkpoints(
                     Some(source_session_id_col.value(i).to_string())
                 },
                 sequence: None,
+                ingest_ordinal: None,
             },
             bids: serde_json::from_str::<Vec<PriceLevel>>(bids_col.value(i))?,
             asks: serde_json::from_str::<Vec<PriceLevel>>(asks_col.value(i))?,
@@ -1073,6 +1085,7 @@ struct BookEventRow {
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
+    ingest_ordinal: Option<u64>,
 }
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1154,7 +1167,7 @@ impl EventReader for ClickHouseReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
-        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
+        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id, ingest_ordinal FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
         let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, trade_id";
         let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us";
 
@@ -1207,6 +1220,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: Some(Sequence::new(row.sequence)),
+                        ingest_ordinal: row.ingest_ordinal,
                     },
                 })
             })
@@ -1235,6 +1249,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: row.sequence.map(Sequence::new),
+                        ingest_ordinal: None,
                     },
                 })
             })
@@ -1259,6 +1274,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: row.sequence.map(Sequence::new),
+                        ingest_ordinal: None,
                     },
                     expected_sequence: row.expected_sequence,
                     observed_sequence: row.observed_sequence,
@@ -1307,6 +1323,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: None,
+                        ingest_ordinal: None,
                     },
                     bids: serde_json::from_str(&row.bids_json)?,
                     asks: serde_json::from_str(&row.asks_json)?,
@@ -1340,6 +1357,7 @@ impl EventReader for ClickHouseReader {
                     source_event_id: row.source_event_id,
                     source_session_id: row.source_session_id,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 bids: serde_json::from_str(&row.bids_json)?,
                 asks: serde_json::from_str(&row.asks_json)?,

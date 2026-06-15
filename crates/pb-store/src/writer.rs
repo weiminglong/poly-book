@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS book_events (
     source String,
     source_event_id Nullable(String),
     source_session_id Nullable(String),
+    ingest_ordinal Nullable(UInt64),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
@@ -292,6 +293,9 @@ struct BookEventRow {
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
+    // Monotonic ingest ordinal — replay's authoritative arrival-order tiebreaker
+    // (A.116). Nullable for rows written before this column existed.
+    ingest_ordinal: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, clickhouse::Row)]
@@ -497,6 +501,7 @@ impl ClickHouseRecordWriter {
                         source: event.provenance.source.to_string(),
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
+                        ingest_ordinal: event.provenance.ingest_ordinal,
                     };
                     book_insert.as_mut().unwrap().write(&row).await?;
                 }

@@ -772,6 +772,7 @@ mod tests {
                     source_event_id: Some("snap-1".to_string()),
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: Some(Sequence::new(0)),
+                    ingest_ordinal: None,
                 },
             }))
             .await;
@@ -802,6 +803,7 @@ mod tests {
             source_event_id: Some("snap-1".to_string()),
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(0)),
+            ingest_ordinal: None,
         };
         state
             .live
@@ -840,6 +842,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -903,6 +906,7 @@ mod tests {
                         source_event_id: Some("snap-1".to_string()),
                         source_session_id: Some("ws-session-1".to_string()),
                         sequence: Some(Sequence::new(0)),
+                        ingest_ordinal: None,
                     },
                 }),
                 PersistedRecord::Book(BookEvent {
@@ -918,6 +922,7 @@ mod tests {
                         source_event_id: Some("snap-1".to_string()),
                         source_session_id: Some("ws-session-1".to_string()),
                         sequence: Some(Sequence::new(1)),
+                        ingest_ordinal: None,
                     },
                 }),
             ])
@@ -959,6 +964,7 @@ mod tests {
             source_event_id: None,
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(seq)),
+            ingest_ordinal: None,
         }
     }
 
@@ -1357,6 +1363,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1444,6 +1451,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1520,6 +1528,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,

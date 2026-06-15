@@ -14,7 +14,13 @@ use pb_types::event::PersistedRecord;
 use crate::WalError;
 
 /// Current serialization version.
-const CURRENT_VERSION: u8 = 1;
+///
+/// v2 added `EventProvenance.ingest_ordinal` (audit A.116). bincode is not
+/// self-describing, so a v1 payload (6 provenance fields) cannot be safely
+/// decoded into the v2 struct (7 fields) — the trailing read would consume
+/// unrelated bytes. We therefore reject v1 explicitly rather than risk silent
+/// corruption; operators must drain the WAL before upgrading across this bump.
+const CURRENT_VERSION: u8 = 2;
 
 /// Encode a `PersistedRecord` into a versioned byte buffer.
 ///
@@ -36,7 +42,10 @@ pub fn decode(data: &[u8]) -> Result<PersistedRecord, WalError> {
     }
     let version = data[0];
     match version {
-        1 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
+        2 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
+        1 => Err(WalError::Codec(
+            "record written by a pre-A.116 binary (v1); drain the WAL before upgrading".to_string(),
+        )),
         other => Err(WalError::Codec(format!(
             "unsupported record version: {other}"
         ))),
@@ -67,6 +76,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: Some("ws-1".to_string()),
                 sequence: Some(Sequence::new(42)),
+                ingest_ordinal: None,
             },
         })
     }
@@ -82,6 +92,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: Some(5),
             observed_sequence: Some(8),
@@ -127,7 +138,19 @@ mod tests {
     fn version_byte_is_first() {
         let encoded = encode(&test_book_record()).unwrap();
         assert!(encoded.len() > 1);
-        assert_eq!(encoded[0], 1);
+        assert_eq!(encoded[0], CURRENT_VERSION);
+    }
+
+    #[test]
+    fn decode_v1_payload_is_rejected_with_drain_hint() {
+        // A v1-tagged payload must be rejected (not silently misparsed into the
+        // v2 struct that gained ingest_ordinal) so operators drain before upgrade.
+        let mut encoded = encode(&test_book_record()).unwrap();
+        encoded[0] = 1;
+        match decode(&encoded).unwrap_err() {
+            WalError::Codec(msg) => assert!(msg.contains("drain"), "unexpected msg: {msg}"),
+            other => panic!("expected Codec error, got: {other:?}"),
+        }
     }
 
     // ---- Codec round-trip for all PersistedRecord variants ----
@@ -148,6 +171,7 @@ mod tests {
                 source_event_id: Some("hash-1".to_string()),
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
         })
     }
@@ -164,6 +188,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             bids: vec![PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),

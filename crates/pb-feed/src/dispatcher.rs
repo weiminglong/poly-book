@@ -125,6 +125,7 @@ impl Dispatcher {
             source_event_id: None,
             source_session_id: Some(event.session_id.clone()),
             sequence: None,
+            ingest_ordinal: None,
         };
         self.send(PersistedRecord::Ingest(IngestEvent {
             asset_id: None,
@@ -413,6 +414,7 @@ impl Dispatcher {
             source_event_id,
             source_session_id: self.current_session_id.clone(),
             sequence,
+            ingest_ordinal: None,
         }
     }
 
@@ -1452,6 +1454,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
 
         assert_eq!(

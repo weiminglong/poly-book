@@ -272,6 +272,7 @@ fn reconstruct_book(
                             source_event_id: event.provenance.source_event_id.clone(),
                             source_session_id: event.provenance.source_session_id.clone(),
                             sequence: event.provenance.sequence,
+                            ingest_ordinal: None,
                         },
                         expected_sequence: Some(book.sequence.raw() + 1),
                         observed_sequence: Some(next_sequence.raw()),
@@ -307,6 +308,7 @@ fn reconstruct_book(
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,
@@ -330,16 +332,18 @@ fn latest_reset_boundary_us(events: &[IngestEvent], target_timestamp_us: u64) ->
 
 /// Sort book events into a deterministic total order for replay.
 ///
-/// The primary/secondary keys are clock-domain timestamps; the per-asset
-/// `sequence` is the next tiebreaker. Beyond that we add content-based
-/// tiebreakers (side, price, size, source event id) so that events which are
-/// otherwise equal under the timestamp+sequence key sort identically on every
-/// run — regardless of the concurrent, unordered order in which Parquet files
-/// were read (`buffer_unordered`). Without this, two replays of the same window
-/// could apply equal-key events in different orders and diverge (audit finding
-/// A.117). True arrival-order disambiguation of a same-microsecond pre-snapshot
-/// delta vs. its snapshot (A.116) requires a persisted monotonic ingest ordinal
-/// and is tracked separately.
+/// The primary/secondary keys are clock-domain timestamps. Within the same
+/// timestamp the authoritative tiebreaker is `ingest_ordinal` — a process-
+/// monotonic counter stamped at ingest in true arrival order — so a
+/// same-microsecond pre-snapshot delta (lower ordinal) sorts *before* its
+/// snapshot (higher ordinal), which `sequence` could not express because it
+/// resets to 0 on every snapshot (audit finding A.116). Events lacking an
+/// ordinal (legacy data written before A.116) sort after those that have one at
+/// the same timestamp and fall back to `sequence` plus content tiebreakers
+/// (side, price, size, source event id) so the order is still a deterministic
+/// total order regardless of the concurrent, unordered Parquet read order
+/// (`buffer_unordered`) — without which two replays of the same window could
+/// diverge (audit finding A.117).
 fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {
     events.sort_by(|a, b| {
         let (a_primary, a_secondary) = ordering_keys(a, mode);
@@ -347,6 +351,14 @@ fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {
         a_primary
             .cmp(&b_primary)
             .then_with(|| a_secondary.cmp(&b_secondary))
+            // None sorts last (legacy data) via MAX sentinel; when present, the
+            // ordinal alone is a total order within the timestamp.
+            .then_with(|| {
+                a.provenance
+                    .ingest_ordinal
+                    .unwrap_or(u64::MAX)
+                    .cmp(&b.provenance.ingest_ordinal.unwrap_or(u64::MAX))
+            })
             .then_with(|| {
                 a.provenance
                     .sequence
@@ -489,6 +501,7 @@ mod sort_tests {
                 source_event_id: source_event_id.map(|s| s.to_string()),
                 source_session_id: None,
                 sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: None,
             },
         }
     }
@@ -563,5 +576,87 @@ mod sort_tests {
                 "adjacent events are indistinguishable: {a:?} vs {b:?}"
             );
         }
+    }
+
+    fn with_ordinal(mut event: BookEvent, ordinal: u64) -> BookEvent {
+        event.provenance.ingest_ordinal = Some(ordinal);
+        event
+    }
+
+    /// A same-microsecond delta that arrived *before* the snapshot (lower ingest
+    /// ordinal) must sort before the snapshot, even though its `sequence` is
+    /// higher than the snapshot's reset-to-0 sequence (audit finding A.116).
+    #[test]
+    fn pre_snapshot_delta_sorts_before_snapshot_via_ingest_ordinal() {
+        // Same recv_ts. Delta arrived first (ordinal 7) with sequence 42; the
+        // snapshot arrived next (ordinal 8) and reset sequence to 0.
+        let delta = with_ordinal(
+            book_event(
+                BookEventKind::Delta,
+                Side::Bid,
+                5000,
+                10,
+                100,
+                42,
+                Some("d"),
+            ),
+            7,
+        );
+        let snapshot = with_ordinal(
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                5000,
+                30,
+                100,
+                0,
+                Some("s"),
+            ),
+            8,
+        );
+
+        // Present the snapshot first to prove ordering is by ordinal, not input.
+        let mut events = vec![snapshot, delta];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+
+        assert_eq!(
+            events[0].kind,
+            BookEventKind::Delta,
+            "delta must sort first"
+        );
+        assert_eq!(events[0].provenance.ingest_ordinal, Some(7));
+        assert_eq!(events[1].kind, BookEventKind::Snapshot);
+        assert_eq!(events[1].provenance.ingest_ordinal, Some(8));
+    }
+
+    /// Without the ingest ordinal (legacy data), the snapshot's reset sequence
+    /// (0) makes the pre-snapshot delta sort AFTER it — the exact A.116 bug. This
+    /// documents why the ordinal is required (it is not a regression: legacy data
+    /// has no better signal).
+    #[test]
+    fn legacy_events_without_ordinal_fall_back_to_sequence() {
+        let delta = book_event(
+            BookEventKind::Delta,
+            Side::Bid,
+            5000,
+            10,
+            100,
+            42,
+            Some("d"),
+        );
+        let snapshot = book_event(
+            BookEventKind::Snapshot,
+            Side::Bid,
+            5000,
+            30,
+            100,
+            0,
+            Some("s"),
+        );
+        let mut events = vec![delta, snapshot];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+        // Snapshot (seq 0) sorts before delta (seq 42) — the legacy fallback.
+        assert_eq!(events[0].kind, BookEventKind::Snapshot);
+        assert_eq!(events[1].kind, BookEventKind::Delta);
     }
 }

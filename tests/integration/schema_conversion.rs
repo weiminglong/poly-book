@@ -27,6 +27,7 @@ fn sample_records() -> Vec<PersistedRecord> {
                 source_event_id: Some("book-1".to_string()),
                 source_session_id: Some("session-1".to_string()),
                 sequence: Some(Sequence::new(0)),
+                ingest_ordinal: None,
             },
         }),
         PersistedRecord::Trade(TradeEvent {
@@ -43,6 +44,7 @@ fn sample_records() -> Vec<PersistedRecord> {
                 source_event_id: Some("trade-1".to_string()),
                 source_session_id: Some("session-1".to_string()),
                 sequence: Some(Sequence::new(1)),
+                ingest_ordinal: None,
             },
         }),
         PersistedRecord::Execution(ExecutionEvent {

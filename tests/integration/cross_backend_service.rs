@@ -33,6 +33,7 @@ fn provenance(recv_us: u64, exchange_us: u64, seq: Option<u64>) -> EventProvenan
         source_event_id: None,
         source_session_id: Some("session-cross".to_string()),
         sequence: seq.map(Sequence::new),
+        ingest_ordinal: None,
     }
 }
 

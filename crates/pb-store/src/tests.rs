@@ -35,6 +35,7 @@ fn test_provenance(recv_ts: u64) -> EventProvenance {
         source_event_id: Some("evt-1".into()),
         source_session_id: Some("sess-1".into()),
         sequence: Some(Sequence::new(1)),
+        ingest_ordinal: None,
     }
 }
 
@@ -143,13 +144,15 @@ const FIXED_TS_US: u64 = 1_750_000_200_000_000;
 #[test]
 fn book_event_schema_has_correct_fields() {
     let schema = book_event_schema();
-    assert_eq!(schema.fields().len(), 11);
+    assert_eq!(schema.fields().len(), 12);
     assert_eq!(schema.field(0).name(), "recv_timestamp_us");
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
     assert!(!schema.field(0).is_nullable());
     assert_eq!(schema.field(3).name(), "event_kind");
     assert_eq!(schema.field(3).data_type(), &DataType::UInt8);
     assert!(schema.field(7).is_nullable()); // sequence
+    assert_eq!(schema.field(11).name(), "ingest_ordinal");
+    assert!(schema.field(11).is_nullable());
 }
 
 #[test]
@@ -201,7 +204,7 @@ fn execution_event_schema_has_correct_fields() {
 #[test]
 fn schema_for_record_dispatches_correctly() {
     let book = PersistedRecord::Book(make_book_event(FIXED_TS_US));
-    assert_eq!(schema_for_record(&book).fields().len(), 11);
+    assert_eq!(schema_for_record(&book).fields().len(), 12);
 
     let trade = PersistedRecord::Trade(make_trade_event(FIXED_TS_US));
     assert_eq!(schema_for_record(&trade).fields().len(), 12);
@@ -228,7 +231,7 @@ fn book_event_record_batch_roundtrip() {
     let record = PersistedRecord::Book(make_book_event(FIXED_TS_US));
     let batch = records_to_record_batch(&[&record]).unwrap();
     assert_eq!(batch.num_rows(), 1);
-    assert_eq!(batch.num_columns(), 11);
+    assert_eq!(batch.num_columns(), 12);
 }
 
 #[test]

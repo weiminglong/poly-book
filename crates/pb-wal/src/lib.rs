@@ -1053,6 +1053,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: Some("ws-1".to_string()),
                 sequence: Some(Sequence::new(42)),
+                ingest_ordinal: None,
             },
         });
 
