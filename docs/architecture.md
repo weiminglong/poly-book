@@ -163,11 +163,13 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │                  serve-api process                   │
 │                                                     │
 │  WsClient ──▶ Dispatcher ──▶ LiveReadModel          │
-│                    │              │                  │
-│                    ▼              ├─▶ REST handlers  │
-│              ParquetSink          └─▶ WS streaming   │
+│                                   │                  │
+│                                   ├─▶ REST handlers  │
+│                                   └─▶ WS streaming   │
+│  (in-memory only — no WAL, no storage sinks)        │
 │                                                     │
 │  pb-service ──▶ ReplayEngine ──▶ replay handlers    │
+│  (reads historical Parquet/ClickHouse for replay)   │
 │                                                     │
 │  Metrics server on :9090                            │
 │  API server on :3000                                │

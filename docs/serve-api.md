@@ -196,9 +196,11 @@ Guard rails:
 - Queries time out after `query_timeout_secs` (default 30s)
 - Both endpoints return 503 when the query workbench is disabled
 
-### Health Endpoint
+### Health Endpoints
 
-`GET /api/v1/health` returns operational status for the serve process:
+`GET /health` returns detailed operational status for the serve process (always
+HTTP 200). For probes, use `GET /health/live` (liveness) and `GET /health/ready`
+(200 only when ready, otherwise 503).
 
 ```json
 {
