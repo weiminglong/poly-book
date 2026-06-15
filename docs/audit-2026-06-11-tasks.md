@@ -51,7 +51,7 @@
 
 ## Durability — storage sinks
 
-### [ ] P1-STORE-1 — Make ClickHouse persistence functional and put it under CI
+### [x] P1-STORE-1 — Make ClickHouse persistence functional and put it under CI
 - **Severity:** high · **Findings:** A.3, A.4, A.25
 - **Files:** `crates/pb-store/src/writer.rs:38` (DDL with `Nullable` in `ORDER BY`), `:232` (Enum8 serialized as Rust `String` over RowBinary), `crates/pb-replay/src/reader.rs` (matching reader structs), `.github/workflows/ci.yml:33`
 - **Problem:** Two independent, empirically-reproduced defects make the ClickHouse sink unable to persist anything against a stock server: `Nullable` columns in the sorting key are rejected (`allow_nullable_key` off by default), and `Enum8` columns are written as `String` (RowBinary validator rejects → every batch aborts). `ensure_tables()` failure is only a `warn!`, so it fails silently while Parquet runs.
@@ -227,7 +227,7 @@
 - **Action:** Add a read-idle/heartbeat watchdog (track pongs; force reconnect on no traffic within a deadline). Reset `attempt` to 0 after a successful, stable session; keep jitter active at the cap. Emit a feed-staleness metric (pairs with P2-OBS-1).
 - **Done when:** a simulated half-open connection triggers a reconnect within the deadline (test); backoff returns to base after a healthy session; jitter is non-zero at the cap.
 
-### [ ] P2-API-3 — Sanitize error responses; split health endpoints
+### [x] P2-API-3 — Sanitize error responses; split health endpoints
 - **Severity:** medium · **Findings:** A.95, A.96, A.112
 - **Files:** `crates/pb-api/src/error.rs:39`, `crates/pb-api/src/server.rs:157`, `crates/pb-grpc/src/lib.rs:258`/`:255`
 - **Problem:** Internal error details (ClickHouse URLs, storage errors) are returned verbatim to unauthenticated clients and 500s are never logged; `/health` returns 200 when not ready (breaking status-code probes); the gRPC server logs "bound" before binding and swallows bind failures, so `serve` silently runs without gRPC.

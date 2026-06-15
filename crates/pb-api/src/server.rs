@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
-use axum::extract::{MatchedPath, Path, Query, State};
-use axum::http::Request;
+use axum::extract::{DefaultBodyLimit, MatchedPath, Path, Query, State};
+use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use pb_service::{
@@ -15,6 +15,7 @@ use pb_service::{
 use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
@@ -109,11 +110,26 @@ fn resolve_asset_id(state: &AppState, input: &str) -> String {
     }
 }
 
+/// Per-request timeout for the (request/response) HTTP API routes. Not applied
+/// to the long-lived WebSocket route, which must outlive any request timeout.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Max in-flight HTTP API requests; excess requests wait for a slot. Bounds the
+/// blast radius of expensive historical/replay queries (A.92).
+const MAX_INFLIGHT_HTTP_REQUESTS: usize = 256;
+/// Max request body size for HTTP routes (the SQL workbench POST in particular).
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
+fn http_concurrency_limiter() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(MAX_INFLIGHT_HTTP_REQUESTS))
+}
+
 pub fn router(state: AppState) -> Router {
     use axum::routing::any;
 
-    Router::new()
-        .route("/health", get(health))
+    // Request/response HTTP API routes: bounded by a per-request timeout, a
+    // global concurrency cap, and a request-body size limit.
+    let api_routes = Router::new()
         .route("/api/v1/feed/status", get(feed_status))
         .route("/api/v1/assets/active", get(active_assets))
         .route(
@@ -126,12 +142,55 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/query/datasets", get(query_datasets))
         .route("/api/v1/query/sql", post(query_sql))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .layer(middleware::from_fn(http_request_timeout))
+        .layer(middleware::from_fn(http_concurrency_guard));
+
+    // Liveness/readiness and the long-lived WS stream are kept off the
+    // timeout/concurrency layers.
+    Router::new()
+        .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
+        .merge(api_routes)
         .route(
             "/api/v1/streams/orderbook",
             any(crate::streaming::ws_orderbook),
         )
         .layer(middleware::from_fn(track_request_metrics))
         .with_state(state)
+}
+
+/// Reject a request that exceeds `HTTP_REQUEST_TIMEOUT` with 504 instead of
+/// letting an expensive query run unbounded (A.92).
+async fn http_request_timeout(req: Request<axum::body::Body>, next: Next) -> Response {
+    match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(crate::dto::ApiErrorResponse {
+                error: "request timed out".to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Cap the number of concurrent in-flight HTTP API requests (A.92).
+async fn http_concurrency_guard(req: Request<axum::body::Body>, next: Next) -> Response {
+    let _permit = match http_concurrency_limiter().try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(crate::dto::ApiErrorResponse {
+                    error: "server at capacity, retry shortly".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    next.run(req).await
 }
 
 pub async fn serve(
@@ -154,16 +213,39 @@ struct HealthResponse {
     needs_resync: bool,
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+fn health_snapshot(state: &AppState) -> HealthResponse {
     let hydrated = state.live.is_hydrated();
     let wal_lag = state.wal_lag_bytes.load(Ordering::Relaxed);
     let needs_resync = state.needs_resync.load(Ordering::Relaxed);
-    Json(HealthResponse {
+    HealthResponse {
         ready: hydrated && !needs_resync,
         hydrated,
         wal_lag_bytes: wal_lag,
         needs_resync,
-    })
+    }
+}
+
+/// Detailed health JSON (always HTTP 200). Kept for human/dashboard use; probes
+/// should target `/health/live` and `/health/ready` for status-code semantics.
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(health_snapshot(&state))
+}
+
+/// Liveness: the process is up and serving. Always 200.
+async fn health_live() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Readiness: 200 only when hydrated and not awaiting resync, otherwise 503, so
+/// status-code-based probes (k8s, load balancers) work correctly (A.96).
+async fn health_ready(State(state): State<AppState>) -> Response {
+    let snapshot = health_snapshot(&state);
+    let status = if snapshot.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(snapshot)).into_response()
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
@@ -595,6 +677,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn health_live_is_always_ok() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_ready_reflects_readiness_via_status_code() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+
+        // test_state is hydrated and not awaiting resync → ready → 200.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Force a resync requirement → not ready → 503, so status-code probes
+        // see the change (A.96).
+        state.needs_resync.store(true, Ordering::Relaxed);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

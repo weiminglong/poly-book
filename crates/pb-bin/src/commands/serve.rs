@@ -35,7 +35,7 @@ pub async fn run(
 
     let api_listen_addr: SocketAddr = settings
         .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()?;
     let default_depth = settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;

@@ -19,8 +19,13 @@ clickhouse_database = "poly_book"
 clickhouse_batch_interval_secs = 1
 clickhouse_batch_size = 10000
 
+# Trust boundary: these services have NO authentication. They default to
+# loopback (127.0.0.1) so nothing is exposed off-host out of the box. To serve
+# other hosts, put an authenticating reverse proxy in front and only then change
+# the bind address (e.g. PB__API__LISTEN_ADDR=0.0.0.0:3000). Never bind the
+# metrics or SQL-workbench surfaces to a public interface.
 [metrics]
-listen_addr = "0.0.0.0:9090"
+listen_addr = "127.0.0.1:9090"
 endpoint = "/metrics"
 
 [wal]
@@ -38,7 +43,8 @@ flush_interval_ms = 20
 sync_interval_ms = 200
 
 [api]
-listen_addr = "0.0.0.0:3000"
+# Loopback by default — see the trust-boundary note above the [metrics] section.
+listen_addr = "127.0.0.1:3000"
 default_depth = 20
 max_depth = 200
 stale_after_secs = 15
@@ -51,7 +57,8 @@ query_timeout_secs = 30
 
 [grpc]
 enabled = false
-listen_addr = "0.0.0.0:50051"
+# Loopback by default — see the trust-boundary note above the [metrics] section.
+listen_addr = "127.0.0.1:50051"
 
 [logging]
 level = "info"

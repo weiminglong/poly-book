@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 pub async fn start_metrics_server(settings: &Config) -> Result<()> {
     let metrics_addr: SocketAddr = settings
         .get_string("metrics.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
         .parse()?;
     let metrics_endpoint = settings
         .get_string("metrics.endpoint")
@@ -335,9 +335,9 @@ pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
     let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
     let addr: SocketAddr = settings
         .get_string("grpc.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
         .parse()
-        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
+        .unwrap_or_else(|_| "127.0.0.1:50051".parse().unwrap());
     (enabled, addr)
 }
 
@@ -489,7 +489,7 @@ mod tests {
     fn grpc_config_defaults() {
         let (enabled, addr) = grpc_config_from_settings(&empty_config());
         assert!(!enabled);
-        assert_eq!(addr, "0.0.0.0:50051".parse::<SocketAddr>().unwrap());
+        assert_eq!(addr, "127.0.0.1:50051".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
