@@ -56,8 +56,8 @@ query_timeout_secs = 30
 [wal]
 base_path = "./data/wal"
 segment_size_mb = 64
-max_segments = 16             # reserved; pruning is currently lag-byte driven, not count-based
-max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window
+max_segments = 16             # hard cap on retained segments (incl. active); pruning enforces both this and the lag-byte budget
+max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window (lag-byte budget)
 position_commit_interval_ms = 1000
 flush_interval_ms = 20        # BufWriter flush cadence (tail-reader visibility)
 sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)

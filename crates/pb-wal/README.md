@@ -103,7 +103,14 @@ and feeds decoded records into the live read model.
   consumers have advanced past. The active segment is never pruned.
 - **Backpressure pruning**: `WalWriter::prune_with_backpressure()` retains at
   least `max_consumer_lag_bytes` worth of segments so new replicas have a window
-  to hydrate before old segments disappear.
+  to hydrate before old segments disappear, while also enforcing a hard
+  `max_segments` count cap so the WAL cannot grow without bound when the byte
+  budget is generous. When a lagging consumer blocks pruning below the cap, a
+  needs-resync warning is logged instead of letting the disk fill.
+- **Single-writer mutual exclusion**: `WalWriter::open` acquires an exclusive
+  advisory `flock` on `<base>/.wal.lock`; a second writer on the same directory
+  fails fast with `WalError::WriterLocked` rather than interleaving appends. The
+  lock auto-releases on process exit (crash-safe, no stale lock file).
 - **Gap detection**: `WalReader::needs_resync()` returns `true` if the reader's
   committed position references a segment that has been pruned, indicating the
   consumer should re-hydrate from a checkpoint.
