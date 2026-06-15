@@ -6,8 +6,8 @@ resource "aws_iam_role" "ecs_execution" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "ecs-tasks.amazonaws.com" }
     }]
   })
@@ -26,8 +26,8 @@ resource "aws_iam_role" "ecs_task" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "ecs-tasks.amazonaws.com" }
     }]
   })
@@ -39,19 +39,34 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:ListBucket",
-        "s3:DeleteObject"
-      ]
-      Resource = [
-        aws_s3_bucket.data.arn,
-        "${aws_s3_bucket.data.arn}/*"
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          # Required by the `reconcile` command, which replaces stale Parquet
+          # partitions (delete-then-write) when rebuilding from the WAL (A.27).
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          aws_s3_bucket.data.arn,
+          "${aws_s3_bucket.data.arn}/*"
+        ]
+      },
+      {
+        # The data bucket is SSE-KMS encrypted, so the task must use the CMK to
+        # read (Decrypt) and write (GenerateDataKey) objects. Scoped to this one
+        # key, not "*" (audit finding A.134).
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ]
+        Resource = aws_kms_key.s3.arn
+      }
+    ]
   })
 }
 
@@ -114,14 +129,23 @@ resource "aws_iam_role_policy" "github_actions" {
         Resource = aws_ecr_repository.app.arn
       },
       {
+        # RegisterTaskDefinition / DescribeTaskDefinition do not support
+        # resource-level permissions in IAM, so they must use "*" (audit finding
+        # A.133 — this is an AWS limitation, not over-permissioning).
         Effect = "Allow"
         Action = [
-          "ecs:DescribeServices",
-          "ecs:UpdateService",
-          "ecs:DescribeTaskDefinition",
-          "ecs:RegisterTaskDefinition"
+          "ecs:RegisterTaskDefinition",
+          "ecs:DescribeTaskDefinition"
         ]
         Resource = "*"
+      },
+      {
+        # UpdateService / DescribeServices DO support resource-level permissions,
+        # so scope them to this service only — a compromised pipeline can no
+        # longer repoint or redeploy arbitrary ECS services in the account (A.133).
+        Effect   = "Allow"
+        Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
+        Resource = aws_ecs_service.app.id
       },
       {
         Effect = "Allow"
