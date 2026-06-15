@@ -44,6 +44,10 @@ pub async fn run(
     let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<pb_feed::FeedMessage>(2_048);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
     let (_active_assets_tx, active_assets_rx) = tokio::sync::watch::channel(token_ids.clone());
+    // Channel for resnapshot requests the dispatcher raises on a book divergence
+    // (A.74). Small + non-blocking: a backlog means a resnapshot is already
+    // pending, so dropped requests are harmless.
+    let (resnapshot_tx, resnapshot_rx) = tokio::sync::mpsc::channel::<std::sync::Arc<str>>(64);
 
     // All long-lived background tasks are registered with a supervisor so that
     // an unexpected exit (a sink failing, the feed dying, a panic) is detected
@@ -52,7 +56,7 @@ pub async fn run(
     // was previously absent — the #2 audit finding).
     let mut supervisor = pipeline::Supervisor::new();
 
-    let ws_client = pb_feed::WsClient::new(token_ids, raw_tx)?.with_config(ws_config);
+    let ws_client = pb_feed::WsClient::new(token_ids, raw_tx.clone())?.with_config(ws_config);
     let ws_token = shutdown.child_token();
     supervisor.spawn("websocket", async move {
         if let Err(e) = ws_client.run_with_token(ws_token).await {
@@ -60,12 +64,24 @@ pub async fn run(
         }
     });
 
-    let mut dispatcher = pb_feed::Dispatcher::new(raw_rx, event_tx.clone());
+    let mut dispatcher =
+        pb_feed::Dispatcher::new(raw_rx, event_tx.clone()).with_resnapshot_tx(resnapshot_tx);
     let dispatcher_token = shutdown.child_token();
     supervisor.spawn("dispatcher", async move {
         if let Err(e) = dispatcher.run_with_token(dispatcher_token).await {
             tracing::error!(error = %e, "dispatcher failed");
         }
+    });
+
+    // Self-healing worker: on a detected book divergence, fetch a fresh REST
+    // snapshot and re-inject it into the feed (A.74). It reuses the dispatcher's
+    // normal snapshot path via the shared raw channel.
+    let resnapshot_rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))
+        .with_config(pipeline::rest_config_from_settings(&settings));
+    let resnapshot_token = shutdown.child_token();
+    supervisor.spawn("resnapshot-worker", async move {
+        pb_feed::run_resnapshot_worker(resnapshot_rest, raw_tx, resnapshot_rx, resnapshot_token)
+            .await;
     });
 
     pipeline::start_checkpoint_producer(

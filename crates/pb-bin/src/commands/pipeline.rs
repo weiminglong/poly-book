@@ -8,6 +8,27 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Build a `RateLimiter` from `[feed]` config (shared by REST callers).
+pub fn rest_rate_limiter(settings: &Config) -> pb_feed::RateLimiter {
+    let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
+    let rate_window = settings
+        .get_int("feed.rate_limit_window_secs")
+        .unwrap_or(10) as u32;
+    pb_feed::RateLimiter::with_window(rate_requests, rate_window)
+}
+
+/// Build a `RestConfig` from `[feed]` config (shared by REST callers).
+pub fn rest_config_from_settings(settings: &Config) -> pb_feed::RestConfig {
+    pb_feed::RestConfig {
+        clob_base_url: settings
+            .get_string("feed.rest_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().clob_base_url),
+        gamma_base_url: settings
+            .get_string("feed.gamma_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
+    }
+}
+
 /// Current wall-clock time in microseconds since the Unix epoch, for measuring
 /// recv→durable latency. Saturates to 0 before the epoch (never in practice).
 pub fn now_micros() -> u64 {

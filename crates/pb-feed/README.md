@@ -96,6 +96,12 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt updates
   (A.74/A.109). Shadow books are dropped on continuity reset. Frames that match
   no known message type increment `pb_unknown_messages_dropped_total` (A.110).
+- Self-healing: on a detected divergence the dispatcher requests a resnapshot
+  (`with_resnapshot_tx`); `run_resnapshot_worker` (debounced per asset) fetches a
+  fresh REST book and re-injects it as a synthetic WS `book` message via the
+  shared raw channel, so the normal snapshot path rebuilds the book. The
+  REST→WS-`book` conversion is round-trip-tested against `WsMessage` so it matches
+  the live wire format. (Wired in `ingest`; `auto-ingest` relies on rotation.)
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
 - Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,
