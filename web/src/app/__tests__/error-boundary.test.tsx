@@ -88,6 +88,24 @@ describe('ErrorBoundary', () => {
     expect(screen.getByText('Recovered')).toBeInTheDocument()
   })
 
+  it('resets a caught error when resetKeys change (e.g. on navigation)', () => {
+    const { rerender } = render(
+      <ErrorBoundary resetKeys={['/a']}>
+        <ThrowingComponent message="route a crashed" />
+      </ErrorBoundary>,
+    )
+    expect(screen.getByText('route a crashed')).toBeInTheDocument()
+
+    // Navigating to a different route changes resetKeys and renders a healthy
+    // child — the boundary must recover instead of staying stuck on the error.
+    rerender(
+      <ErrorBoundary resetKeys={['/b']}>
+        <GoodComponent />
+      </ErrorBoundary>,
+    )
+    expect(screen.getByText('All clear')).toBeInTheDocument()
+  })
+
   it('shows generic message when error has empty message', () => {
     function ThrowEmpty(): React.ReactNode {
       throw new Error()

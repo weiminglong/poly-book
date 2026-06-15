@@ -3,12 +3,22 @@ import { Component, type ErrorInfo, type ReactNode } from 'react'
 interface ErrorBoundaryProps {
   fallback?: ReactNode
   level?: 'root' | 'route'
+  /** When any value here changes, a caught error is cleared. Pass the current
+   *  route (e.g. the pathname) so navigating away from a broken page recovers
+   *  instead of the error UI bricking all navigation (A.71). */
+  resetKeys?: unknown[]
   children: ReactNode
 }
 
 interface ErrorBoundaryState {
   hasError: boolean
   error: Error | null
+}
+
+function resetKeysChanged(a: unknown[] | undefined, b: unknown[] | undefined): boolean {
+  if (a === b) return false
+  if (!a || !b || a.length !== b.length) return true
+  return a.some((value, index) => !Object.is(value, b[index]))
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -23,6 +33,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('[ErrorBoundary]', error, info.componentStack)
+  }
+
+  componentDidUpdate(prevProps: ErrorBoundaryProps) {
+    if (this.state.hasError && resetKeysChanged(prevProps.resetKeys, this.props.resetKeys)) {
+      this.setState({ hasError: false, error: null })
+    }
   }
 
   render() {
