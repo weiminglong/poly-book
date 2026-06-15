@@ -16,6 +16,10 @@ pub struct ExecutionAppendArgs {
     /// Data sink: "parquet" or "clickhouse"
     #[arg(long, default_value = "parquet")]
     pub source: String,
+    /// Skip within-batch order-lifecycle validation (for backfilling partial
+    /// histories where, e.g., a SubmitIntent is intentionally absent).
+    #[arg(long, default_value_t = false)]
+    pub skip_lifecycle_checks: bool,
     /// Optional path to a JSON object or array payload
     #[arg(long)]
     pub json: Option<String>,
@@ -177,9 +181,109 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
     }
 }
 
+/// Returns true for execution event kinds that terminate an order's lifecycle.
+/// After any of these, no further event is valid for that order.
+fn is_terminal_kind(kind: ExecutionEventKind) -> bool {
+    matches!(
+        kind,
+        ExecutionEventKind::Fill
+            | ExecutionEventKind::CancelAck
+            | ExecutionEventKind::Reject
+            | ExecutionEventKind::Terminal
+    )
+}
+
+/// Validate the order-lifecycle coherence of a batch of execution events
+/// (audit finding A.144). Events are grouped per `order_id` and checked in
+/// timestamp order for illegal transitions:
+///
+/// - an event after a terminal event (fill/ack/cancel after Fill/CancelAck/
+///   Reject/Terminal),
+/// - a `SubmitIntent` that arrives after other activity (ack/fill before submit),
+/// - a second `SubmitIntent` for the same order,
+/// - cumulative fill size exceeding the submitted size (when the submit carries
+///   a size).
+///
+/// This is a *within-batch* check: it does not read existing history, so it is
+/// safe for appends but cannot catch violations that span separate invocations.
+/// Operators backfilling deliberately-partial histories can bypass it with
+/// `--skip-lifecycle-checks`.
+fn validate_execution_lifecycle(records: &[PersistedRecord]) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let mut by_order: BTreeMap<&str, Vec<&ExecutionEvent>> = BTreeMap::new();
+    for record in records {
+        if let PersistedRecord::Execution(event) = record {
+            by_order.entry(&event.order_id).or_default().push(event);
+        }
+    }
+
+    for (order_id, mut events) in by_order {
+        // Stable sort by timestamp so same-timestamp events keep batch order.
+        events.sort_by_key(|e| e.event_timestamp_us);
+
+        let mut terminal: Option<ExecutionEventKind> = None;
+        let mut saw_non_submit = false;
+        let mut submitted = false;
+        let mut submitted_size: Option<u64> = None;
+        let mut cumulative_fill: u64 = 0;
+
+        for event in events {
+            if let Some(term) = terminal {
+                bail!(
+                    "order {order_id}: {} event at {} follows terminal {} event",
+                    event.kind,
+                    event.event_timestamp_us,
+                    term
+                );
+            }
+            match event.kind {
+                ExecutionEventKind::SubmitIntent => {
+                    if submitted {
+                        bail!("order {order_id}: duplicate SubmitIntent");
+                    }
+                    if saw_non_submit {
+                        bail!(
+                            "order {order_id}: SubmitIntent at {} follows earlier activity \
+                             (ack/fill before submit)",
+                            event.event_timestamp_us
+                        );
+                    }
+                    submitted = true;
+                    submitted_size = event.size.map(|s| s.raw());
+                }
+                ExecutionEventKind::PartialFill | ExecutionEventKind::Fill => {
+                    saw_non_submit = true;
+                    cumulative_fill =
+                        cumulative_fill.saturating_add(event.size.map(|s| s.raw()).unwrap_or(0));
+                    if let Some(max) = submitted_size {
+                        if cumulative_fill > max {
+                            bail!(
+                                "order {order_id}: cumulative fill size {cumulative_fill} exceeds \
+                                 submitted size {max}"
+                            );
+                        }
+                    }
+                    if is_terminal_kind(event.kind) {
+                        terminal = Some(event.kind);
+                    }
+                }
+                other => {
+                    saw_non_submit = true;
+                    if is_terminal_kind(other) {
+                        terminal = Some(other);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(settings: Config, args: ExecutionAppendArgs) -> Result<()> {
     let ExecutionAppendArgs {
         source,
+        skip_lifecycle_checks,
         json,
         order_id,
         event_kind,
@@ -229,6 +333,14 @@ pub async fn run(settings: Config, args: ExecutionAppendArgs) -> Result<()> {
         };
         vec![PersistedRecord::Execution(payload.try_into()?)]
     };
+
+    // Reject incoherent order lifecycles within the batch unless explicitly
+    // bypassed for partial-history backfills (A.144).
+    if skip_lifecycle_checks {
+        tracing::warn!("skipping order-lifecycle validation (--skip-lifecycle-checks)");
+    } else {
+        validate_execution_lifecycle(&records)?;
+    }
 
     tracing::info!(source = %source, records = records.len(), "appending execution events");
 
@@ -350,5 +462,117 @@ mod tests {
         assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000_000)).is_err());
         assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000)).is_err());
         assert!(ExecutionEvent::try_from(input_with_ts(0)).is_err());
+    }
+
+    // --- Order-lifecycle validation (A.144) ---
+
+    fn exec(
+        order_id: &str,
+        kind: ExecutionEventKind,
+        ts: u64,
+        size: Option<u64>,
+    ) -> PersistedRecord {
+        PersistedRecord::Execution(ExecutionEvent {
+            event_timestamp_us: ts,
+            asset_id: Some(AssetId::new("tok1")),
+            order_id: order_id.to_string(),
+            client_order_id: None,
+            venue_order_id: None,
+            kind,
+            side: Some(Side::Bid),
+            price: Some(FixedPrice::new(5000).unwrap()),
+            size: size.map(FixedSize::new),
+            status: None,
+            reason: None,
+            latency: LatencyTrace::default(),
+        })
+    }
+
+    #[test]
+    fn lifecycle_accepts_valid_order() {
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o1", ExecutionEventKind::ExchangeAck, 1001, None),
+            exec("o1", ExecutionEventKind::PartialFill, 1002, Some(40)),
+            exec("o1", ExecutionEventKind::Fill, 1003, Some(60)),
+        ];
+        assert!(validate_execution_lifecycle(&batch).is_ok());
+    }
+
+    #[test]
+    fn lifecycle_rejects_event_after_terminal() {
+        // Fill (terminal) then a later PartialFill.
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o1", ExecutionEventKind::Fill, 1002, Some(100)),
+            exec("o1", ExecutionEventKind::PartialFill, 1003, Some(10)),
+        ];
+        let err = validate_execution_lifecycle(&batch).unwrap_err();
+        assert!(err.to_string().contains("terminal"), "got {err}");
+    }
+
+    #[test]
+    fn lifecycle_rejects_fill_after_cancel() {
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o1", ExecutionEventKind::CancelAck, 1002, None),
+            exec("o1", ExecutionEventKind::Fill, 1003, Some(50)),
+        ];
+        assert!(validate_execution_lifecycle(&batch).is_err());
+    }
+
+    #[test]
+    fn lifecycle_rejects_ack_before_submit() {
+        // ExchangeAck at t=1000, SubmitIntent at t=1001 → submit after activity.
+        let batch = vec![
+            exec("o1", ExecutionEventKind::ExchangeAck, 1000, None),
+            exec("o1", ExecutionEventKind::SubmitIntent, 1001, Some(100)),
+        ];
+        let err = validate_execution_lifecycle(&batch).unwrap_err();
+        assert!(err.to_string().contains("before submit"), "got {err}");
+    }
+
+    #[test]
+    fn lifecycle_rejects_overfill() {
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o1", ExecutionEventKind::PartialFill, 1001, Some(70)),
+            exec("o1", ExecutionEventKind::PartialFill, 1002, Some(50)),
+        ];
+        let err = validate_execution_lifecycle(&batch).unwrap_err();
+        assert!(err.to_string().contains("exceeds submitted"), "got {err}");
+    }
+
+    #[test]
+    fn lifecycle_rejects_duplicate_submit() {
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o1", ExecutionEventKind::SubmitIntent, 1001, Some(100)),
+        ];
+        assert!(validate_execution_lifecycle(&batch).is_err());
+    }
+
+    #[test]
+    fn lifecycle_allows_partial_history_without_submit() {
+        // Backfill that begins mid-lifecycle (no SubmitIntent) carries no
+        // submitted size, so cumulative-fill checks do not apply and the batch is
+        // accepted (use --skip-lifecycle-checks only for harder cases).
+        let batch = vec![
+            exec("o1", ExecutionEventKind::PartialFill, 1002, Some(40)),
+            exec("o1", ExecutionEventKind::Fill, 1003, Some(60)),
+        ];
+        assert!(validate_execution_lifecycle(&batch).is_ok());
+    }
+
+    #[test]
+    fn lifecycle_isolates_distinct_orders() {
+        // Two independent orders interleaved; each is individually valid.
+        let batch = vec![
+            exec("o1", ExecutionEventKind::SubmitIntent, 1000, Some(100)),
+            exec("o2", ExecutionEventKind::SubmitIntent, 1000, Some(50)),
+            exec("o1", ExecutionEventKind::Fill, 1002, Some(100)),
+            exec("o2", ExecutionEventKind::Fill, 1002, Some(50)),
+        ];
+        assert!(validate_execution_lifecycle(&batch).is_ok());
     }
 }
