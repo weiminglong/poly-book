@@ -21,6 +21,10 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {e}"))?;
     pb_metrics::register_metrics();
 
+    // Drain idle histogram state periodically so bucket memory stays bounded even
+    // if scraping stalls (audit finding A.115).
+    pb_metrics::spawn_upkeep(handle.clone(), Duration::from_secs(5));
+
     let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
     tracing::info!(%metrics_addr, endpoint = metrics_endpoint.as_str(), "metrics server bound");
 
