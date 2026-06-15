@@ -33,6 +33,19 @@ impl ClickHouseSink {
         }
     }
 
+    /// Override the batch size and flush interval from config (audit finding
+    /// A.54 — these keys were previously documented but ignored). Zero values
+    /// fall back to the defaults.
+    pub fn with_batch_config(mut self, batch_size: usize, batch_interval: Duration) -> Self {
+        if batch_size > 0 {
+            self.batch_size = batch_size;
+        }
+        if !batch_interval.is_zero() {
+            self.batch_interval = batch_interval;
+        }
+        self
+    }
+
     pub async fn ensure_table(&self) -> Result<(), StoreError> {
         self.ensure_tables().await
     }

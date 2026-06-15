@@ -24,23 +24,27 @@ reconnect_max_delay_ms = 30000
 rate_limit_requests = 1500
 rate_limit_window_secs = 10
 
+# parquet_base_path accepts a local path OR a URL scheme (s3://bucket/prefix,
+# gs://..., file://...); an s3:// path is wired to a real S3 object store.
 [storage]
 parquet_base_path = "./data"
 parquet_flush_interval_secs = 300
-parquet_row_group_size = 65536
+parquet_row_group_size = 65536  # reserved; not yet wired (Parquet uses a fixed row-group size)
 checkpoints_enabled = true
 checkpoint_interval_secs = 60
 clickhouse_url = "http://localhost:8123"
 clickhouse_database = "poly_book"
-clickhouse_batch_interval_secs = 1
-clickhouse_batch_size = 10000
+clickhouse_batch_interval_secs = 1   # honored by the ClickHouse sink
+clickhouse_batch_size = 10000        # honored by the ClickHouse sink
 
+# Services default to loopback (no built-in auth) — front them with an
+# authenticating reverse proxy before exposing off-host.
 [metrics]
-listen_addr = "0.0.0.0:9090"
+listen_addr = "127.0.0.1:9090"
 endpoint = "/metrics"
 
 [api]
-listen_addr = "0.0.0.0:3000"
+listen_addr = "127.0.0.1:3000"
 default_depth = 20
 max_depth = 200
 stale_after_secs = 15
@@ -52,17 +56,20 @@ query_timeout_secs = 30
 [wal]
 base_path = "./data/wal"
 segment_size_mb = 64
-max_segments = 16
-max_consumer_lag_bytes = 268435456  # 256 MB
+max_segments = 16             # reserved; pruning is currently lag-byte driven, not count-based
+max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window
 position_commit_interval_ms = 1000
+flush_interval_ms = 20        # BufWriter flush cadence (tail-reader visibility)
+sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)
 
 [grpc]
 enabled = false
-listen_addr = "0.0.0.0:50051"
+# Loopback by default; bind publicly only behind an authenticating proxy.
+listen_addr = "127.0.0.1:50051"
 
 [logging]
 level = "info"
-format = "pretty"
+format = "pretty"   # "json" emits structured JSON logs
 ```
 
 Example overrides:
@@ -315,9 +322,14 @@ curl -X POST http://localhost:3000/api/v1/query/sql \
 The workbench rejects write SQL and injects LIMIT if not present. Returns 503
 when disabled (the default).
 
-### Health Endpoint
+### Health Endpoints
 
-The `serve` process exposes `GET /health` for liveness and readiness checks:
+The `serve` process exposes:
+
+- `GET /health` — detailed JSON (always HTTP 200), for humans/dashboards.
+- `GET /health/live` — liveness; 200 whenever the process is up.
+- `GET /health/ready` — readiness; 200 only when hydrated and not awaiting
+  resync, otherwise 503. Point load-balancer / orchestrator probes here.
 
 ```bash
 curl http://localhost:3000/health
@@ -325,7 +337,9 @@ curl http://localhost:3000/health
 ```
 
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
-and requires a fresh checkpoint hydration.
+and requires a fresh checkpoint hydration. WAL segments all consumers have
+advanced past are pruned automatically by the ingest/auto-ingest process (lag-
+byte retention window), so disk usage stays bounded.
 
 ### Port Defaults
 

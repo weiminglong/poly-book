@@ -114,7 +114,16 @@ pub async fn start_storage_sinks(
         let client = clickhouse::Client::default()
             .with_url(&ch_url)
             .with_database(&ch_db);
-        let sink = pb_store::ClickHouseSink::new(crx, client);
+        let batch_size = settings
+            .get_int("storage.clickhouse_batch_size")
+            .unwrap_or(10_000)
+            .max(0) as usize;
+        let batch_interval_secs = settings
+            .get_int("storage.clickhouse_batch_interval_secs")
+            .unwrap_or(1)
+            .max(0) as u64;
+        let sink = pb_store::ClickHouseSink::new(crx, client)
+            .with_batch_config(batch_size, Duration::from_secs(batch_interval_secs));
         if let Err(e) = sink.ensure_table().await {
             tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
         }
