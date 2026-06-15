@@ -99,10 +99,25 @@ impl ExecutionAppendPayload {
     }
 }
 
+/// Plausible microsecond-timestamp range, roughly [2001, 2100). A millisecond
+/// (~1.7e12) or second (~1.7e9) value falls below the minimum and would be filed
+/// into a 1970-era partition, making the event invisible to every time-windowed
+/// query (audit finding A.61).
+const MIN_EVENT_TS_US: u64 = 1_000_000_000_000_000;
+const MAX_EVENT_TS_US: u64 = 4_102_444_800_000_000;
+
 impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
     type Error = anyhow::Error;
 
     fn try_from(value: ExecutionAppendInput) -> Result<Self, Self::Error> {
+        if !(MIN_EVENT_TS_US..MAX_EVENT_TS_US).contains(&value.event_timestamp_us) {
+            bail!(
+                "event_timestamp_us {} is not a plausible microsecond timestamp \
+                 (expected {MIN_EVENT_TS_US}..{MAX_EVENT_TS_US}); a millisecond or \
+                 second value would be filed into a 1970 partition and become invisible",
+                value.event_timestamp_us
+            );
+        }
         let kind = ExecutionEventKind::from_str(&value.event_kind)
             .map_err(|error| anyhow::anyhow!(error))?;
         let side = value
@@ -242,4 +257,46 @@ fn clickhouse_writer(settings: &Config) -> ClickHouseRecordWriter {
         .with_url(&ch_url)
         .with_database(&ch_db);
     ClickHouseRecordWriter::new(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input_with_ts(ts: u64) -> ExecutionAppendInput {
+        ExecutionAppendInput {
+            order_id: "o1".to_string(),
+            event_kind: "submit_intent".to_string(),
+            event_timestamp_us: ts,
+            asset_id: None,
+            client_order_id: None,
+            venue_order_id: None,
+            side: None,
+            price: None,
+            size: None,
+            status: None,
+            reason: None,
+            market_data_recv_us: None,
+            normalization_done_us: None,
+            strategy_decision_us: None,
+            order_submit_us: None,
+            exchange_ack_us: None,
+            exchange_fill_us: None,
+        }
+    }
+
+    #[test]
+    fn accepts_microsecond_timestamp() {
+        let ev = ExecutionEvent::try_from(input_with_ts(1_750_000_000_000_000));
+        assert!(ev.is_ok());
+    }
+
+    #[test]
+    fn rejects_millisecond_and_second_timestamps() {
+        // Millisecond (~1.75e12) and second (~1.75e9) values would land in a
+        // 1970 partition; both must be rejected (A.61).
+        assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000_000)).is_err());
+        assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000)).is_err());
+        assert!(ExecutionEvent::try_from(input_with_ts(0)).is_err());
+    }
 }
