@@ -223,6 +223,34 @@ impl LatencyTrace {
             exchange_fill_us,
         }
     }
+
+    /// The latency stages in causal order, skipping absent ones.
+    fn present_stages(&self) -> impl Iterator<Item = u64> + '_ {
+        [
+            self.market_data_recv_us,
+            self.normalization_done_us,
+            self.strategy_decision_us,
+            self.order_submit_us,
+            self.exchange_ack_us,
+            self.exchange_fill_us,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// True if the present stage timestamps are non-decreasing in causal order.
+    /// A violation means a consumer would compute a negative stage duration
+    /// (audit finding A.62).
+    pub fn is_monotonic(&self) -> bool {
+        let mut last: Option<u64> = None;
+        for stage in self.present_stages() {
+            if last.is_some_and(|prev| stage < prev) {
+                return false;
+            }
+            last = Some(stage);
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -367,6 +395,34 @@ pub struct ExecutionWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latency_trace_monotonicity() {
+        // In-order (with gaps) is monotonic.
+        let ok = LatencyTrace::from_optional_timestamps(
+            Some(100),
+            None,
+            Some(200),
+            None,
+            Some(300),
+            Some(300),
+        );
+        assert!(ok.is_monotonic());
+
+        // An earlier stage after a later one is a violation.
+        let bad = LatencyTrace::from_optional_timestamps(
+            Some(100),
+            Some(50), // normalization_done before market_data_recv
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!bad.is_monotonic());
+
+        // All-absent is vacuously monotonic.
+        assert!(LatencyTrace::default().is_monotonic());
+    }
 
     fn sample_provenance() -> EventProvenance {
         EventProvenance {

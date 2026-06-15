@@ -133,6 +133,20 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
             .transpose()?;
         let size = value.size.as_deref().map(FixedSize::try_from).transpose()?;
 
+        let latency = LatencyTrace::from_optional_timestamps(
+            value.market_data_recv_us,
+            value.normalization_done_us,
+            value.strategy_decision_us,
+            value.order_submit_us,
+            value.exchange_ack_us,
+            value.exchange_fill_us,
+        );
+        // Reject a causally-inverted latency trace, which would otherwise render
+        // as negative stage durations downstream (A.62).
+        if !latency.is_monotonic() {
+            bail!("latency stage timestamps are not in non-decreasing causal order");
+        }
+
         Ok(ExecutionEvent {
             event_timestamp_us: value.event_timestamp_us,
             asset_id: value.asset_id.map(AssetId::new),
@@ -145,14 +159,7 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
             size,
             status: value.status,
             reason: value.reason,
-            latency: LatencyTrace::from_optional_timestamps(
-                value.market_data_recv_us,
-                value.normalization_done_us,
-                value.strategy_decision_us,
-                value.order_submit_us,
-                value.exchange_ack_us,
-                value.exchange_fill_us,
-            ),
+            latency,
         })
     }
 }
@@ -289,6 +296,15 @@ mod tests {
     fn accepts_microsecond_timestamp() {
         let ev = ExecutionEvent::try_from(input_with_ts(1_750_000_000_000_000));
         assert!(ev.is_ok());
+    }
+
+    #[test]
+    fn rejects_non_monotonic_latency_trace() {
+        let mut input = input_with_ts(1_750_000_000_000_000);
+        // normalization_done before market_data_recv -> causally inverted.
+        input.market_data_recv_us = Some(100);
+        input.normalization_done_us = Some(50);
+        assert!(ExecutionEvent::try_from(input).is_err());
     }
 
     #[test]
