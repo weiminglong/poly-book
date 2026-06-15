@@ -47,6 +47,9 @@ pub struct Dispatcher {
     asset_sequences: FxHashMap<Arc<str>, u64>,
     /// Per-asset last snapshot exchange timestamp for staleness detection.
     last_snapshot_ts: FxHashMap<Arc<str>, u64>,
+    /// Per-asset last accepted snapshot venue hash, used to deduplicate exact
+    /// retransmits of identical book state (e.g. an equal-timestamp duplicate).
+    last_snapshot_hash: FxHashMap<Arc<str>, String>,
     /// Interned AssetIds to avoid heap allocation on every message.
     asset_id_cache: FxHashMap<Arc<str>, AssetId>,
     current_session_id: Option<String>,
@@ -59,6 +62,7 @@ impl Dispatcher {
             tx,
             asset_sequences: FxHashMap::default(),
             last_snapshot_ts: FxHashMap::default(),
+            last_snapshot_hash: FxHashMap::default(),
             asset_id_cache: FxHashMap::default(),
             current_session_id: None,
         }
@@ -150,6 +154,7 @@ impl Dispatcher {
     fn reset_continuity_state(&mut self) {
         self.asset_sequences.clear();
         self.last_snapshot_ts.clear();
+        self.last_snapshot_hash.clear();
     }
 
     async fn dispatch_raw(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
@@ -167,9 +172,15 @@ impl Dispatcher {
                 let exchange_ts = parse_timestamp_us(book.timestamp);
                 let source_event_id = book.hash.map(str::to_string);
 
+                // Skip only *strictly older* snapshots. Polymarket emits one
+                // `book` event per trade at millisecond resolution, so two
+                // trades in the same millisecond produce equal-timestamp
+                // snapshots whose later one carries the newer state. Dropping
+                // equal timestamps (the old `<=`) silently lost that state in
+                // exactly the high-activity bursts that matter (A.21).
                 if exchange_ts > 0 {
                     if let Some(&last_ts) = self.last_snapshot_ts.get(asset_id.as_str()) {
-                        if exchange_ts <= last_ts {
+                        if exchange_ts < last_ts {
                             warn!(
                                 asset_id = %asset_id,
                                 exchange_ts,
@@ -189,7 +200,7 @@ impl Dispatcher {
                                 expected_sequence: None,
                                 observed_sequence: None,
                                 details: Some(format!(
-                                    "snapshot exchange timestamp {} <= latest accepted {}",
+                                    "snapshot exchange timestamp {} < latest accepted {}",
                                     exchange_ts, last_ts
                                 )),
                             }))
@@ -197,38 +208,100 @@ impl Dispatcher {
                             return Ok(());
                         }
                     }
+                }
+
+                // Deduplicate exact retransmits of identical book state by venue
+                // hash, so an equal-timestamp duplicate does not re-emit a
+                // redundant snapshot.
+                if let Some(ref hash) = source_event_id {
+                    if self
+                        .last_snapshot_hash
+                        .get(asset_id.as_str())
+                        .map(String::as_str)
+                        == Some(hash.as_str())
+                    {
+                        pb_metrics::record_stale_snapshot_skipped();
+                        return Ok(());
+                    }
+                }
+
+                // Convert every level up-front. A mid-message conversion failure
+                // must not leave a truncated snapshot downstream (which would be
+                // indistinguishable from a complete one) and must not poison the
+                // staleness tracker, so on error we emit a continuity-reset
+                // marker and leave all tracker state untouched (A.108).
+                let mut levels: Vec<(Side, FixedPrice, FixedSize)> =
+                    Vec::with_capacity(book.bids.len() + book.asks.len());
+                let mut conversion_error: Option<FeedError> = None;
+                'convert: for (side, entries) in [(Side::Bid, &book.bids), (Side::Ask, &book.asks)]
+                {
+                    for entry in entries {
+                        match (
+                            FixedPrice::try_from(entry.price),
+                            FixedSize::try_from(entry.size),
+                        ) {
+                            (Ok(price), Ok(size)) => levels.push((side, price, size)),
+                            (Err(e), _) | (_, Err(e)) => {
+                                conversion_error = Some(e.into());
+                                break 'convert;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(e) = conversion_error {
+                    warn!(
+                        asset_id = %asset_id,
+                        error = %e,
+                        "book snapshot conversion failed; emitting continuity reset instead of a partial snapshot"
+                    );
+                    pb_metrics::record_stale_snapshot_skipped();
+                    self.send(PersistedRecord::Ingest(IngestEvent {
+                        asset_id: Some(asset_id),
+                        kind: IngestEventKind::SourceReset,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id,
+                            None,
+                        ),
+                        expected_sequence: None,
+                        observed_sequence: None,
+                        details: Some(format!("book snapshot dropped (unparseable level): {e}")),
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+
+                // Full conversion succeeded — commit atomically: advance the
+                // staleness tracker, record the hash, reset the sequence
+                // counter, then emit the snapshot.
+                if exchange_ts > 0 {
                     self.last_snapshot_ts
                         .insert(asset_id.0.clone(), exchange_ts);
                 }
+                if let Some(ref hash) = source_event_id {
+                    self.last_snapshot_hash
+                        .insert(asset_id.0.clone(), hash.clone());
+                }
                 pb_metrics::record_snapshot_reconciled();
-
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
 
-                for entry in &book.bids {
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
-                        asset_id.clone(),
-                        BookEventKind::Snapshot,
-                        Side::Bid,
-                        entry.price,
-                        entry.size,
-                        source_event_id.clone(),
-                    )?;
-                    self.send(PersistedRecord::Book(event)).await?;
-                }
-
-                for entry in &book.asks {
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
-                        asset_id.clone(),
-                        BookEventKind::Snapshot,
-                        Side::Ask,
-                        entry.price,
-                        entry.size,
-                        source_event_id.clone(),
-                    )?;
+                for (side, price, size) in levels {
+                    let sequence = self.next_sequence_for(&asset_id);
+                    let event = BookEvent {
+                        asset_id: asset_id.clone(),
+                        kind: BookEventKind::Snapshot,
+                        side,
+                        price,
+                        size,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id.clone(),
+                            Some(sequence),
+                        ),
+                    };
                     self.send(PersistedRecord::Book(event)).await?;
                 }
             }
@@ -244,16 +317,41 @@ impl Dispatcher {
                     };
 
                     let asset_id = self.intern_asset_id(entry.asset_id);
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
+                    // Skip an unparseable price/size entry instead of aborting
+                    // the whole price_change batch (which would also drop the
+                    // valid entries after it). Deltas are independent level
+                    // updates, so this matches the existing bad-side handling
+                    // (A.108).
+                    let (price, size) = match (
+                        FixedPrice::try_from(entry.price),
+                        FixedSize::try_from(entry.size),
+                    ) {
+                        (Ok(price), Ok(size)) => (price, size),
+                        (Err(e), _) | (_, Err(e)) => {
+                            warn!(
+                                asset_id = %asset_id,
+                                error = %e,
+                                "price_change entry conversion failed, skipping delta"
+                            );
+                            pb_metrics::record_stale_snapshot_skipped();
+                            continue;
+                        }
+                    };
+
+                    let sequence = self.next_sequence_for(&asset_id);
+                    let event = BookEvent {
                         asset_id,
-                        BookEventKind::Delta,
+                        kind: BookEventKind::Delta,
                         side,
-                        entry.price,
-                        entry.size,
-                        entry.hash.map(str::to_string),
-                    )?;
+                        price,
+                        size,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            entry.hash.map(str::to_string),
+                            Some(sequence),
+                        ),
+                    };
                     self.send(PersistedRecord::Book(event)).await?;
                 }
             }
@@ -299,37 +397,6 @@ impl Dispatcher {
         }
 
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
-    fn make_book_event(
-        &mut self,
-        recv_timestamp_us: u64,
-        exchange_timestamp_us: u64,
-        asset_id: AssetId,
-        kind: BookEventKind,
-        side: Side,
-        price_str: &str,
-        size_str: &str,
-        source_event_id: Option<String>,
-    ) -> Result<BookEvent, FeedError> {
-        let price = FixedPrice::try_from(price_str)?;
-        let size = FixedSize::try_from(size_str)?;
-        let sequence = self.next_sequence_for(&asset_id);
-
-        Ok(BookEvent {
-            asset_id,
-            kind,
-            side,
-            price,
-            size,
-            provenance: self.make_provenance(
-                recv_timestamp_us,
-                exchange_timestamp_us,
-                source_event_id,
-                Some(sequence),
-            ),
-        })
     }
 
     fn make_provenance(
@@ -515,6 +582,151 @@ mod tests {
             }
             other => panic!("expected ingest event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn same_millisecond_snapshot_is_accepted_not_dropped() {
+        // Two snapshots with equal exchange timestamps (two trades within the
+        // same millisecond): the second must be applied, not dropped (A.21).
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let first = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "h1",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(first.to_string()))
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.kind, BookEventKind::Snapshot),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+
+        // Same timestamp, different state (different hash) — must be accepted.
+        let second = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "h2",
+            "bids": [{"price": "0.51", "size": "11"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(second.to_string()))
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => {
+                assert_eq!(e.kind, BookEventKind::Snapshot);
+                assert_eq!(e.price, FixedPrice::try_from("0.51").unwrap());
+            }
+            other => panic!("expected accepted same-ms snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_snapshot_retransmit_is_deduped_by_hash() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "same-hash",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await.unwrap(),
+            PersistedRecord::Book(_)
+        ));
+
+        // Exact retransmit (same hash) — deduped, no new record emitted.
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_unparseable_level_emits_reset_not_partial() {
+        // A snapshot whose second level is unparseable must produce ZERO book
+        // events (no partial snapshot) and a single continuity-reset marker,
+        // and must not advance the staleness tracker (A.108).
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "bids": [{"price": "0.50", "size": "10"}, {"price": "not-a-number", "size": "5"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Ingest(e) => assert_eq!(e.kind, IngestEventKind::SourceReset),
+            other => panic!("expected source-reset marker, got {other:?}"),
+        }
+        // No book events at all (not even the first, valid bid).
+        assert!(event_rx.try_recv().is_err());
+        // Tracker untouched, so a subsequent valid snapshot at the same ts is
+        // still accepted.
+        assert!(!dispatcher.last_snapshot_ts.contains_key("tok1"));
+    }
+
+    #[tokio::test]
+    async fn price_change_skips_bad_entry_keeps_valid_ones() {
+        // A price_change batch with one unparseable entry must still emit the
+        // valid deltas around it (A.108), not abort the whole batch.
+        let (_raw_tx, raw_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000000",
+            "price_changes": [
+                {"asset_id": "tok1", "price": "0.50", "size": "10", "side": "BUY"},
+                {"asset_id": "tok1", "price": "bad", "size": "1", "side": "BUY"},
+                {"asset_id": "tok1", "price": "0.55", "size": "20", "side": "SELL"}
+            ]
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // First valid delta.
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.price, FixedPrice::try_from("0.50").unwrap()),
+            other => panic!("expected first delta, got {other:?}"),
+        }
+        // Third valid delta (second was skipped).
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.price, FixedPrice::try_from("0.55").unwrap()),
+            other => panic!("expected third delta, got {other:?}"),
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]

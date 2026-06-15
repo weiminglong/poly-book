@@ -104,7 +104,7 @@
 
 ## Feed ingest correctness
 
-### [ ] P1-FEED-1 — Fix the `<=` stale-snapshot guard and atomic snapshot emission
+### [x] P1-FEED-1 — Fix the `<=` stale-snapshot guard and atomic snapshot emission
 - **Severity:** high · **Findings:** A.21, A.108
 - **Files:** `crates/pb-feed/src/dispatcher.rs:172` (`exchange_ts <= last_ts`), `:200-202` (ts advanced before parse), `:217`, `:256` (per-level `?` aborts mid-batch)
 - **Problem:** Two trades in the same millisecond produce two `book` snapshots with equal timestamps; the `<=` check drops the newer one (confirmed 7× in captured V2 data), and trade-induced changes only arrive via `book` events, so the state stays wrong until the next trade. Separately, a mid-message per-level conversion failure emits a truncated snapshot (e.g. bids only) that looks complete, and `last_snapshot_ts` was already advanced so retransmits are rejected — poisoning the tracker.

@@ -74,9 +74,20 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   snapshot tracking before emitting `SourceReset`, so downstream replay does not
   stitch state across feed sessions or reject the first fresh post-reconnect
   snapshot as stale.
+- Snapshot staleness: only *strictly older* snapshots (`exchange_ts < last_ts`)
+  are skipped. Polymarket emits one `book` per trade at millisecond resolution,
+  so two trades in the same millisecond produce equal-timestamp snapshots whose
+  later one carries newer state; equal timestamps are accepted, and exact
+  retransmits of identical state are deduplicated by the venue `hash`.
+- Atomic snapshots: a `book` message's levels are all converted before any are
+  emitted. A mid-message conversion failure emits a single `SourceReset` marker
+  (and leaves the staleness tracker untouched) instead of a partial snapshot
+  that would be indistinguishable from a complete one. A `price_change` batch
+  skips an unparseable entry rather than aborting the remaining valid deltas.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
-- 50 tests covering malformed JSON, `parse_side` coverage, dispatcher behavior,
+- Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,
+  same-millisecond and duplicate snapshot handling, atomic snapshot emission,
   lifecycle events, and run loop shutdown.
 
 ## Docs to Update After Changes
