@@ -58,7 +58,7 @@ export function useFeedStatus(opts?: Partial<UseQueryOptions<FeedStatusResponse>
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.feedStatus,
+    queryKey: [sourceMode, ...queryKeys.feedStatus],
     queryFn: isDemo
       ? () => getDemoFeedStatus()
       : ({ signal }) =>
@@ -76,7 +76,7 @@ export function useActiveAssets(opts?: Partial<UseQueryOptions<ActiveAssetSummar
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.activeAssets,
+    queryKey: [sourceMode, ...queryKeys.activeAssets],
     queryFn: isDemo
       ? () => getDemoActiveAssets()
       : ({ signal }) =>
@@ -98,7 +98,7 @@ export function useOrderBookSnapshot(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.orderbook(assetId, depth),
+    queryKey: [sourceMode, ...queryKeys.orderbook(assetId, depth)],
     queryFn: isDemo
       ? () => getDemoSnapshot(assetId, depth)
       : ({ signal }) =>
@@ -124,7 +124,7 @@ export function useReplayReconstruction(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.replay(request) : ['replay-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.replay(request) : ['replay-disabled'])],
     queryFn: isDemo
       ? () => {
           if (!request) throw new Error('No replay request')
@@ -158,7 +158,7 @@ export function useIntegritySummary(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.integrity(request) : ['integrity-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.integrity(request) : ['integrity-disabled'])],
     queryFn: isDemo
       ? () => getDemoIntegrity()
       : ({ signal }) => {
@@ -187,7 +187,7 @@ export function useExecutionTimeline(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.execution(request) : ['execution-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.execution(request) : ['execution-disabled'])],
     queryFn: isDemo
       ? () => getDemoExecution()
       : ({ signal }) => {
@@ -216,7 +216,7 @@ export function useDatasets(opts?: Partial<UseQueryOptions<DatasetSchemaResponse
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.datasets,
+    queryKey: [sourceMode, ...queryKeys.datasets],
     queryFn: isDemo
       ? () => getDemoDatasets()
       : ({ signal }) =>
