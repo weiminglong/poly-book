@@ -10,6 +10,10 @@ pub fn register_metrics() {
         "pb_unknown_messages_dropped_total",
         "Total WebSocket frames dropped because they did not deserialize into a known message type"
     );
+    describe_counter!(
+        "pb_book_mismatches_total",
+        "Total times the reconstructed top-of-book diverged from the venue-stated best bid/ask"
+    );
     describe_counter!("pb_snapshots_applied_total", "Total book snapshots applied");
     describe_counter!("pb_deltas_applied_total", "Total book deltas applied");
     describe_counter!("pb_trades_received_total", "Total trades received");
@@ -83,6 +87,12 @@ pub fn record_message_received(event_type: &'static str) {
 /// venue message types was invisible to operators (audit finding A.110).
 pub fn record_unknown_message_dropped() {
     counter!("pb_unknown_messages_dropped_total").increment(1);
+}
+
+/// The reconstructed top-of-book diverged from the venue-stated best_bid/best_ask
+/// after applying a delta — a silently dropped/corrupt update (A.74/A.109).
+pub fn record_book_mismatch() {
+    counter!("pb_book_mismatches_total").increment(1);
 }
 
 pub fn record_snapshot_applied() {

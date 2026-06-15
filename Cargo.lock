@@ -2784,6 +2784,7 @@ dependencies = [
  "futures-util",
  "governor",
  "native-tls",
+ "pb-book",
  "pb-metrics",
  "pb-types",
  "reqwest 0.13.2",

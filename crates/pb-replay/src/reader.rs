@@ -293,6 +293,7 @@ fn parse_ingest_kind(value: &str) -> Result<IngestEventKind, ReplayError> {
         "sequence_gap" => Ok(IngestEventKind::SequenceGap),
         "stale_snapshot_skip" => Ok(IngestEventKind::StaleSnapshotSkip),
         "source_reset" => Ok(IngestEventKind::SourceReset),
+        "book_mismatch" => Ok(IngestEventKind::BookMismatch),
         other => Err(ReplayError::Other(format!(
             "invalid ingest event kind: {other}"
         ))),

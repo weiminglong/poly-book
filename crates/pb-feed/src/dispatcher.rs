@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+use pb_book::L2Book;
+
 use crate::error::FeedError;
 use crate::ws::{FeedMessage, WsLifecycleEvent, WsLifecycleKind, WsRawMessage};
 use pb_types::event::{
@@ -52,6 +54,11 @@ pub struct Dispatcher {
     last_snapshot_hash: FxHashMap<Arc<str>, String>,
     /// Interned AssetIds to avoid heap allocation on every message.
     asset_id_cache: FxHashMap<Arc<str>, AssetId>,
+    /// Per-asset shadow book maintained purely to cross-check the venue-stated
+    /// `best_bid`/`best_ask` after each delta and detect silent feed corruption
+    /// (audit findings A.74/A.109). Not used for serving — that book is
+    /// reconstructed downstream from the WAL.
+    validation_books: FxHashMap<Arc<str>, L2Book>,
     current_session_id: Option<String>,
 }
 
@@ -64,6 +71,7 @@ impl Dispatcher {
             last_snapshot_ts: FxHashMap::default(),
             last_snapshot_hash: FxHashMap::default(),
             asset_id_cache: FxHashMap::default(),
+            validation_books: FxHashMap::default(),
             current_session_id: None,
         }
     }
@@ -156,6 +164,9 @@ impl Dispatcher {
         self.asset_sequences.clear();
         self.last_snapshot_ts.clear();
         self.last_snapshot_hash.clear();
+        // Drop shadow books: after a continuity reset the next snapshot rebuilds
+        // them, and validating deltas against a pre-reset book would false-alarm.
+        self.validation_books.clear();
     }
 
     async fn dispatch_raw(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
@@ -292,6 +303,21 @@ impl Dispatcher {
                 pb_metrics::record_snapshot_reconciled();
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
 
+                // Rebuild the shadow book from this snapshot so subsequent deltas
+                // can be cross-checked against the venue best bid/ask (A.74).
+                let mut snap_bids: Vec<(FixedPrice, FixedSize)> = Vec::new();
+                let mut snap_asks: Vec<(FixedPrice, FixedSize)> = Vec::new();
+                for &(side, price, size) in &levels {
+                    match side {
+                        Side::Bid => snap_bids.push((price, size)),
+                        Side::Ask => snap_asks.push((price, size)),
+                    }
+                }
+                self.validation_books
+                    .entry(asset_id.0.clone())
+                    .or_insert_with(|| L2Book::new(asset_id.clone()))
+                    .apply_snapshot(&snap_bids, &snap_asks, Sequence::default(), exchange_ts);
+
                 for (side, price, size) in levels {
                     let sequence = self.next_sequence_for(&asset_id);
                     let event = BookEvent {
@@ -345,7 +371,7 @@ impl Dispatcher {
 
                     let sequence = self.next_sequence_for(&asset_id);
                     let event = BookEvent {
-                        asset_id,
+                        asset_id: asset_id.clone(),
                         kind: BookEventKind::Delta,
                         side,
                         price,
@@ -358,6 +384,35 @@ impl Dispatcher {
                         ),
                     };
                     self.send(PersistedRecord::Book(event)).await?;
+
+                    // Cross-check the venue-stated best bid/ask against our shadow
+                    // book after applying the same delta (A.74/A.109). Only when a
+                    // snapshot has seeded the book — otherwise we cannot compare.
+                    let mismatch =
+                        if let Some(book) = self.validation_books.get_mut(asset_id.as_str()) {
+                            book.apply_delta(side, price, size, sequence, exchange_ts);
+                            detect_book_mismatch(book, entry.best_bid, entry.best_ask)
+                        } else {
+                            None
+                        };
+                    if let Some(details) = mismatch {
+                        pb_metrics::record_book_mismatch();
+                        warn!(asset_id = %asset_id, %details, "venue book mismatch detected");
+                        self.send(PersistedRecord::Ingest(IngestEvent {
+                            asset_id: Some(asset_id.clone()),
+                            kind: IngestEventKind::BookMismatch,
+                            provenance: self.make_provenance(
+                                raw.recv_timestamp_us,
+                                exchange_ts,
+                                entry.hash.map(str::to_string),
+                                Some(sequence),
+                            ),
+                            expected_sequence: None,
+                            observed_sequence: None,
+                            details: Some(details),
+                        }))
+                        .await?;
+                    }
                 }
             }
             WsMessage::LastTradePrice(lt) => {
@@ -499,6 +554,46 @@ impl Dispatcher {
 /// or non-numeric input becomes `0` (the "unknown timestamp" sentinel).
 fn parse_timestamp_us(ts: Option<&str>) -> u64 {
     pb_types::time::parse_to_micros(ts).unwrap_or(0)
+}
+
+/// Whether our top-of-book price disagrees with the venue-stated one. A venue
+/// value of `"0"` (or absent/unparseable) means "no level on that side": that
+/// only conflicts when *we* still hold one. A non-zero venue value must equal our
+/// top exactly. Returns `false` when there is nothing to compare (A.74).
+fn top_price_mismatch(ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
+    let Some(venue_str) = venue else {
+        return false;
+    };
+    let Ok(venue_price) = FixedPrice::try_from(venue_str) else {
+        return false;
+    };
+    if venue_price.is_zero() {
+        ours.is_some()
+    } else {
+        ours != Some(venue_price)
+    }
+}
+
+/// Compare the shadow book's best bid/ask against the venue-stated values after a
+/// delta. Returns a human-readable description of the divergence, or `None` if
+/// they agree / there is nothing to compare (audit findings A.74/A.109).
+fn detect_book_mismatch(
+    book: &L2Book,
+    venue_best_bid: Option<&str>,
+    venue_best_ask: Option<&str>,
+) -> Option<String> {
+    let our_bid = book.best_bid().map(|(price, _)| price);
+    let our_ask = book.best_ask().map(|(price, _)| price);
+    let bid_bad = top_price_mismatch(our_bid, venue_best_bid);
+    let ask_bad = top_price_mismatch(our_ask, venue_best_ask);
+    if !bid_bad && !ask_bad {
+        return None;
+    }
+    Some(format!(
+        "reconstructed top-of-book diverged from venue: \
+         best_bid ours={our_bid:?} venue={venue_best_bid:?}, \
+         best_ask ours={our_ask:?} venue={venue_best_ask:?}"
+    ))
 }
 
 #[cfg(test)]
@@ -1545,5 +1640,122 @@ mod tests {
             })),
             "execution"
         );
+    }
+
+    // ---- venue book-mismatch validation (A.74/A.109) ----
+
+    #[test]
+    fn top_price_mismatch_cases() {
+        let p = |v: u32| Some(FixedPrice::new(v).unwrap());
+        // Nothing to compare → no mismatch.
+        assert!(!top_price_mismatch(p(5000), None));
+        assert!(!top_price_mismatch(None, None));
+        // Venue "0" means empty side: conflicts only if we still hold a level.
+        assert!(!top_price_mismatch(None, Some("0")));
+        assert!(top_price_mismatch(p(5000), Some("0")));
+        // Non-zero venue must match our top exactly.
+        assert!(!top_price_mismatch(p(5000), Some("0.5"))); // 0.5 == 5000 scaled
+        assert!(top_price_mismatch(p(5000), Some("0.6")));
+        assert!(top_price_mismatch(None, Some("0.5"))); // venue has a level, we don't
+                                                        // Unparseable venue value → cannot compare → no mismatch.
+        assert!(!top_price_mismatch(p(5000), Some("garbage")));
+    }
+
+    #[tokio::test]
+    async fn price_change_emits_book_mismatch_when_venue_best_diverges() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Snapshot seeds the shadow book: best_bid = 0.50, best_ask = 0.60.
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        // Drain the two snapshot book events.
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        // A delta that keeps our best_bid at 0.50, but the venue claims 0.99 →
+        // divergence ⇒ a BookMismatch ingest event must be emitted.
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1",
+                "price": "0.50",
+                "size": "5",
+                "side": "BUY",
+                "best_bid": "0.99",
+                "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // First the delta book event, then the mismatch ingest event.
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        let mismatch = event_rx.recv().await.unwrap();
+        match mismatch {
+            PersistedRecord::Ingest(ev) => {
+                assert_eq!(ev.kind, IngestEventKind::BookMismatch);
+            }
+            other => panic!("expected BookMismatch ingest event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn price_change_no_mismatch_when_venue_best_agrees() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        // Delta updates bid@0.50 size; venue best agrees with our book → no event
+        // beyond the delta itself.
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1",
+                "price": "0.50",
+                "size": "7",
+                "side": "BUY",
+                "best_bid": "0.50",
+                "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        // No further event should be queued.
+        assert!(event_rx.try_recv().is_err(), "no mismatch event expected");
     }
 }

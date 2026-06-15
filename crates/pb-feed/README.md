@@ -89,6 +89,13 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   (and leaves the staleness tracker untouched) instead of a partial snapshot
   that would be indistinguishable from a complete one. A `price_change` batch
   skips an unparseable entry rather than aborting the remaining valid deltas.
+- Venue cross-check: the dispatcher keeps a per-asset shadow `L2Book` (seeded by
+  snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
+  against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
+  divergence emits an `IngestEventKind::BookMismatch` event (a queryable data
+  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt updates
+  (A.74/A.109). Shadow books are dropped on continuity reset. Frames that match
+  no known message type increment `pb_unknown_messages_dropped_total` (A.110).
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
 - Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,

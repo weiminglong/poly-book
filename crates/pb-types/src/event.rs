@@ -126,6 +126,10 @@ pub enum IngestEventKind {
     SequenceGap,
     StaleSnapshotSkip,
     SourceReset,
+    /// The reconstructed top-of-book diverged from the venue-stated
+    /// `best_bid`/`best_ask` after applying a delta — evidence of a silently
+    /// dropped/corrupt update (audit findings A.74/A.109).
+    BookMismatch,
 }
 
 impl std::fmt::Display for IngestEventKind {
@@ -136,6 +140,7 @@ impl std::fmt::Display for IngestEventKind {
             IngestEventKind::SequenceGap => write!(f, "sequence_gap"),
             IngestEventKind::StaleSnapshotSkip => write!(f, "stale_snapshot_skip"),
             IngestEventKind::SourceReset => write!(f, "source_reset"),
+            IngestEventKind::BookMismatch => write!(f, "book_mismatch"),
         }
     }
 }

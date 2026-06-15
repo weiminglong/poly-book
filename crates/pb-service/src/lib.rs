@@ -100,7 +100,9 @@ pub(crate) fn build_integrity_summary(
             IngestEventKind::ReconnectStart | IngestEventKind::ReconnectSuccess => {
                 reconnect_count += 1;
             }
-            IngestEventKind::SequenceGap | IngestEventKind::SourceReset => {
+            IngestEventKind::SequenceGap
+            | IngestEventKind::SourceReset
+            | IngestEventKind::BookMismatch => {
                 gap_count += 1;
             }
             IngestEventKind::StaleSnapshotSkip => {

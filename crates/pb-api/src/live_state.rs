@@ -306,7 +306,8 @@ impl LiveState {
             }
             pb_types::IngestEventKind::SequenceGap
             | pb_types::IngestEventKind::StaleSnapshotSkip
-            | pb_types::IngestEventKind::SourceReset => {}
+            | pb_types::IngestEventKind::SourceReset
+            | pb_types::IngestEventKind::BookMismatch => {}
         }
         if let Some(asset_id) = event.asset_id.as_ref() {
             let state = self.ensure_asset(asset_id.as_str());
