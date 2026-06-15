@@ -140,6 +140,46 @@ pub struct ParquetRecordWriter {
     base_path: String,
 }
 
+/// Lower bound for a plausible event timestamp (~2001-09-09 in µs). Anything
+/// below this is treated as corrupt/unstamped rather than a real 1970s event.
+const MIN_PLAUSIBLE_PARTITION_US: u64 = 1_000_000_000_000_000;
+/// Upper bound for a plausible event timestamp (~2286 in µs). Guards against an
+/// absurd far-future value (e.g. a u64 that overflows i64) misfiling records.
+const MAX_PLAUSIBLE_PARTITION_US: u64 = 10_000_000_000_000_000;
+
+/// Build the `YYYY/MM/DD/HH` partition key for a record timestamp.
+///
+/// Timestamps outside a wide plausible band — or not representable as a datetime
+/// — are routed to a dedicated `invalid_timestamp` partition with a warning,
+/// instead of being silently misfiled into the 1970-01-01 partition by
+/// `unwrap_or_default()` (audit finding A.123). This keeps corrupt/unstamped
+/// records visible and quarantined rather than corrupting a real date partition.
+pub(crate) fn partition_hour_key(partition_ts_us: u64) -> String {
+    if !(MIN_PLAUSIBLE_PARTITION_US..=MAX_PLAUSIBLE_PARTITION_US).contains(&partition_ts_us) {
+        tracing::warn!(
+            partition_ts_us,
+            "record timestamp outside plausible range; routing to invalid_timestamp partition"
+        );
+        return "invalid_timestamp".to_string();
+    }
+    match chrono::DateTime::from_timestamp_micros(partition_ts_us as i64) {
+        Some(dt) => format!(
+            "{:04}/{:02}/{:02}/{:02}",
+            dt.date_naive().year(),
+            dt.date_naive().month(),
+            dt.date_naive().day(),
+            dt.time().hour(),
+        ),
+        None => {
+            tracing::warn!(
+                partition_ts_us,
+                "record timestamp not representable; routing to invalid_timestamp partition"
+            );
+            "invalid_timestamp".to_string()
+        }
+    }
+}
+
 impl ParquetRecordWriter {
     pub fn new(store: Arc<dyn ObjectStore>, base_path: impl Into<String>) -> Self {
         Self {
@@ -160,16 +200,7 @@ impl ParquetRecordWriter {
         let flush_start = std::time::Instant::now();
         let mut groups: HashMap<(String, String, String), Vec<&PersistedRecord>> = HashMap::new();
         for record in records {
-            let dt =
-                chrono::DateTime::from_timestamp_micros(record.partition_timestamp_us() as i64)
-                    .unwrap_or_default();
-            let hour_key = format!(
-                "{:04}/{:02}/{:02}/{:02}",
-                dt.date_naive().year(),
-                dt.date_naive().month(),
-                dt.date_naive().day(),
-                dt.time().hour(),
-            );
+            let hour_key = partition_hour_key(record.partition_timestamp_us());
             groups
                 .entry((
                     record.dataset_name().to_string(),

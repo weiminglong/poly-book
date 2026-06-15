@@ -43,8 +43,12 @@ PersistedRecord channel
 
 - Storage uses the `object_store` trait for filesystem abstraction, supporting
   local disk, S3, and GCS without code changes.
-- Parquet files are partitioned by event type and time window. The flush interval
-  (5 minutes) balances write amplification against data freshness for replay.
+- Parquet files are partitioned by event type and time window (`YYYY/MM/DD/HH`).
+  The flush interval (5 minutes) balances write amplification against data
+  freshness for replay. Records whose timestamp is outside a wide plausible band
+  (or not representable as a datetime) are routed to a dedicated
+  `invalid_timestamp` partition with a warning, instead of being silently misfiled
+  into the 1970-01-01 partition by `unwrap_or_default()` (audit finding A.123).
 - Parquet object names are `{asset}_{first_ts}_{content_hash}.parquet`. The
   content-hash suffix means two batches that land in the same (asset, hour) bucket
   with the same first-record timestamp cannot silently overwrite each other;

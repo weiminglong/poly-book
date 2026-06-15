@@ -401,6 +401,59 @@ async fn writer_path_includes_date_partition() {
     );
 }
 
+#[test]
+fn partition_hour_key_formats_valid_timestamp() {
+    // FIXED_TS_US is mid-2025; the key must be a real YYYY/MM/DD/HH path.
+    let key = crate::writer::partition_hour_key(FIXED_TS_US);
+    assert!(
+        key.starts_with("2025/"),
+        "expected 2025 partition, got {key}"
+    );
+    assert_ne!(key, "invalid_timestamp");
+}
+
+#[test]
+fn partition_hour_key_quarantines_out_of_range_timestamps() {
+    // Zero / unstamped and absurd far-future values must NOT silently land in the
+    // 1970 partition (A.123) — they go to a dedicated quarantine partition.
+    assert_eq!(crate::writer::partition_hour_key(0), "invalid_timestamp");
+    assert_eq!(crate::writer::partition_hour_key(1), "invalid_timestamp");
+    assert_eq!(
+        crate::writer::partition_hour_key(u64::MAX),
+        "invalid_timestamp"
+    );
+}
+
+#[tokio::test]
+async fn writer_routes_invalid_timestamp_to_quarantine_partition() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    // A book event with an unstamped (zero) partition timestamp.
+    writer
+        .write_record(PersistedRecord::Book(make_book_event(0)))
+        .await
+        .unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    let path = entries[0].location.as_ref();
+    assert!(
+        path.contains("invalid_timestamp"),
+        "out-of-range timestamp should be quarantined, got {path}"
+    );
+    assert!(
+        !path.contains("1970"),
+        "must not be misfiled into the 1970 partition: {path}"
+    );
+}
+
 #[tokio::test]
 async fn writer_groups_by_dataset_and_hour() {
     let dir = TempDir::new().unwrap();
