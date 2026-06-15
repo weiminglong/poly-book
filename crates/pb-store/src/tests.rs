@@ -777,6 +777,60 @@ async fn parquet_sink_flushes_on_cancellation() {
 }
 
 #[tokio::test]
+async fn parquet_sink_drains_queued_records_on_shutdown() {
+    // Records sitting in the channel when shutdown is requested must be drained
+    // and flushed, not abandoned (audit finding A.153).
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let (tx, rx) = mpsc::channel::<PersistedRecord>(32);
+
+    // Enqueue several same-hour records, then close the sender (upstream stopping)
+    // and pre-cancel so the sink takes its shutdown path with a non-empty channel.
+    for i in 0..5u64 {
+        tx.send(PersistedRecord::Book(make_book_event(
+            FIXED_TS_US + i * 1_000_000,
+        )))
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let sink = ParquetSink::new(rx, store.clone(), "data".into())
+        .with_flush_interval(Duration::from_secs(300));
+    sink.run_with_token(token).await.unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "queued records must be flushed on shutdown, not abandoned"
+    );
+
+    let mut total_rows = 0i64;
+    for entry in &entries {
+        let data = store
+            .get(&entry.location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let reader =
+            parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+                .unwrap();
+        total_rows += reader.metadata().file_metadata().num_rows();
+    }
+    assert_eq!(total_rows, 5, "all queued records must be persisted");
+}
+
+#[tokio::test]
 async fn parquet_sink_empty_channel_no_files() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);

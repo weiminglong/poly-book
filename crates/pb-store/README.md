@@ -76,9 +76,12 @@ PersistedRecord channel
   actually have data in the current batch, avoiding empty inserts.
 - Both sinks flush with bounded exponential-backoff retries (5 attempts), keeping
   the buffer intact across retries, so a single transient insert/write failure no
-  longer drops the batch or instantly tears down the ingest pipeline. (Full sink
-  isolation, non-zero exit on terminal failure, and WAL→storage reconciliation
-  are tracked under remaining P1-STORE work.)
+  longer drops the batch or instantly tears down the ingest pipeline.
+- On graceful shutdown (cancellation) both sinks drain any records still queued in
+  their mpsc channel — bounded by a 10s deadline — before the final flush, so a
+  clean stop does not abandon records the upstream already enqueued (A.153).
+- WAL→storage reconciliation (rebuilding a crash-lost Parquet window from the WAL)
+  is provided by `write_batch_replacing` / the `reconcile` command (A.27).
 
 ## Docs to Update After Changes
 

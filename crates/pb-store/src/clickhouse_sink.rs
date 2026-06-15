@@ -68,6 +68,11 @@ impl ClickHouseSink {
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
+                    // Drain records still queued in the channel before the final
+                    // flush so a graceful stop does not abandon records already
+                    // sent by the upstream (audit finding A.153). Bounded so a
+                    // stuck upstream cannot block shutdown forever.
+                    self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
                     if !buffer.is_empty() {
                         tracing::info!(buffered = buffer.len(), "ClickHouseSink flushing on shutdown");
                         self.flush(&mut buffer).await?;
@@ -98,6 +103,39 @@ impl ClickHouseSink {
                     }
                 }
             }
+        }
+    }
+
+    /// Drain records still queued in the channel into `buffer` on shutdown, up to
+    /// a deadline, so a graceful stop does not abandon already-sent records
+    /// (audit finding A.153). The upstream drops its sender during shutdown, so
+    /// `recv()` returns `None` once drained; the timeout guards a stuck upstream.
+    async fn drain_channel(&mut self, buffer: &mut Vec<PersistedRecord>, deadline: Duration) {
+        let drained = tokio::time::timeout(deadline, async {
+            let mut count = 0usize;
+            while let Some(record) = self.rx.recv().await {
+                buffer.push(record);
+                count += 1;
+                // Keep memory bounded if the backlog is large: flush full batches
+                // as they accumulate during the drain.
+                if buffer.len() >= self.batch_size {
+                    if let Err(e) = self.flush(buffer).await {
+                        tracing::error!(error = %e, "ClickHouseSink drain flush failed");
+                        break;
+                    }
+                }
+            }
+            count
+        })
+        .await;
+        match drained {
+            Ok(count) if count > 0 => {
+                tracing::info!(drained = count, "ClickHouseSink drained channel backlog on shutdown")
+            }
+            Ok(_) => {}
+            Err(_) => tracing::warn!(
+                "ClickHouseSink channel drain timed out on shutdown; some records may remain in the channel"
+            ),
         }
     }
 
