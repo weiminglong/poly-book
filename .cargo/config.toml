@@ -1,5 +1,16 @@
-[target.'cfg(target_os = "macos")']
-rustflags = ["-C", "target-cpu=native"]
-
-[target.'cfg(target_os = "linux")']
-rustflags = ["-C", "target-cpu=native"]
+# Intentionally no `target-cpu=native` here.
+#
+# A checked-in `target-cpu=native` (audit finding A.34) makes builds
+# non-reproducible across machines, risks SIGILL when a binary built on one host
+# runs on an older microarchitecture, and tunes Criterion baselines to whatever
+# host happened to build them. It was also overridden by CI `RUSTFLAGS` and never
+# reached the Docker image, so in practice it only ever applied on dev laptops.
+#
+# Builds therefore use the portable baseline by default.
+#
+# - For production: pin an explicit microarchitecture floor matching the
+#   deployment fleet in the Docker build (e.g. RUSTFLAGS="-C target-cpu=x86-64-v3"),
+#   applied identically in CI and benchmark runs so measured performance matches
+#   what ships.
+# - For local micro-benchmarking: set RUSTFLAGS="-C target-cpu=native" in your
+#   own shell or a per-developer ~/.cargo/config.toml, not in the repo.
