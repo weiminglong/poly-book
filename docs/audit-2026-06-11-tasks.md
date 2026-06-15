@@ -356,6 +356,7 @@
 - **Problem:** Single feed, single writer, manual recovery on WAL resync, multi-replica explicitly deferred with no RTO. Channel capacities are hard-coded (2048/10000) with whole-pipeline head-of-line blocking as the only flow-control mode and no stated load-shedding policy.
 - **Action:** Add feed redundancy with arbitration; ingest writer leasing/lock so a standby can take over the shared WAL; in-process re-hydration; documented RTOs. Define and document the flow-control policy (WAL is the only unconditionally-blocking consumer; sinks may lag with alerting; channel capacities sized from measured rotation bursts with depth gauges).
 - **Done when:** a writer-failover test shows a standby resumes from the shared WAL within the stated RTO; channel sizing has a documented rationale + depth gauges.
+- **Progress (2026-06):** A.79 flow-control partly addressed — the policy is now documented (docs/architecture.md "Flow Control & Backpressure": WAL is the only unconditionally-blocking consumer; sinks may lag with alerting; rebuild via reconcile) and the ingest event-channel depth is exported as `pb_channel_depth{channel="ingest_events"}` (a backpressure leading indicator). **Remaining (A.78, needs multi-process infra):** feed redundancy + arbitration, ingest writer leasing so a standby takes over the shared WAL, documented RTOs, and a writer-failover test — all require a real multi-replica deployment to author and verify.
 
 ### [ ] P3-MON-1 — Live data-quality monitors that page within seconds
 - **Severity:** medium · **Findings:** A.77

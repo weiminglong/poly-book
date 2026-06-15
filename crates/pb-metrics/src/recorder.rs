@@ -71,6 +71,10 @@ pub fn register_metrics() {
         "pb_feed_staleness_seconds",
         "Seconds since the most recent message was received from the feed"
     );
+    describe_gauge!(
+        "pb_channel_depth",
+        "Current queued depth of a bounded internal channel (by channel label)"
+    );
 
     describe_histogram!(
         "pb_message_processing_duration_us",
@@ -121,6 +125,13 @@ pub fn record_clock_skew(skew_us: u64) {
 /// histogram-bucket policy.
 pub fn record_recv_to_durable_us(latency_us: u64) {
     histogram!("pb_recv_to_durable_us").record(latency_us as f64);
+}
+
+/// Current queued depth of a bounded internal channel, labelled by name. Rising
+/// depth means a downstream consumer is falling behind (backpressure); the audit
+/// found no visibility into channel queue depth (A.79).
+pub fn set_channel_depth(channel: &'static str, depth: usize) {
+    gauge!("pb_channel_depth", "channel" => channel).set(depth as f64);
 }
 
 pub fn record_snapshot_applied() {

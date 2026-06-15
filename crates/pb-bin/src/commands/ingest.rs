@@ -166,6 +166,8 @@ pub async fn run(
                 break;
             }
             _ = flush_tick.tick() => {
+                // Sample the event-channel backpressure depth (A.79).
+                pb_metrics::set_channel_depth("ingest_events", event_rx.len());
                 if wal_unflushed {
                     wal_writer.flush()
                         .map_err(|e| anyhow::anyhow!("WAL flush failed: {e}"))?;
