@@ -160,7 +160,7 @@
 
 ## Resilience & lifecycle
 
-### [ ] P2-SUP-1 — Supervise every spawned task; surface projector/tailer death
+### [x] P2-SUP-1 — Supervise every spawned task; surface projector/tailer death
 - **Severity:** medium · **Findings:** A.45, A.99, A.100, A.48, A.50
 - **Files:** `crates/pb-api/src/live_state.rs:642` (dead projector still advances WAL positions), `crates/pb-bin/src/commands/ingest.rs:49`, `crates/pb-bin/src/commands/serve.rs:189` (tailer exits on resync/open failure, no recovery), `crates/pb-bin/src/commands/serve_api.rs:274`
 - **Problem:** Dropped/await-only `JoinHandle`s swallow panics; a dead projector keeps the WAL tailer committing consumer positions for records that were never applied; the serve tailer terminates permanently on resync or reader-open failure while `/health` still reports ready; rotation reaping risks market-start gaps or orphaned tasks.
