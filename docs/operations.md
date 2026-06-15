@@ -365,6 +365,9 @@ config lives in [`monitoring/`](../monitoring/):
   unknown messages, WAL consumer lag). Load via `rule_files:` and route the
   `critical` severity to PagerDuty/Slack through Alertmanager.
 - `monitoring/RUNBOOK.md` — one on-call action section per alert.
+- `monitoring/grafana-dashboard.json` — importable dashboard (message rate, feed
+  staleness, WAL lag, recv→durable p50/p99, durability/storage failures,
+  data-quality events, snapshots/deltas).
 
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have
