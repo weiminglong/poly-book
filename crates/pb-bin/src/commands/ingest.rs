@@ -158,9 +158,10 @@ pub async fn run(
         // diverge; append failure is fatal — the durability backbone is gone.
         match pb_wal::codec::encode(&event) {
             Ok(payload) => {
-                wal_writer
-                    .append(&payload)
-                    .map_err(|e| anyhow::anyhow!("WAL append failed: {e}"))?;
+                if let Err(e) = wal_writer.append(&payload) {
+                    pb_metrics::record_wal_append_failure();
+                    return Err(anyhow::anyhow!("WAL append failed: {e}"));
+                }
                 wal_unflushed = true;
                 wal_unsynced = true;
             }

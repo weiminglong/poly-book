@@ -1,4 +1,4 @@
-use metrics::{counter, describe_counter, describe_histogram, histogram};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 
 /// Register all metric descriptions. Call once at startup.
 pub fn register_metrics() {
@@ -32,6 +32,24 @@ pub fn register_metrics() {
     describe_counter!(
         "pb_discovery_failures_total",
         "Total failed market discovery attempts"
+    );
+    describe_counter!(
+        "pb_wal_append_failures_total",
+        "Total WAL append failures (each is a durability-fatal event)"
+    );
+    describe_counter!(
+        "pb_sink_flush_failures_total",
+        "Total storage sink flush failures (per sink), including retries"
+    );
+
+    // --- Gauges: on-call needs current state, not just cumulative counters ---
+    describe_gauge!(
+        "pb_wal_consumer_lag_bytes",
+        "Current byte lag of the serve WAL reader behind the writer"
+    );
+    describe_gauge!(
+        "pb_feed_staleness_seconds",
+        "Seconds since the most recent message was received from the feed"
     );
 
     describe_histogram!(
@@ -74,6 +92,24 @@ pub fn record_gap_detected() {
 
 pub fn record_crossed_book() {
     counter!("pb_crossed_books_total").increment(1);
+}
+
+pub fn record_wal_append_failure() {
+    counter!("pb_wal_append_failures_total").increment(1);
+}
+
+pub fn record_sink_flush_failure(sink: &'static str) {
+    counter!("pb_sink_flush_failures_total", "sink" => sink).increment(1);
+}
+
+/// Set the current WAL consumer lag (bytes the serve reader is behind).
+pub fn set_wal_consumer_lag_bytes(lag: u64) {
+    gauge!("pb_wal_consumer_lag_bytes").set(lag as f64);
+}
+
+/// Set the current feed staleness (seconds since the last received message).
+pub fn set_feed_staleness_seconds(secs: f64) {
+    gauge!("pb_feed_staleness_seconds").set(secs);
 }
 
 pub fn record_reconnection() {

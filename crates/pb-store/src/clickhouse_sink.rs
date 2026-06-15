@@ -106,6 +106,7 @@ impl ClickHouseSink {
                 }
                 Err(e) => {
                     attempt += 1;
+                    pb_metrics::record_sink_flush_failure("clickhouse");
                     if attempt > MAX_FLUSH_RETRIES {
                         tracing::error!(
                             error = %e,

@@ -132,6 +132,7 @@ pub async fn run(
             match pb_wal::codec::encode(&event) {
                 Ok(payload) => {
                     if let Err(e) = wal_writer.append(&payload) {
+                        pb_metrics::record_wal_append_failure();
                         tracing::error!(error = %e, "WAL append failed — aborting ingest");
                         drain_wal_failed.store(true, Ordering::SeqCst);
                         drain_shutdown.cancel();

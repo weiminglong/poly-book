@@ -195,6 +195,7 @@ fn spawn_wal_tailer(
             // Update lag tracking.
             if let Some(lag) = reader.lag_bytes() {
                 lag_bytes_atomic.store(lag, Ordering::Relaxed);
+                pb_metrics::set_wal_consumer_lag_bytes(lag);
                 if lag > max_consumer_lag_bytes {
                     tracing::warn!(
                         lag_bytes = lag,
