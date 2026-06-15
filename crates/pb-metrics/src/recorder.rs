@@ -10,6 +10,10 @@ pub fn register_metrics() {
     describe_counter!("pb_deltas_applied_total", "Total book deltas applied");
     describe_counter!("pb_trades_received_total", "Total trades received");
     describe_counter!("pb_gaps_detected_total", "Total sequence gaps detected");
+    describe_counter!(
+        "pb_crossed_books_total",
+        "Total times the live book was detected crossed/locked (best_bid >= best_ask)"
+    );
     describe_counter!("pb_reconnections_total", "Total WebSocket reconnections");
     describe_counter!(
         "pb_snapshots_reconciled_total",
@@ -66,6 +70,10 @@ pub fn record_trade_received() {
 
 pub fn record_gap_detected() {
     counter!("pb_gaps_detected_total").increment(1);
+}
+
+pub fn record_crossed_book() {
+    counter!("pb_crossed_books_total").increment(1);
 }
 
 pub fn record_reconnection() {

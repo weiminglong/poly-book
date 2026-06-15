@@ -62,7 +62,10 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   the long-lived WS route is intentionally exempt from the request timeout. 5xx
   responses return an opaque message and log the real detail server-side.
 - `LiveReadModel` receives `PersistedRecord` events and maintains in-memory
-  book state without persisting to disk.
+  book state without persisting to disk. After each snapshot materialization,
+  delta, and checkpoint apply it runs `L2Book::check_integrity`; a crossed/locked
+  book increments `pb_crossed_books_total` and surfaces a `crossed_book`
+  continuity warning instead of being served silently.
 - The projector keeps a cached published projection and only rebuilds
   `AssetReadView` snapshots for assets touched by a record, instead of
   re-materializing every tracked book on each update.

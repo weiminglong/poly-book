@@ -216,7 +216,26 @@ impl LiveState {
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(pending.last_recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(pending.key.exchange_timestamp_us);
+        self.check_book_integrity(asset_id);
         true
+    }
+
+    /// Run the crossed/locked-book invariant check on an asset's current book
+    /// and surface a violation (metric + warning) instead of silently serving a
+    /// crossed book (audit finding A.105).
+    fn check_book_integrity(&mut self, asset_id: &str) {
+        let state = self.ensure_asset(asset_id);
+        if let Err(err) = state.book.check_integrity() {
+            let detail = err.to_string();
+            state.latest_warning = Some(ContinuityWarning {
+                kind: "crossed_book".to_string(),
+                recv_timestamp_us: state.last_recv_timestamp_us.unwrap_or(0),
+                exchange_timestamp_us: state.last_exchange_timestamp_us.unwrap_or(0),
+                details: Some(detail.clone()),
+            });
+            pb_metrics::record_crossed_book();
+            tracing::warn!(asset_id, error = %detail, "crossed/locked book detected on live path");
+        }
     }
 
     fn record_snapshot_event(&mut self, event: BookEvent) {
@@ -267,6 +286,7 @@ impl LiveState {
         );
         state.last_recv_timestamp_us = Some(event.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(event.provenance.exchange_timestamp_us);
+        self.check_book_integrity(&asset_id);
     }
 
     fn record_ingest_event(&mut self, event: IngestEvent) {
@@ -313,6 +333,8 @@ impl LiveState {
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(checkpoint.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(checkpoint.provenance.exchange_timestamp_us);
+        let asset_id = asset_id.to_string();
+        self.check_book_integrity(&asset_id);
     }
 
     /// Apply a record and return the list of asset IDs that had book updates
@@ -1023,6 +1045,31 @@ mod tests {
         assert_eq!(snapshot.bid_depth, 1);
         assert_eq!(snapshot.ask_depth, 1);
         assert_eq!(snapshot.sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn crossed_book_on_delta_is_detected_and_surfaced() {
+        // A delta that lifts the best bid above the best ask produces a crossed
+        // book, which must be flagged (A.105) rather than served silently.
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+        // The delta also materializes the pending (valid) snapshot first, then
+        // crosses the book.
+        model
+            .apply_record(delta_record_for("tok1", Side::Bid, 0.65, 5.0, 200, 190, 2))
+            .await;
+
+        let snapshot = model.snapshot("tok1", 5, 100).await.unwrap();
+        let warning = snapshot
+            .latest_warning
+            .expect("crossed book should surface a warning");
+        assert_eq!(warning.kind, "crossed_book");
     }
 
     #[tokio::test]
