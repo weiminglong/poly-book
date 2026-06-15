@@ -236,6 +236,39 @@ async fn replay_engine_reconstruct_from_snapshot() {
 }
 
 #[tokio::test]
+async fn reconstruct_flags_crossed_book_in_continuity() {
+    // A snapshot with bid 0.60 and ask 0.50 reconstructs to a crossed book; the
+    // engine must surface it as a continuity marker rather than silently
+    // returning a crossed book (A.53).
+    let snapshot_ts = BASE_TS;
+    let target_ts = BASE_TS + 100_000;
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(snapshot_ts, Side::Bid, 6000, 1_000_000, 1),
+            make_snapshot_event(snapshot_ts, Side::Ask, 5000, 2_000_000, 1),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![],
+    };
+    let reader = MockReader::new().with_market_data(market_data);
+    let engine = ReplayEngine::new(reader);
+
+    let result = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await
+        .unwrap();
+
+    assert!(
+        result.continuity_events.iter().any(|e| e
+            .details
+            .as_deref()
+            .map(|d| d.contains("crossed"))
+            .unwrap_or(false)),
+        "crossed book should be surfaced as a continuity event"
+    );
+}
+
+#[tokio::test]
 async fn replay_engine_reconstruct_from_checkpoint() {
     let checkpoint_ts = BASE_TS;
     let delta_ts = BASE_TS + 50_000;

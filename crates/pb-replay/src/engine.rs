@@ -3,7 +3,7 @@ use pb_types::event::{
     BookCheckpoint, BookEvent, BookEventKind, IngestEvent, IngestEventKind, MarketDataWindow,
     ReplayMode, ReplayValidation,
 };
-use pb_types::{AssetId, EventProvenance, Sequence, Side};
+use pb_types::{AssetId, DataSource, EventProvenance, Sequence, Side};
 use tracing::debug;
 
 use crate::error::ReplayError;
@@ -277,7 +277,10 @@ fn reconstruct_book(
                         observed_sequence: Some(next_sequence.raw()),
                         details: Some(error.to_string()),
                     });
-                    pb_metrics::record_gap_detected();
+                    // Do NOT touch live metrics here: this is offline replay, and
+                    // incrementing pb_gaps_detected_total polluted live
+                    // observability (A.152). The gap is recorded in
+                    // continuity_events for the replay caller.
                 }
                 book.apply_delta(
                     event.side,
@@ -289,6 +292,26 @@ fn reconstruct_book(
             }
         }
         idx += 1;
+    }
+
+    // Surface a crossed/locked reconstructed book to the replay caller as a
+    // continuity marker (A.53). Offline analysis only — no live metric.
+    if book.check_integrity().is_err() {
+        continuity_events.push(IngestEvent {
+            asset_id: Some(asset_id.clone()),
+            kind: IngestEventKind::SourceReset,
+            provenance: EventProvenance {
+                recv_timestamp_us: book.last_update_us,
+                exchange_timestamp_us: 0,
+                source: DataSource::ReplayValidator,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: Some("crossed/locked book in reconstructed state".to_string()),
+        });
     }
 
     Ok((book, continuity_events, used_checkpoint))
