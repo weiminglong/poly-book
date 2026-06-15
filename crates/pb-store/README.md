@@ -51,6 +51,12 @@ PersistedRecord channel
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime` for efficiency.
 - ClickHouse uses `MergeTree` engine with date partitioning and composite ORDER BY
   keys for efficient range queries. Tables are created via `ensure_tables()`.
+- ClickHouse `Enum8` columns (`event_kind`, `side`) are inserted and read as their
+  `i8` discriminant over RowBinary — sending a Rust `String` is rejected by the
+  server. Sorting keys contain no `Nullable` columns (`book_events.sequence` is a
+  non-nullable `UInt64`; `trade_id`/`source_session_id` were removed from their
+  ORDER BY), so DDL succeeds on a stock server without `allow_nullable_key`.
+  (End-to-end verification requires the testcontainers round-trip running in CI.)
 - ClickHouse insert handles are created conditionally — only for record types that
   actually have data in the current batch, avoiding empty inserts.
 - Both sinks flush with bounded exponential-backoff retries (5 attempts), keeping

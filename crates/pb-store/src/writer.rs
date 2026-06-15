@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS book_events (
     side Enum8('Bid' = 1, 'Ask' = 2),
     price UInt32,
     size UInt64,
-    sequence Nullable(UInt64),
+    sequence UInt64,
     source String,
     source_event_id Nullable(String),
     source_session_id Nullable(String),
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS trade_events (
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (asset_id, recv_timestamp_us, trade_id)
+ORDER BY (asset_id, recv_timestamp_us)
 "#;
 
 const CREATE_INGEST_EVENTS_DDL: &str = r#"
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS ingest_events (
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (recv_timestamp_us, event_kind, source_session_id)
+ORDER BY (recv_timestamp_us, event_kind)
 "#;
 
 const CREATE_BOOK_CHECKPOINTS_DDL: &str = r#"
@@ -233,11 +233,15 @@ struct BookEventRow {
     recv_timestamp_us: u64,
     exchange_timestamp_us: u64,
     asset_id: String,
-    event_kind: String,
-    side: String,
+    // Enum8 columns are serialized as their i8 discriminant over RowBinary;
+    // sending a Rust String here is rejected by ClickHouse (audit finding A.4).
+    event_kind: i8,
+    side: i8,
     price: u32,
     size: u64,
-    sequence: Option<u64>,
+    // Non-nullable so it can stay in the sorting key without allow_nullable_key
+    // (audit finding A.3). Book events always carry a sequence; 0 if absent.
+    sequence: u64,
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
@@ -250,7 +254,7 @@ struct TradeEventRow {
     asset_id: String,
     price: u32,
     size: Option<u64>,
-    side: Option<String>,
+    side: Option<i8>,
     trade_id: Option<String>,
     fidelity: String,
     sequence: Option<u64>,
@@ -307,7 +311,7 @@ struct ExecutionEventRow {
     client_order_id: Option<String>,
     venue_order_id: Option<String>,
     event_kind: String,
-    side: Option<String>,
+    side: Option<i8>,
     price: Option<u32>,
     size: Option<u64>,
     status: Option<String>,
@@ -315,11 +319,24 @@ struct ExecutionEventRow {
     latency_json: String,
 }
 
-fn side_to_string(side: Option<Side>) -> Option<String> {
-    side.map(|value| match value {
-        Side::Bid => "Bid".to_string(),
-        Side::Ask => "Ask".to_string(),
-    })
+/// Map a side to its `Enum8('Bid' = 1, 'Ask' = 2)` discriminant for RowBinary.
+fn side_to_i8(side: Side) -> i8 {
+    match side {
+        Side::Bid => 1,
+        Side::Ask => 2,
+    }
+}
+
+fn opt_side_to_i8(side: Option<Side>) -> Option<i8> {
+    side.map(side_to_i8)
+}
+
+/// Map a book event kind to its `Enum8('Snapshot' = 1, 'Delta' = 2)` discriminant.
+fn book_kind_to_i8(kind: BookEventKind) -> i8 {
+    match kind {
+        BookEventKind::Snapshot => 1,
+        BookEventKind::Delta => 2,
+    }
 }
 
 #[derive(Clone)]
@@ -425,17 +442,11 @@ impl ClickHouseRecordWriter {
                         recv_timestamp_us: event.provenance.recv_timestamp_us,
                         exchange_timestamp_us: event.provenance.exchange_timestamp_us,
                         asset_id: event.asset_id.as_str().to_string(),
-                        event_kind: match event.kind {
-                            BookEventKind::Snapshot => "Snapshot".to_string(),
-                            BookEventKind::Delta => "Delta".to_string(),
-                        },
-                        side: match event.side {
-                            Side::Bid => "Bid".to_string(),
-                            Side::Ask => "Ask".to_string(),
-                        },
+                        event_kind: book_kind_to_i8(event.kind),
+                        side: side_to_i8(event.side),
                         price: event.price.raw(),
                         size: event.size.raw(),
-                        sequence: event.provenance.sequence.map(|seq| seq.raw()),
+                        sequence: event.provenance.sequence.map_or(0, |seq| seq.raw()),
                         source: event.provenance.source.to_string(),
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
@@ -449,7 +460,7 @@ impl ClickHouseRecordWriter {
                         asset_id: event.asset_id.as_str().to_string(),
                         price: event.price.raw(),
                         size: event.size.map(|size| size.raw()),
-                        side: side_to_string(event.side),
+                        side: opt_side_to_i8(event.side),
                         trade_id: event.trade_id.clone(),
                         fidelity: event.fidelity.to_string(),
                         sequence: event.provenance.sequence.map(|seq| seq.raw()),
@@ -519,7 +530,7 @@ impl ClickHouseRecordWriter {
                             ExecutionEventKind::Fill => "fill".to_string(),
                             ExecutionEventKind::Terminal => "terminal".to_string(),
                         },
-                        side: side_to_string(event.side),
+                        side: opt_side_to_i8(event.side),
                         price: event.price.map(|price| price.raw()),
                         size: event.size.map(|size| size.raw()),
                         status: event.status.clone(),

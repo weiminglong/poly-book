@@ -246,17 +246,30 @@ fn parse_side_value(value: u8) -> Result<Side, ReplayError> {
     }
 }
 
-fn parse_optional_side(value: Option<&str>) -> Result<Option<Side>, ReplayError> {
+/// ClickHouse stores `event_kind`/`side` as `Enum8`, which RowBinary returns as
+/// the i8 discriminant. These mirror the writer's `book_kind_to_i8`/`side_to_i8`.
+fn book_kind_from_i8(value: i8) -> Result<BookEventKind, ReplayError> {
     match value {
-        Some("Bid") => Ok(Some(Side::Bid)),
-        Some("Ask") => Ok(Some(Side::Ask)),
-        Some("bid") => Ok(Some(Side::Bid)),
-        Some("ask") => Ok(Some(Side::Ask)),
-        Some(other) => Err(ReplayError::InvalidSide {
+        1 => Ok(BookEventKind::Snapshot),
+        2 => Ok(BookEventKind::Delta),
+        other => Err(ReplayError::InvalidEventType {
             raw: other.to_string(),
         }),
-        None => Ok(None),
     }
+}
+
+fn side_from_i8(value: i8) -> Result<Side, ReplayError> {
+    match value {
+        1 => Ok(Side::Bid),
+        2 => Ok(Side::Ask),
+        other => Err(ReplayError::InvalidSide {
+            raw: other.to_string(),
+        }),
+    }
+}
+
+fn opt_side_from_i8(value: Option<i8>) -> Result<Option<Side>, ReplayError> {
+    value.map(side_from_i8).transpose()
 }
 
 fn parse_trade_fidelity(value: &str) -> Result<TradeFidelity, ReplayError> {
@@ -1040,11 +1053,11 @@ struct BookEventRow {
     recv_timestamp_us: u64,
     exchange_timestamp_us: u64,
     asset_id: String,
-    event_kind: String,
-    side: String,
+    event_kind: i8,
+    side: i8,
     price: u32,
     size: u64,
-    sequence: Option<u64>,
+    sequence: u64,
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
@@ -1057,7 +1070,7 @@ struct TradeEventRow {
     asset_id: String,
     price: u32,
     size: Option<u64>,
-    side: Option<String>,
+    side: Option<i8>,
     trade_id: Option<String>,
     fidelity: String,
     sequence: Option<u64>,
@@ -1114,7 +1127,7 @@ struct ExecutionEventRow {
     client_order_id: Option<String>,
     venue_order_id: Option<String>,
     event_kind: String,
-    side: Option<String>,
+    side: Option<i8>,
     price: Option<u32>,
     size: Option<u64>,
     status: Option<String>,
@@ -1171,16 +1184,8 @@ impl EventReader for ClickHouseReader {
             .map(|row| {
                 Ok(BookEvent {
                     asset_id: AssetId::new(row.asset_id),
-                    kind: match row.event_kind.as_str() {
-                        "Snapshot" => BookEventKind::Snapshot,
-                        "Delta" => BookEventKind::Delta,
-                        other => {
-                            return Err(ReplayError::InvalidEventType {
-                                raw: other.to_string(),
-                            })
-                        }
-                    },
-                    side: parse_optional_side(Some(row.side.as_str()))?.unwrap(),
+                    kind: book_kind_from_i8(row.event_kind)?,
+                    side: side_from_i8(row.side)?,
                     price: FixedPrice::new(row.price)?,
                     size: FixedSize::new(row.size),
                     provenance: EventProvenance {
@@ -1189,7 +1194,7 @@ impl EventReader for ClickHouseReader {
                         source: parse_source(&row.source)?,
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
-                        sequence: row.sequence.map(Sequence::new),
+                        sequence: Some(Sequence::new(row.sequence)),
                     },
                 })
             })
@@ -1208,7 +1213,7 @@ impl EventReader for ClickHouseReader {
                     asset_id: AssetId::new(row.asset_id),
                     price: FixedPrice::new(row.price)?,
                     size: row.size.map(FixedSize::new),
-                    side: parse_optional_side(row.side.as_deref())?,
+                    side: opt_side_from_i8(row.side)?,
                     trade_id: row.trade_id,
                     fidelity: parse_trade_fidelity(&row.fidelity)?,
                     provenance: EventProvenance {
@@ -1389,7 +1394,7 @@ impl EventReader for ClickHouseReader {
                     client_order_id: row.client_order_id,
                     venue_order_id: row.venue_order_id,
                     kind: parse_execution_kind(&row.event_kind)?,
-                    side: parse_optional_side(row.side.as_deref())?,
+                    side: opt_side_from_i8(row.side)?,
                     price: row.price.map(FixedPrice::new).transpose()?,
                     size: row.size.map(FixedSize::new),
                     status: row.status,
