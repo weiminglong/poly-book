@@ -220,7 +220,7 @@
 - **Action:** Cap concurrent connections per asset/total; add server heartbeat + idle timeout; lower the max message size; reset the feed reconnect attempt counter after a successful session and keep jitter at the cap.
 - **Done when:** a connection-flood test is bounded; an idle half-open peer is reaped; reconnect backoff returns to base after a healthy session.
 
-### [ ] P2-FEED-1 — Add a feed-liveness watchdog and fix reconnect backoff
+### [x] P2-FEED-1 — Add a feed-liveness watchdog and fix reconnect backoff
 - **Severity:** medium/low · **Findings:** A.107, A.106, A.150
 - **Files:** `crates/pb-feed/src/ws.rs:186` (pongs ignored, no read-idle timeout), `:88`/`:224` (attempt counter never resets, jitter nullified at cap)
 - **Problem:** Pongs are ignored and there's no read-idle timeout, so a half-open TCP connection stalls the feed silently for 15+ minutes while the process looks healthy. The reconnect `attempt` counter only increments for the process lifetime, degrading to a fixed 30 s gap per disconnect after ~9 cumulative disconnects, and jitter is nullified at the cap (synchronizing reconnects exactly when a thundering herd matters).

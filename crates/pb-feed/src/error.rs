@@ -23,6 +23,9 @@ pub enum FeedError {
     #[error("output channel closed — downstream consumer stopped")]
     ChannelSend,
 
+    #[error("websocket connection stalled — no data within the read-idle timeout")]
+    ConnectionStalled,
+
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 

@@ -67,9 +67,14 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   See [ADR-0006](../../docs/adr/0006-fxhashmap-dispatcher.md).
 - Unified `parse_side()` function for bid/ask parsing (deduplicated from previous
   per-site implementations).
-- WsClient reconnects with exponential backoff plus jitter (improved distribution
-  using Knuth's multiplicative hash constant) to avoid thundering herd on venue
-  restarts.
+- WsClient reconnects with exponential backoff plus jitter. The exponential term
+  is capped below `reconnect_max_delay_ms` so jitter still varies the delay at the
+  cap (otherwise every client would reconnect at exactly the max). The backoff
+  attempt counter resets after a session that stays connected ≥30s, so a later
+  disconnect retries promptly instead of inheriting an ever-growing delay.
+- A liveness watchdog forces a reconnect if no frame (data or pong) arrives within
+  ~3× the ping interval, so a half-open TCP connection cannot silently stall the
+  feed for many minutes.
 - On reconnect success, the dispatcher clears per-asset sequence and stale
   snapshot tracking before emitting `SourceReset`, so downstream replay does not
   stitch state across feed sessions or reject the first fresh post-reconnect
