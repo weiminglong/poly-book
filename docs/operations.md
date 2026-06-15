@@ -154,6 +154,47 @@ tailing and durably written with temp-file + fsync + rename semantics.
 `wal.position_commit_interval_ms` controls the steady-state commit cadence for
 that reader.
 
+### Schema Versioning & Migration
+
+Persisted data carries two independent, explicitly-versioned formats. Each has a
+single source-of-truth constant and a reader that **fails closed** on an
+unrecognized version rather than silently misreading bytes:
+
+| Format | Version constant | Reader gate |
+|---|---|---|
+| WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `2`) | `decode` rejects any other version byte; pre-v2 frames return an error with a "drain and re-create the WAL" hint |
+| Parquet / ClickHouse columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
+
+Frozen golden fixtures (`golden_codec_book_v2_bytes_are_stable` in `pb-wal`, and
+the determinism fixture in `tests/integration/book_determinism.rs`) make any
+accidental byte-format change a test failure, so a version bump is always a
+deliberate act.
+
+**Migration procedure when a persisted format changes:**
+
+1. **Decide whether it is backward-compatible.** Adding an *optional* field that
+   old readers can ignore and new readers default usually does **not** require a
+   version bump. A field whose absence changes meaning, a re-typed/removed field,
+   or any reordering that breaks the frozen golden bytes **does**.
+2. **Bump exactly one constant** — `CURRENT_VERSION` for WAL frame changes,
+   `PB_SCHEMA_VERSION` for Parquet/ClickHouse column changes — in the same commit
+   as the format change.
+3. **Add a cross-version fixture** capturing the *previous* version's bytes and a
+   test asserting the new reader either reads them or rejects them with a clear,
+   actionable error. Update the golden fixture for the new version.
+4. **Drain before deploy (WAL).** The WAL is a short-lived tail, not a long-term
+   store: stop `ingest`, let `serve` consume to the end, then let the new build
+   create fresh segments. Old segments are not auto-upgraded — a version mismatch
+   is surfaced, not papered over.
+5. **Re-snapshot / backfill (Parquet/ClickHouse).** Historical Parquet files keep
+   their original `pb_schema_version`. Either (a) keep readers able to accept the
+   prior version for the retention window, or (b) re-write affected partitions
+   from the source-of-truth (`backfill` / `reconcile`) so all files carry the new
+   version. ClickHouse column changes go through a normal `ALTER TABLE` migration
+   before the new writer starts.
+6. **Verify with replay.** Run the golden replay regression and a
+   `replay validate` over a migrated window before promoting the deploy.
+
 ## CI
 
 GitHub Actions runs the following checks on pushes and pull requests to `main`:

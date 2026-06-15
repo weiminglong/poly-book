@@ -36,17 +36,25 @@ jobs:
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
       - name: Build and push Docker image
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/poly-book:$IMAGE_TAG .
           docker push $ECR_REGISTRY/poly-book:$IMAGE_TAG
+          # Resolve the immutable content digest of the image we just pushed and
+          # deploy by digest (repo@sha256:...) instead of the mutable :sha tag, so
+          # the running task is pinned to exact bytes that cannot be overwritten
+          # by a later push to the same tag (audit A.51).
+          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "$ECR_REGISTRY/poly-book:$IMAGE_TAG")
+          echo "Pinned image: $IMAGE_DIGEST"
+          echo "image=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to ECS
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE: ${{ steps.build.outputs.image }}
         run: |
           # Get current task definition
           TASK_DEF=$(aws ecs describe-task-definition \
@@ -54,9 +62,9 @@ jobs:
             --query 'taskDefinition' \
             --output json)
 
-          # Update image in container definition
+          # Pin the container to the immutable image digest resolved above.
           NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
-            --arg IMAGE "$ECR_REGISTRY/poly-book:$IMAGE_TAG" \
+            --arg IMAGE "$IMAGE" \
             '.containerDefinitions[0].image = $IMAGE |
              del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
 

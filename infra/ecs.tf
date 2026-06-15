@@ -29,7 +29,12 @@ resource "aws_ecs_task_definition" "app" {
 
   container_definitions = jsonencode([
     {
-      name      = var.project_name
+      name = var.project_name
+      # Bootstrap placeholder only. Every deploy registers a new task-definition
+      # revision pinned to an immutable image digest (repo@sha256:...) via
+      # .github/workflows/deploy.yml, and the service below ignores
+      # task_definition changes, so the running task tracks the deploy-pinned
+      # digest and never resolves the mutable :latest tag at runtime (audit A.51).
       image     = "${aws_ecr_repository.app.repository_url}:latest"
       essential = true
 
