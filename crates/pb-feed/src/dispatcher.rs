@@ -489,13 +489,12 @@ impl Dispatcher {
     }
 }
 
+/// Parse a venue timestamp into microseconds. Delegates to the single shared
+/// converter so the dispatcher and the REST backfill agree on every resolution
+/// (seconds/ms/µs/ns) and on the zero case (audit findings A.119/A.147). Absent
+/// or non-numeric input becomes `0` (the "unknown timestamp" sentinel).
 fn parse_timestamp_us(ts: Option<&str>) -> u64 {
-    let raw = ts.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    if raw > 0 && raw < 10_000_000_000_000 {
-        raw.saturating_mul(1000)
-    } else {
-        raw
-    }
+    pb_types::time::parse_to_micros(ts).unwrap_or(0)
 }
 
 #[cfg(test)]

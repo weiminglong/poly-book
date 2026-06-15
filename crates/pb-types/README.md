@@ -15,6 +15,7 @@ the system.
 | `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
 | `PersistedRecord` | Enum dispatching to the six event datasets below. |
+| `time::normalize_to_micros` / `parse_to_micros` | The single timestamp-unit converter: classifies a raw value as s/ms/µs/ns by magnitude and returns microseconds (0 preserved as the unknown sentinel). Used by both the dispatcher and REST backfill so they never diverge (A.119/A.147). |
 
 ## Persisted Record Model
 

@@ -181,11 +181,9 @@ fn parse_size(s: &str) -> Result<FixedSize, pb_types::TypesError> {
     FixedSize::try_from(s)
 }
 
+/// Parse a snapshot timestamp into microseconds via the single shared converter,
+/// so backfill and the dispatcher agree on every resolution and the zero case
+/// (audit findings A.119/A.147).
 fn parse_timestamp_us(ts: Option<&str>) -> Option<u64> {
-    let raw = ts?.parse::<u64>().ok()?;
-    if raw < 10_000_000_000_000 {
-        Some(raw.saturating_mul(1000))
-    } else {
-        Some(raw)
-    }
+    pb_types::time::parse_to_micros(ts)
 }
