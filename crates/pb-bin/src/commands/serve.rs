@@ -58,13 +58,8 @@ pub async fn run(
 
     // Hydrate from checkpoints + WAL.
     let reader = pb_replay::ParquetReader::new(&parquet_base_path);
-    let hydration_result = pb_api::hydration::hydrate(
-        &live,
-        Some(&reader),
-        Some(&wal_config.base_path),
-        &token_ids,
-    )
-    .await;
+    let hydration_result =
+        pb_api::hydration::hydrate(&live, Some(&reader), Some(&wal_config), &token_ids).await;
     tracing::info!(
         checkpoints = hydration_result.checkpoints_loaded,
         wal_records = hydration_result.wal_records_replayed,
@@ -251,7 +246,7 @@ fn spawn_wal_tailer(
                     let hydration = pb_api::hydration::hydrate(
                         &live,
                         Some(&parquet_reader),
-                        Some(&config.base_path),
+                        Some(&config),
                         &token_ids,
                     )
                     .await;

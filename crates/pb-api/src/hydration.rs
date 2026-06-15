@@ -10,8 +10,6 @@
 //! Fallback: if no checkpoints exist, tail WAL from earliest offset.
 //! If no WAL exists, fall back to feed-only mode (mark hydrated immediately).
 
-use std::path::Path;
-
 use pb_types::AssetId;
 use tracing::{info, warn};
 
@@ -40,7 +38,7 @@ pub struct HydrationResult {
 pub async fn hydrate<R: pb_replay::EventReader>(
     model: &LiveReadModel,
     reader: Option<&R>,
-    wal_path: Option<&Path>,
+    wal_config: Option<&pb_wal::WalConfig>,
     active_assets: &[String],
 ) -> HydrationResult {
     let mut result = HydrationResult {
@@ -91,16 +89,19 @@ pub async fn hydrate<R: pb_replay::EventReader>(
         }
     }
 
-    // Phase 2: Replay WAL tail from the minimum checkpoint offset.
-    if let Some(wal_dir) = wal_path {
-        if wal_dir.exists() {
+    // Phase 2: Replay WAL tail from the minimum checkpoint offset, using the
+    // operator-configured WalConfig so the global-offset math matches the
+    // writer's `global_offset()` (a hardcoded default segment size mis-skipped
+    // records under a non-default `wal.segment_size_mb` — audit finding A.156).
+    if let Some(cfg) = wal_config {
+        if cfg.base_path.exists() {
             let (wal_records_replayed, wal_end_position) =
-                replay_wal_tail(model, wal_dir, min_wal_offset).await;
+                replay_wal_tail(model, cfg, min_wal_offset).await;
             result.wal_records_replayed = wal_records_replayed;
             result.wal_resume_offset = min_wal_offset;
             result.wal_end_position = wal_end_position;
         } else {
-            info!(path = %wal_dir.display(), "WAL directory not found, skipping WAL replay");
+            info!(path = %cfg.base_path.display(), "WAL directory not found, skipping WAL replay");
         }
     }
 
@@ -122,13 +123,10 @@ pub async fn hydrate<R: pb_replay::EventReader>(
 /// WAL segment.
 async fn replay_wal_tail(
     model: &LiveReadModel,
-    wal_dir: &Path,
+    config: &pb_wal::WalConfig,
     from_global_offset: Option<u64>,
 ) -> (usize, Option<pb_wal::WalPosition>) {
-    let config = pb_wal::WalConfig {
-        base_path: wal_dir.to_path_buf(),
-        ..Default::default()
-    };
+    let config = config.clone();
 
     let mut reader = match pb_wal::WalReader::open(config.clone(), "serve-hydration") {
         Ok(r) => r,
@@ -241,6 +239,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_wal_tail_skips_using_configured_segment_size() {
+        // A non-default (tiny) segment size forces rotation. The skip math must
+        // use the configured segment size, not the 64 MB default — otherwise the
+        // global-offset comparison is wrong and records are mis-skipped or
+        // double-applied (audit finding A.156).
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 256,
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        for i in 0..3u32 {
+            writer
+                .append(
+                    &pb_wal::codec::encode(&snapshot_record(Side::Bid, 5000 + i, 10.0, i as u64))
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        // Resume point after the first three records.
+        let cutoff = writer.global_offset();
+        for i in 3..7u32 {
+            writer
+                .append(
+                    &pb_wal::codec::encode(&snapshot_record(Side::Bid, 5000 + i, 10.0, i as u64))
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let (replayed, _pos) = replay_wal_tail(&live, &config, Some(cutoff)).await;
+        // Only the four records appended after the cutoff are replayed. With the
+        // old hardcoded 64 MB segment size, nothing would be skipped and all
+        // seven would replay — this asserts the configured size is used.
+        assert_eq!(replayed, 4);
+    }
+
+    #[tokio::test]
     async fn hydration_returns_end_position_for_live_handoff() {
         let dir = tempfile::tempdir().unwrap();
         let config = pb_wal::WalConfig {
@@ -261,13 +302,9 @@ mod tests {
         let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
         live.set_active_assets(vec!["tok1".to_string()]).await;
 
-        let result = hydrate::<pb_replay::ParquetReader>(
-            &live,
-            None,
-            Some(dir.path()),
-            &["tok1".to_string()],
-        )
-        .await;
+        let result =
+            hydrate::<pb_replay::ParquetReader>(&live, None, Some(&config), &["tok1".to_string()])
+                .await;
 
         assert_eq!(result.wal_records_replayed, 2);
         let position = result
