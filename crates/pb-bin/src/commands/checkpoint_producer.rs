@@ -12,18 +12,7 @@ pub struct CheckpointProducerConfig {
     pub rate_limit_pause: Duration,
 }
 
-pub fn spawn(
-    config: CheckpointProducerConfig,
-    active_assets: watch::Receiver<Vec<String>>,
-    tx: mpsc::Sender<PersistedRecord>,
-    token: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        run(config, active_assets, tx, token).await;
-    })
-}
-
-async fn run(
+pub(super) async fn run(
     config: CheckpointProducerConfig,
     active_assets: watch::Receiver<Vec<String>>,
     tx: mpsc::Sender<PersistedRecord>,

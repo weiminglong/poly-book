@@ -27,42 +27,55 @@ pub async fn run(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
     let (active_assets_tx, active_assets_rx) = tokio::sync::watch::channel(Vec::<String>::new());
 
-    let checkpoint_handle = pipeline::start_checkpoint_producer(
+    // The long-lived infrastructure tasks (sinks, checkpoint producer, WAL drain,
+    // fan-out forwarders) are supervised so an unexpected exit becomes a
+    // coordinated, non-zero-exit shutdown instead of a silent storage gap. The
+    // rotating per-market feed/dispatcher tasks are NOT supervised here — their
+    // cycling is the expected steady state and is managed via `Generation`.
+    let mut supervisor = pipeline::Supervisor::new();
+
+    pipeline::start_checkpoint_producer(
         &settings,
         active_assets_rx,
         event_tx.clone(),
         &shutdown,
+        &mut supervisor,
     );
 
-    let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, enable_clickhouse).await?;
+    let sinks = pipeline::start_storage_sinks(
+        &settings,
+        enable_parquet,
+        enable_clickhouse,
+        &mut supervisor,
+    )
+    .await?;
 
     let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::PersistedRecord>> = Vec::new();
-    let mut fanout_fwd_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(ptx) = sinks.parquet_tx.clone() {
         let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
-        fanout_fwd_handles.push(tokio::spawn(async move {
+        supervisor.spawn("parquet-fanout", async move {
             while let Some(event) = frx.recv().await {
                 if let Err(e) = ptx.send(event).await {
                     tracing::warn!("parquet sink send failed: {e}");
                     break;
                 }
             }
-        }));
+        });
     }
 
     if let Some(ctx) = sinks.clickhouse_tx.clone() {
         let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
         fanout_txs.push(ftx);
-        fanout_fwd_handles.push(tokio::spawn(async move {
+        supervisor.spawn("clickhouse-fanout", async move {
             while let Some(event) = frx.recv().await {
                 if let Err(e) = ctx.send(event).await {
                     tracing::warn!("clickhouse sink send failed: {e}");
                     break;
                 }
             }
-        }));
+        });
     }
 
     // Open the WAL writer. auto-ingest is the production rotating-market mode,
@@ -83,7 +96,7 @@ pub async fn run(
 
     let drain_shutdown = shutdown.clone();
     let drain_wal_failed = wal_failed.clone();
-    let fanout_handle = tokio::spawn(async move {
+    supervisor.spawn("wal-drain", async move {
         let mut flush_tick = tokio::time::interval(wal_flush_interval);
         let mut sync_tick = tokio::time::interval(wal_sync_interval);
         let mut prune_tick = tokio::time::interval(Duration::from_secs(60));
@@ -175,6 +188,10 @@ pub async fn run(
         }
     });
 
+    // If a supervised infrastructure task exits unexpectedly, ingestion cannot
+    // continue without a silent storage gap; record it so run() exits non-zero.
+    let mut supervision_failure: Option<&'static str> = None;
+
     let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
     let rate_window = settings
         .get_int("feed.rate_limit_window_secs")
@@ -221,6 +238,16 @@ pub async fn run(
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(sleep_secs)) => {}
                     _ = shutdown.cancelled() => break,
+                    exited = supervisor.next_exit(), if !supervisor.is_empty() => {
+                        let name = exited.unwrap_or("<unknown>");
+                        tracing::error!(
+                            component = name,
+                            "supervised task exited unexpectedly; shutting down auto-ingest"
+                        );
+                        supervision_failure = Some(name);
+                        shutdown.cancel();
+                        break;
+                    }
                 }
             }
             continue;
@@ -238,6 +265,16 @@ pub async fn run(
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(sleep_secs)) => {}
                     _ = shutdown.cancelled() => break,
+                    exited = supervisor.next_exit(), if !supervisor.is_empty() => {
+                        let name = exited.unwrap_or("<unknown>");
+                        tracing::error!(
+                            component = name,
+                            "supervised task exited unexpectedly; shutting down auto-ingest"
+                        );
+                        supervision_failure = Some(name);
+                        shutdown.cancel();
+                        break;
+                    }
                 }
             }
         }
@@ -316,21 +353,25 @@ pub async fn run(
     }
     let _ = active_assets_tx.send(Vec::new());
 
+    // Ensure the shutdown token is cancelled so all supervised tasks stop, then
+    // close the event/sink senders so the drain and fan-out tasks reach EOF and
+    // exit cleanly before we join them.
+    shutdown.cancel();
     drop(event_tx);
     drop(sinks.parquet_tx);
     drop(sinks.clickhouse_tx);
 
-    pipeline::shutdown_handles(vec![fanout_handle], "fan-out task").await;
-    pipeline::shutdown_handles(fanout_fwd_handles, "fan-out forwarding task").await;
-    pipeline::shutdown_handles(sinks.task_handles, "sink").await;
-    if let Some(handle) = checkpoint_handle {
-        pipeline::shutdown_handles(vec![handle], "checkpoint producer").await;
-    }
+    // Join all supervised infrastructure tasks (drain, fan-out forwarders,
+    // sinks, checkpoint producer) with a bounded timeout.
+    supervisor.join_all("auto-ingest").await;
 
     // If the drain task aborted on a WAL durability failure, exit non-zero so
     // the supervisor restarts us rather than running on without persistence.
     if wal_failed.load(Ordering::SeqCst) {
         anyhow::bail!("auto-ingest aborted: WAL durability failure");
+    }
+    if let Some(component) = supervision_failure {
+        anyhow::bail!("auto-ingest aborting: supervised task '{component}' exited unexpectedly");
     }
 
     tracing::info!("graceful shutdown complete");

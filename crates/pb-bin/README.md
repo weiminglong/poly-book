@@ -47,6 +47,14 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   shared between `ingest` and `auto_ingest`.
 - Forwarder tasks use idiomatic `while let` receive loops instead of
   `tokio::select!` patterns.
+- **Task supervision**: long-lived background tasks (feed, dispatcher, storage
+  sinks, fan-out forwarders, WAL drain, checkpoint producer) are registered with
+  a `pipeline::Supervisor` (a tagged `JoinSet`). If any exits unexpectedly —
+  returns, errors, or panics — before a coordinated shutdown, `ingest`/
+  `auto-ingest` cancel the shutdown token and return a non-zero error rather than
+  continuing with a dead component or exiting 0. In `auto_ingest` the rotating
+  per-market feed generations are deliberately *not* supervised this way (their
+  cycling is the expected steady state and is managed via `Generation`).
 
 ## Docs to Update After Changes
 

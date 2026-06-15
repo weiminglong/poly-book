@@ -38,7 +38,82 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
 pub struct SinkHandles {
     pub parquet_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
     pub clickhouse_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
-    pub task_handles: Vec<JoinHandle<()>>,
+}
+
+/// Supervises long-lived background tasks. Each task is tagged with a stable
+/// name; if any exits — returns, errors, or panics — before a coordinated
+/// shutdown, the supervisor reports its name so the owning command can treat the
+/// exit as fatal (cancel the shutdown token and return a non-zero error)
+/// instead of silently continuing with a dead component or exiting 0.
+///
+/// This addresses the audit finding that there was no task supervision anywhere:
+/// a single transient sink error caused its task to end while the ingest loop
+/// kept running and the process ultimately exited 0, masking real data loss.
+#[derive(Default)]
+pub struct Supervisor {
+    tasks: tokio::task::JoinSet<&'static str>,
+}
+
+impl Supervisor {
+    pub fn new() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+        }
+    }
+
+    /// Spawn a supervised task. The task runs `fut` to completion; the
+    /// supervisor records `name` so it can report which component exited.
+    pub fn spawn<F>(&mut self, name: &'static str, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(async move {
+            fut.await;
+            name
+        });
+    }
+
+    /// True when no supervised tasks remain. Use as a `select!` precondition so
+    /// an empty supervisor never busy-loops returning `None`.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    /// Wait for the next supervised task to exit. Returns the task's name, or
+    /// `"<panicked>"` if it panicked or was cancelled. Returns `None` only when
+    /// the supervisor holds no tasks.
+    pub async fn next_exit(&mut self) -> Option<&'static str> {
+        match self.tasks.join_next().await {
+            Some(Ok(name)) => Some(name),
+            Some(Err(e)) => {
+                tracing::error!(error = %e, "supervised task panicked");
+                Some("<panicked>")
+            }
+            None => None,
+        }
+    }
+
+    /// Await all remaining tasks during a coordinated shutdown, logging any that
+    /// panicked. Call after cancelling the shutdown token. Bounded so a hung
+    /// task cannot block shutdown forever.
+    pub async fn join_all(mut self, label: &str) {
+        let deadline = Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout(deadline, self.tasks.join_next()).await {
+                Ok(Some(Ok(_name))) => {}
+                Ok(Some(Err(e))) if !e.is_cancelled() => {
+                    tracing::error!(error = %e, "{label} task panicked during shutdown");
+                }
+                Ok(Some(Err(_))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!("{label} tasks did not all shut down within timeout");
+                    self.tasks.abort_all();
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Build the object store and path prefix for a configured storage base path.
@@ -77,9 +152,8 @@ pub async fn start_storage_sinks(
     settings: &Config,
     enable_parquet: bool,
     enable_clickhouse: bool,
+    supervisor: &mut Supervisor,
 ) -> Result<SinkHandles> {
-    let mut task_handles = Vec::new();
-
     let parquet_tx = if enable_parquet {
         let configured = settings
             .get_string("storage.parquet_base_path")
@@ -92,11 +166,11 @@ pub async fn start_storage_sinks(
         let (ptx, prx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
             .with_flush_interval(Duration::from_secs(flush_secs));
-        task_handles.push(tokio::spawn(async move {
+        supervisor.spawn("parquet-sink", async move {
             if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "parquet sink failed");
             }
-        }));
+        });
         Some(ptx)
     } else {
         None
@@ -127,11 +201,11 @@ pub async fn start_storage_sinks(
         if let Err(e) = sink.ensure_table().await {
             tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
         }
-        task_handles.push(tokio::spawn(async move {
+        supervisor.spawn("clickhouse-sink", async move {
             if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "clickhouse sink failed");
             }
-        }));
+        });
         Some(ctx)
     } else {
         None
@@ -140,7 +214,6 @@ pub async fn start_storage_sinks(
     Ok(SinkHandles {
         parquet_tx,
         clickhouse_tx,
-        task_handles,
     })
 }
 
@@ -159,25 +232,28 @@ pub fn checkpoint_config_from_settings(
     }
 }
 
+/// Spawn the checkpoint producer into the supervisor if enabled. Returns `true`
+/// if it was started. Supervising it means an unexpected exit (rather than a
+/// shutdown-token cancellation) is surfaced as a fatal component death.
 pub fn start_checkpoint_producer(
     settings: &Config,
     active_assets_rx: tokio::sync::watch::Receiver<Vec<String>>,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     shutdown: &CancellationToken,
-) -> Option<JoinHandle<()>> {
+    supervisor: &mut Supervisor,
+) -> bool {
     let enabled = settings
         .get_bool("storage.checkpoints_enabled")
         .unwrap_or(true);
     if !enabled {
-        return None;
+        return false;
     }
     let config = checkpoint_config_from_settings(settings);
-    Some(super::checkpoint_producer::spawn(
-        config,
-        active_assets_rx,
-        event_tx,
-        shutdown.child_token(),
-    ))
+    let token = shutdown.child_token();
+    supervisor.spawn("checkpoint-producer", async move {
+        super::checkpoint_producer::run(config, active_assets_rx, event_tx, token).await;
+    });
+    true
 }
 
 /// List committed consumer position files (`consumer_*.pos`) in the WAL
@@ -448,6 +524,52 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    // --- Supervisor ---
+
+    #[tokio::test]
+    async fn supervisor_reports_exited_task_name() {
+        let mut sup = Supervisor::new();
+        sup.spawn("short-lived", async {});
+        sup.spawn("long-lived", async {
+            // Stay alive long enough that the short-lived task is observed first.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let exited = sup.next_exit().await;
+        assert_eq!(exited, Some("short-lived"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_detects_panicked_task() {
+        let mut sup = Supervisor::new();
+        sup.spawn("panicker", async {
+            panic!("boom");
+        });
+        let exited = sup.next_exit().await;
+        assert_eq!(exited, Some("<panicked>"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_empty_is_empty() {
+        let mut sup = Supervisor::new();
+        assert!(sup.is_empty());
+        sup.spawn("t", async {});
+        assert!(!sup.is_empty());
+        // Drain it.
+        let _ = sup.next_exit().await;
+        assert!(sup.is_empty());
+    }
+
+    #[tokio::test]
+    async fn supervisor_join_all_completes_when_tasks_finish() {
+        let mut sup = Supervisor::new();
+        sup.spawn("a", async {});
+        sup.spawn("b", async {});
+        // Should return promptly once both tasks complete (well under the 10s cap).
+        tokio::time::timeout(Duration::from_secs(5), sup.join_all("test"))
+            .await
+            .expect("join_all should complete promptly");
     }
 
     // --- build_object_store ---

@@ -174,7 +174,7 @@
 - **Action:** On shutdown, drain the channels (bounded by a deadline) into the WAL/sinks before exiting; reuse the `auto-ingest` drain template. Make the flush deadline configurable and log/meter abandoned records.
 - **Done when:** a shutdown-under-load test asserts all in-flight events reach the WAL (or are counted as abandoned with a metric), not silently dropped.
 
-### [ ] P2-WAL-PRUNE — Wire WAL pruning and enforce `max_segments`
+### [x] P2-WAL-PRUNE — Wire WAL pruning and enforce `max_segments`
 - **Severity:** medium · **Findings:** A.17, A.20, A.47, A.127, A.128, A.9
 - **Files:** `crates/pb-wal/src/writer.rs:75` (`prune`/`prune_with_backpressure` have no callers), `crates/pb-bin/src/commands/pipeline.rs:156`, `crates/pb-wal/src/segment.rs:33` (no writer mutual exclusion)
 - **Problem:** Pruning is implemented but never invoked; `wal.max_segments` is dead config; the WAL grows unbounded until disk-full, after which appends silently fail. Pruner safety depends on a manually-supplied consumer list and ignores malformed position files. No `flock`, so two ingest processes can interleave appends and `Segment::create(truncate=true)` can wipe a populated segment.
