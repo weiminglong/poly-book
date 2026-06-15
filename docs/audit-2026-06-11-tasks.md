@@ -250,7 +250,7 @@
 - **Action:** Add gauges (feed staleness, WAL lag, disk/segments, channel depth) and failure counters; configure explicit histogram buckets for a recv→durable latency metric; add `run_upkeep`. Commit `monitoring/` with Prometheus alert rules (feed staleness, WAL lag, sink failure, crossed-book, disk) + dashboards + a `RUNBOOK.md`.
 - **Done when:** `/metrics` exposes the gauges and bucketed histogram; `monitoring/` alert rules exist and load; a runbook covers each alert.
 
-### [ ] P2-CONF-1 — Make config fail-fast and wire (or delete) dead keys
+### [x] P2-CONF-1 — Make config fail-fast and wire (or delete) dead keys
 - **Severity:** medium · **Findings:** A.102, A.103, A.54, A.87
 - **Files:** `crates/pb-bin/src/main.rs:146` (missing `--config` ignored), `:49` (boolean toggles can't be disabled), `:166`
 - **Problem:** Missing `--config` is ignored; parse/type errors and negative ints are swallowed via `unwrap_or`/`as`; the boolean `--parquet`/`--metrics` toggles literally cannot be disabled (so the documented two-process recipe collides on port 9090); `wal.max_segments`, `storage.parquet_row_group_size`, `storage.clickhouse_batch_*`, and `logging.format` are dead config (JSON logging is impossible).
