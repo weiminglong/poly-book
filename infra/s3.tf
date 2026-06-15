@@ -1,6 +1,18 @@
 resource "aws_s3_bucket" "data" {
   bucket_prefix = "${var.project_name}-data-"
-  force_destroy = true
+  # Never auto-delete a populated market-data bucket on `terraform destroy`
+  # (audit finding A.134) — this is the system's durable history.
+  force_destroy = false
+}
+
+# Versioning protects against accidental overwrite/delete of captured data and is
+# a prerequisite for recovery from the deterministic-filename overwrite class of
+# bug (audit finding A.134).
+resource "aws_s3_bucket_versioning" "data" {
+  bucket = aws_s3_bucket.data.id
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "data" {
@@ -14,6 +26,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
     transition {
       days          = 30
       storage_class = "STANDARD_IA"
+    }
+  }
+
+  # Bound storage growth from versioning: keep noncurrent versions for a recovery
+  # window, then expire them.
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
     }
   }
 }

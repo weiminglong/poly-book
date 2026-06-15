@@ -2,8 +2,11 @@
 exclude-unpublished = true
 
 [advisories]
-unmaintained = "none"
-yanked = "warn"
+# Detect unmaintained crates in the workspace and its direct dependencies
+# (audit finding A.36); transitive-only unmaintained crates are not failed on to
+# avoid breaking CI on upstreams we cannot control.
+unmaintained = "workspace"
+yanked = "deny"
 # astral-tokio-tar 0.5.6 advisories in the testcontainers dev dependency.
 # Waiting for testcontainers to release with astral-tokio-tar >=0.6.1.
 # - RUSTSEC-2026-0066: low-severity PAX extension validation issue.
@@ -33,7 +36,9 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "allow"
+# Surface duplicate transitive versions rather than allowing them unbounded
+# (audit finding A.141); warn keeps it visible without failing CI.
+multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
