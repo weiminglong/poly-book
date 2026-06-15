@@ -161,7 +161,13 @@ pub(crate) fn build_execution_timeline(
     }
 
     let total_count = events.len();
-    events.truncate(limit);
+    // Keep the MOST RECENT `limit` events, not the oldest. Events are sorted
+    // ascending by timestamp, so truncating the front silently hid recent
+    // activity once a window exceeded the limit (A.65); total_count still
+    // reports the true total so callers know more exist.
+    if events.len() > limit {
+        events.drain(0..events.len() - limit);
+    }
 
     ExecutionTimeline {
         events,

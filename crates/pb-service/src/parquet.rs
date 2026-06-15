@@ -484,5 +484,8 @@ mod tests {
 
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 2);
+        // The two most recent events are kept, not the two oldest (A.65).
+        assert_eq!(timeline.events[0].order_id, "order-3");
+        assert_eq!(timeline.events[1].order_id, "order-4");
     }
 }
