@@ -1030,7 +1030,15 @@ impl EventReader for ParquetReader {
                 extract_execution_events(batch, order_id, start_us, end_us)
             })
             .await?;
-        events.sort_by_key(|event| event.event_timestamp_us);
+        // Deterministic tie-break matching the ClickHouse reader's
+        // `ORDER BY event_timestamp_us, order_id, event_kind`, so equal-timestamp
+        // events are stable and the two backends agree (audit finding A.63).
+        events.sort_by(|a, b| {
+            a.event_timestamp_us
+                .cmp(&b.event_timestamp_us)
+                .then_with(|| a.order_id.cmp(&b.order_id))
+                .then_with(|| a.kind.to_string().cmp(&b.kind.to_string()))
+        });
         Ok(events)
     }
 }
@@ -1374,10 +1382,14 @@ impl EventReader for ClickHouseReader {
         end_us: u64,
     ) -> Result<Vec<ExecutionEvent>, ReplayError> {
         let base_query = "SELECT event_timestamp_us, asset_id, order_id, client_order_id, venue_order_id, event_kind, side, price, size, status, reason, latency_json FROM execution_events WHERE event_timestamp_us >= ? AND event_timestamp_us <= ?";
+        // Deterministic tie-break (event_timestamp_us, order_id, event_kind) so
+        // equal-timestamp events are stable and match the Parquet reader (A.63).
         let query = if order_id.is_some() {
-            format!("{base_query} AND order_id = ? ORDER BY event_timestamp_us")
+            format!(
+                "{base_query} AND order_id = ? ORDER BY event_timestamp_us, order_id, event_kind"
+            )
         } else {
-            format!("{base_query} ORDER BY event_timestamp_us")
+            format!("{base_query} ORDER BY event_timestamp_us, order_id, event_kind")
         };
 
         let mut request = self.client.query(&query).bind(start_us).bind(end_us);
