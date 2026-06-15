@@ -1,5 +1,4 @@
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -200,9 +199,8 @@ pub async fn run(settings: Config, args: ExecutionAppendArgs) -> Result<()> {
 
     match source.as_str() {
         "parquet" => {
-            let base_path = resolve_parquet_base_path(&settings)?;
-            let store: Arc<dyn object_store::ObjectStore> =
-                Arc::new(object_store::local::LocalFileSystem::new());
+            let configured = resolve_parquet_base_path(&settings)?;
+            let (store, base_path) = super::pipeline::build_object_store(&configured)?;
             let writer = ParquetRecordWriter::new(store, base_path);
             writer.write_batch(&records).await?;
         }

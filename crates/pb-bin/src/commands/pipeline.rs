@@ -41,6 +41,38 @@ pub struct SinkHandles {
     pub task_handles: Vec<JoinHandle<()>>,
 }
 
+/// Build the object store and path prefix for a configured storage base path.
+///
+/// A path with a URL scheme (`s3://bucket/prefix`, `gs://...`, `file://...`) is
+/// wired to the matching `object_store` backend; a plain path is a local
+/// filesystem directory. This is the fix for the critical finding (A.1) where an
+/// `s3://...` base path was silently handled by `LocalFileSystem` and written to
+/// a local directory literally named `s3:` on ephemeral container storage.
+///
+/// For `s3://`, credentials and region come from the standard AWS provider chain
+/// (env vars / ECS task role / instance profile).
+pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::ObjectStore>, String)> {
+    if base_path.contains("://") {
+        let url = url::Url::parse(base_path)
+            .map_err(|e| anyhow::anyhow!("invalid storage URL {base_path}: {e}"))?;
+        let (store, prefix) = object_store::parse_url(&url)
+            .map_err(|e| anyhow::anyhow!("failed to build object store for {base_path}: {e}"))?;
+        Ok((Arc::from(store), prefix.to_string()))
+    } else {
+        // Local filesystem: canonicalize/create the dir and use the absolute
+        // path as the object-path prefix on a root LocalFileSystem.
+        let abs = std::path::Path::new(base_path)
+            .canonicalize()
+            .or_else(|_| {
+                std::fs::create_dir_all(base_path)?;
+                std::path::Path::new(base_path).canonicalize()
+            })?
+            .to_string_lossy()
+            .to_string();
+        Ok((Arc::new(object_store::local::LocalFileSystem::new()), abs))
+    }
+}
+
 pub async fn start_storage_sinks(
     settings: &Config,
     enable_parquet: bool,
@@ -49,24 +81,15 @@ pub async fn start_storage_sinks(
     let mut task_handles = Vec::new();
 
     let parquet_tx = if enable_parquet {
-        let base_path = settings
+        let configured = settings
             .get_string("storage.parquet_base_path")
             .unwrap_or_else(|_| "./data".to_string());
-        let base_path = std::path::Path::new(&base_path)
-            .canonicalize()
-            .or_else(|_| {
-                std::fs::create_dir_all(&base_path)?;
-                std::path::Path::new(&base_path).canonicalize()
-            })?
-            .to_string_lossy()
-            .to_string();
+        let (store, base_path) = build_object_store(&configured)?;
         let flush_secs = settings
             .get_int("storage.parquet_flush_interval_secs")
             .unwrap_or(300) as u64;
 
         let (ptx, prx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
-        let store: Arc<dyn object_store::ObjectStore> =
-            Arc::new(object_store::local::LocalFileSystem::new());
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
             .with_flush_interval(Duration::from_secs(flush_secs));
         task_handles.push(tokio::spawn(async move {
@@ -397,6 +420,36 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    // --- build_object_store ---
+
+    #[test]
+    fn build_object_store_s3_url_does_not_create_local_dir() {
+        // An s3:// path must be parsed as an S3 store, never silently turned into
+        // a local directory named "s3:" (critical finding A.1).
+        let result = build_object_store("s3://test-bucket/orderbook");
+        assert!(
+            result.is_ok(),
+            "s3:// url should construct an S3 object store: {result:?}"
+        );
+        let (_store, prefix) = result.unwrap();
+        assert_eq!(prefix, "orderbook");
+        assert!(
+            !std::path::Path::new("s3:").exists(),
+            "must not create a local directory named 's3:'"
+        );
+    }
+
+    #[test]
+    fn build_object_store_local_path_canonicalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("nested/data");
+        let (_store, prefix) =
+            build_object_store(sub.to_str().unwrap()).expect("local store should build");
+        // The directory is created and the prefix is an absolute canonical path.
+        assert!(std::path::Path::new(&prefix).is_absolute());
+        assert!(sub.exists(), "local base path should be created");
     }
 
     // --- wal_config_from_settings ---
