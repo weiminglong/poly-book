@@ -59,6 +59,11 @@ pub struct Dispatcher {
     /// (audit findings A.74/A.109). Not used for serving — that book is
     /// reconstructed downstream from the WAL.
     validation_books: FxHashMap<Arc<str>, L2Book>,
+    /// Optional channel on which the dispatcher requests a REST resnapshot for an
+    /// asset whose book diverged from the venue (A.74). A resnapshot worker
+    /// fetches a fresh snapshot and re-injects it. Sends are non-blocking (drop
+    /// if full) so detection never backpressures ingest.
+    resnapshot_tx: Option<mpsc::Sender<Arc<str>>>,
     current_session_id: Option<String>,
 }
 
@@ -72,8 +77,17 @@ impl Dispatcher {
             last_snapshot_hash: FxHashMap::default(),
             asset_id_cache: FxHashMap::default(),
             validation_books: FxHashMap::default(),
+            resnapshot_tx: None,
             current_session_id: None,
         }
+    }
+
+    /// Wire a channel on which the dispatcher requests a REST resnapshot when it
+    /// detects a book divergence (A.74). Without it, divergences are still
+    /// detected, metered, and persisted as `BookMismatch` events.
+    pub fn with_resnapshot_tx(mut self, tx: mpsc::Sender<Arc<str>>) -> Self {
+        self.resnapshot_tx = Some(tx);
+        self
     }
 
     pub async fn run(&mut self) -> Result<(), FeedError> {
@@ -404,6 +418,12 @@ impl Dispatcher {
                     if let Some(details) = mismatch {
                         pb_metrics::record_book_mismatch();
                         warn!(asset_id = %asset_id, %details, "venue book mismatch detected");
+                        // Request a REST resnapshot to self-heal (A.74). Non-blocking:
+                        // if the channel is full a request is already pending, so
+                        // dropping this one is correct and never backpressures ingest.
+                        if let Some(tx) = &self.resnapshot_tx {
+                            let _ = tx.try_send(asset_id.0.clone());
+                        }
                         self.send(PersistedRecord::Ingest(IngestEvent {
                             asset_id: Some(asset_id.clone()),
                             kind: IngestEventKind::BookMismatch,
@@ -1749,6 +1769,45 @@ mod tests {
             }
             other => panic!("expected BookMismatch ingest event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn book_mismatch_requests_resnapshot_when_channel_wired() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (resnap_tx, mut resnap_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx).with_resnapshot_tx(resnap_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1", "price": "0.50", "size": "5", "side": "BUY",
+                "best_bid": "0.99", "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // A resnapshot was requested for the diverging asset.
+        let requested = resnap_rx.try_recv().expect("expected a resnapshot request");
+        assert_eq!(&*requested, "tok1");
     }
 
     #[tokio::test]
