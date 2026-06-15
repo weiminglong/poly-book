@@ -183,7 +183,7 @@
 
 ## Security & exposure
 
-### [ ] P2-SEC-1 — Close the SQL workbench SSRF / arbitrary-file-read hole
+### [x] P2-SEC-1 — Close the SQL workbench SSRF / arbitrary-file-read hole
 - **Severity:** high (impact) · **Findings:** A.24, A.130, A.43, A.120, A.83, A.91, A.121, A.89
 - **Files:** `crates/pb-service/src/query.rs:181` (keyword blocklist, no allowlist), `:243`, `:327`, `crates/pb-api/src/server.rs:447`
 - **Problem:** The guard is a write-keyword blocklist with no table/function allowlist, so `SELECT * FROM file('/etc/passwd',…)` / `url('http://169.254.169.254/…')` / `s3(…)` / `remote(…)` / `system.users` all pass, against ClickHouse with no `readonly` mode and no auth on a `0.0.0.0` bind. `max_rows` is client-controlled and unclamped; any `LIMIT` token (even in a subquery/CTE) suppresses the injected limit; the timeout covers only response headers, not body download. The query-guard fuzz target was removed from CI with known unfixed bypasses.

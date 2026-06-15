@@ -84,7 +84,15 @@ pb-service trait method
   configurable timeout.
 - `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
   targets exercise the same sanitizer and normalization path the runtime uses.
-- `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format for dynamic SQL execution.
+- The guard rejects an identifier blocklist of I/O table functions (`file`,
+  `url`, `s3`, `remote`, `mysql`, …), the `system` database, and exfiltration
+  clauses (`INTO OUTFILE`, `SETTINGS`) so a SELECT-rooted query cannot be an
+  SSRF / arbitrary-file-read primitive.
+- `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format
+  for dynamic SQL execution, and enforces `readonly=2`, `max_result_rows`, and
+  `max_execution_time` server-side as defense-in-depth; the whole request
+  (send + body download) is bounded by one timeout. The API clamps the
+  client-supplied row cap to the configured ceiling.
 - Five shared helpers are extracted into `lib.rs` to eliminate ~140 lines of
   duplicated business logic between Parquet and ClickHouse backends:
   `map_replay_error`, `ingest_to_continuity`, `build_replay_result`,

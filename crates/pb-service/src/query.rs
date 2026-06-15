@@ -53,6 +53,50 @@ const WRITE_KEYWORDS: &[&str] = &[
 
 const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"];
 
+/// Identifiers that must never appear in a workbench query. These are ClickHouse
+/// table functions that perform I/O — an unauthenticated SSRF / arbitrary
+/// file-read primitive (`file`, `url`, `s3`, `remote`, ...) — plus the `system`
+/// database (credential/metadata disclosure) and the file-exfiltration clauses
+/// (`INTO OUTFILE`, `SETTINGS`). A SELECT-rooted query with no write keyword
+/// otherwise reaches all of these (audit findings A.24/A.130). This blocklist
+/// is defense-in-depth alongside the server-side `readonly=2` enforcement.
+const FORBIDDEN_IDENTIFIERS: &[&str] = &[
+    // I/O table functions.
+    "FILE",
+    "URL",
+    "URLCLUSTER",
+    "S3",
+    "S3CLUSTER",
+    "REMOTE",
+    "REMOTESECURE",
+    "HDFS",
+    "HDFSCLUSTER",
+    "MYSQL",
+    "POSTGRESQL",
+    "JDBC",
+    "ODBC",
+    "MONGODB",
+    "REDIS",
+    "SQLITE",
+    "EXECUTABLE",
+    "AZUREBLOBSTORAGE",
+    "DELTALAKE",
+    "ICEBERG",
+    "GCS",
+    "INPUT",
+    // Cross-table / cluster / dictionary readers.
+    "REMOTE_SECURE",
+    "CLUSTER",
+    "CLUSTERALLREPLICAS",
+    "MERGE",
+    "DICTIONARY",
+    // Info-disclosure database and exfiltration clauses.
+    "SYSTEM",
+    "OUTFILE",
+    "INFILE",
+    "SETTINGS",
+];
+
 /// Sanitize result: the normalized SQL text and whether the input ended in a
 /// balanced state (i.e. no unclosed quotes, strings, or comments).
 struct SanitizeResult {
@@ -216,6 +260,13 @@ fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
             )));
         }
     }
+    for ident in FORBIDDEN_IDENTIFIERS {
+        if tokens.iter().any(|token| token == ident) {
+            return Err(ServiceError::InvalidParams(format!(
+                "identifier is not allowed: {ident}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -323,25 +374,45 @@ impl QueryService for ClickHouseQueryService {
     ) -> Result<QueryResult, ServiceError> {
         let guarded_sql = guard_sql(sql, guard)?;
 
+        // Server-side enforcement (defense-in-depth beyond the guard), passed as
+        // ClickHouse HTTP settings appended to the query URL (which already
+        // carries `?database=...`):
+        //  - readonly=2 forbids any write/DDL and cannot be downgraded mid-query;
+        //  - max_result_rows + result_overflow_mode=break cap returned rows
+        //    regardless of any LIMIT the user did or didn't write (A.83/A.120);
+        //  - max_execution_time bounds server-side runtime (A.121).
+        let url = format!(
+            "{}&readonly=2&max_result_rows={}&result_overflow_mode=break\
+             &max_execution_time={}&cancel_http_readonly_queries_on_client_close=1",
+            self.query_url, guard.max_rows, guard.timeout_secs
+        );
+
         let start = Instant::now();
-        let resp: reqwest::Response = tokio::time::timeout(
-            std::time::Duration::from_secs(guard.timeout_secs),
-            self.client.post(&self.query_url).body(guarded_sql).send(),
+        let request = self.client.post(&url).body(guarded_sql);
+
+        // Wrap send AND body download in one timeout, so a slow body stream
+        // can't bypass the deadline by trickling after headers arrive (A.121).
+        let exec = async {
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ServiceError::Internal(format!(
+                    "ClickHouse query error: {body}"
+                )));
+            }
+            resp.json::<ClickHouseJsonCompact>().await.map_err(|e| {
+                ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
+            })
+        };
+        let result: ClickHouseJsonCompact = tokio::time::timeout(
+            std::time::Duration::from_secs(guard.timeout_secs.saturating_add(2)),
+            exec,
         )
         .await
-        .map_err(|_| ServiceError::Internal("query timed out".to_string()))?
-        .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ServiceError::Internal(format!(
-                "ClickHouse query error: {body}"
-            )));
-        }
-
-        let result: ClickHouseJsonCompact = resp.json().await.map_err(|e| {
-            ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
-        })?;
+        .map_err(|_| ServiceError::Internal("query timed out".to_string()))??;
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
         let row_count = result.data.len();
@@ -605,6 +676,35 @@ mod tests {
             }
             _ => panic!("expected InvalidParams"),
         }
+    }
+
+    #[test]
+    fn guard_rejects_io_table_functions_and_system() {
+        // SELECT-rooted SSRF / file-read / info-disclosure attempts must all be
+        // rejected by the identifier blocklist (A.24/A.130).
+        let guard = QueryGuard::default();
+        let attacks = [
+            "SELECT * FROM file('/etc/passwd', 'CSV')",
+            "SELECT * FROM url('http://169.254.169.254/latest/meta-data', 'CSV')",
+            "SELECT * FROM s3('https://bucket/key', 'CSV')",
+            "SELECT * FROM remote('1.2.3.4:9000', default, t)",
+            "SELECT * FROM system.users",
+            "SELECT name FROM mysql('host:3306', 'db', 't', 'u', 'p')",
+            "SELECT 1 INTO OUTFILE '/tmp/x'",
+            "WITH x AS (SELECT * FROM file('/etc/passwd')) SELECT * FROM x",
+        ];
+        for sql in attacks {
+            assert!(
+                guard_sql(sql, &guard).is_err(),
+                "guard must reject dangerous query: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_allows_legitimate_dataset_query() {
+        let guard = QueryGuard::default();
+        assert!(guard_sql("SELECT asset_id, price FROM book_events", &guard).is_ok());
     }
 
     #[test]

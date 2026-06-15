@@ -525,8 +525,15 @@ async fn query_sql(
         ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
     })?;
 
+    // Clamp the client-supplied row cap to the configured ceiling so a request
+    // cannot raise its own limit above the server policy (A.83/A.91).
+    let ceiling = state.config.query_max_rows.max(1);
+    let max_rows = req
+        .max_rows
+        .map(|requested| requested.clamp(1, ceiling))
+        .unwrap_or(ceiling);
     let guard = pb_service::QueryGuard {
-        max_rows: req.max_rows.unwrap_or(state.config.query_max_rows),
+        max_rows,
         timeout_secs: state.config.query_timeout_secs,
     };
 
