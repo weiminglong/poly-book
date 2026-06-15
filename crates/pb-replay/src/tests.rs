@@ -1085,3 +1085,122 @@ fn parse_timestamp_us_microseconds() {
     let cp = checkpoint_from_rest(&response).unwrap();
     assert_eq!(cp.checkpoint_timestamp_us, 1_750_000_200_000_000);
 }
+
+// ---------------------------------------------------------------------------
+// Golden replay determinism regression (P3-CHG-1)
+// ---------------------------------------------------------------------------
+
+/// A fixed, deterministic set of book events written to Parquet, with explicit
+/// ingest ordinals — including a same-microsecond pre-snapshot delta that must
+/// sort before its snapshot (A.116). Replaying this fixture must always produce
+/// the same book; a book-logic change that alters the output will fail this test.
+fn golden_book_records() -> Vec<pb_types::PersistedRecord> {
+    fn ev(
+        kind: BookEventKind,
+        side: Side,
+        price: u32,
+        size: u64,
+        recv_ts: u64,
+        seq: u64,
+        ordinal: u64,
+    ) -> pb_types::PersistedRecord {
+        let mut prov = test_provenance(recv_ts, seq);
+        prov.ingest_ordinal = Some(ordinal);
+        pb_types::PersistedRecord::Book(BookEvent {
+            asset_id: test_asset_id(),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: prov,
+        })
+    }
+    let t = BASE_TS;
+    vec![
+        // Initial snapshot at t.
+        ev(BookEventKind::Snapshot, Side::Bid, 5000, 100, t, 0, 0),
+        ev(BookEventKind::Snapshot, Side::Bid, 4900, 80, t, 0, 1),
+        ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, t, 0, 2),
+        // A delta that arrived BEFORE a re-snapshot at the same microsecond
+        // (ordinal 3 < 4): it must be applied first, then overwritten by the
+        // snapshot — i.e. it must NOT win the tie (A.116).
+        ev(BookEventKind::Delta, Side::Bid, 5000, 999, t + 10, 7, 3),
+        ev(BookEventKind::Snapshot, Side::Bid, 5000, 110, t + 10, 0, 4),
+        ev(BookEventKind::Snapshot, Side::Bid, 4900, 80, t + 10, 0, 5),
+        ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, t + 10, 0, 6),
+        // Post-snapshot deltas.
+        ev(BookEventKind::Delta, Side::Bid, 5000, 130, t + 20, 1, 7),
+        ev(BookEventKind::Delta, Side::Ask, 5300, 150, t + 30, 2, 8),
+    ]
+}
+
+async fn replay_golden(base_path: &std::path::Path) -> crate::engine::ReplayResult {
+    let reader = ParquetReader::new(base_path);
+    let engine = ReplayEngine::new(reader);
+    engine
+        .reconstruct_at(&test_asset_id(), BASE_TS + 1_000_000, ReplayMode::RecvTime)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn golden_replay_produces_expected_book() {
+    let dir = TempDir::new().unwrap();
+    write_parquet_records(dir.path(), &golden_book_records()).await;
+
+    let result = replay_golden(dir.path()).await;
+
+    // Expected final book after the re-snapshot at t+10 and the two later deltas:
+    //   bids: 5000=130 (delta @t+20 over snapshot 110), 4900=80
+    //   asks: 5100=200, 5300=150
+    // The stale pre-snapshot delta (5000=999) must have been overwritten.
+    assert_eq!(result.book.bid_depth(), 2, "bids");
+    assert_eq!(result.book.ask_depth(), 2, "asks");
+    assert_eq!(
+        result.book.best_bid(),
+        Some((FixedPrice::new(5000).unwrap(), FixedSize::new(130)))
+    );
+    assert_eq!(
+        result.book.best_ask(),
+        Some((FixedPrice::new(5100).unwrap(), FixedSize::new(200)))
+    );
+}
+
+#[tokio::test]
+async fn golden_replay_is_deterministic_across_runs_and_input_order() {
+    let records = golden_book_records();
+
+    // Run 1: canonical order.
+    let dir1 = TempDir::new().unwrap();
+    write_parquet_records(dir1.path(), &records).await;
+    let r1 = replay_golden(dir1.path()).await;
+
+    // Run 2: same input, fresh store — must match run 1 exactly.
+    let dir2 = TempDir::new().unwrap();
+    write_parquet_records(dir2.path(), &records).await;
+    let r2 = replay_golden(dir2.path()).await;
+
+    // Run 3: reversed write order — the deterministic total order (A.117) must
+    // still yield byte-identical book state.
+    let mut reversed = records.clone();
+    reversed.reverse();
+    let dir3 = TempDir::new().unwrap();
+    write_parquet_records(dir3.path(), &reversed).await;
+    let r3 = replay_golden(dir3.path()).await;
+
+    let fingerprint = |r: &crate::engine::ReplayResult| {
+        (
+            r.book.bid_depth(),
+            r.book.ask_depth(),
+            r.book.best_bid(),
+            r.book.best_ask(),
+            r.book.sequence.raw(),
+        )
+    };
+    assert_eq!(fingerprint(&r1), fingerprint(&r2), "run-to-run determinism");
+    assert_eq!(
+        fingerprint(&r1),
+        fingerprint(&r3),
+        "input-order independence"
+    );
+}

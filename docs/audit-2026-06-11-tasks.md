@@ -339,6 +339,7 @@
 - **Done when:** an injected dropped-message scenario is detected and resnapshotted (integration test); data holes are queryable; a hung REST call times out.
 
 ### [ ] P3-TIME-1 — Time discipline
+- **Progress (2026-06):** A.116 done — global monotonic ingest ordinal stamped at the dispatcher/drain and replay ordered by it. A.119/A.147 done — one validated converter `pb_types::time::normalize_to_micros`/`parse_to_micros` (handles s/ms/µs/ns + zero sentinel, saturating) replaces the two divergent ad-hoc heuristics in the dispatcher and backfill; tested for every resolution. **Remaining: A.76** (monotonic clock source + negative-skew alarming + NTP/PTP doc) — needs runtime/ops.
 - **Severity:** medium · **Findings:** A.76, A.147, A.119
 - **Files:** `crates/pb-feed/src/ws.rs:235`, `crates/pb-feed/src/dispatcher.rs:410`/`:423`, `crates/pb-replay/src/backfill.rs`
 - **Problem:** Wall-clock only — no monotonic source, replay order can diverge from live apply order; divergent ms/µs heuristics misclassify seconds/nanosecond inputs and map `"0"` to a 1970 partition (the two copies disagree on the zero case); backfill silently falls back to 1970 on seconds-resolution timestamps.
@@ -360,13 +361,15 @@
 - **Done when:** each condition fires a test alert within seconds in a simulated incident.
 
 ### [ ] P3-CHG-1 — Change safety: replay-based regression, canary, schema evolution
+- **Progress (2026-06):** A.80-partial done — a golden replay determinism regression now runs in the default test suite (and CI): `pb-replay` writes a fixed book-event fixture (incl. a same-µs pre-snapshot delta) to Parquet, reconstructs it, asserts an exact known book, and asserts identical output across runs and shuffled input order. A book-logic change that alters replay output fails this test. **Remaining: A.51** (digest-pinned/canary deploys, schema-version metadata + migration) — infra/ops + schema governance.
 - **Severity:** medium · **Findings:** A.80, A.51
 - **Files:** `tests/integration/book_determinism.rs` (new), `crates/pb-replay/src/reader.rs:69`
 - **Problem:** No replay-based regression against captured data, no shadow/canary deployment, `:latest` image deploys, untested codec/schema evolution.
 - **Action:** Add a golden-WAL replay regression in CI (byte-identical book + integrity-event counts vs a captured fixture); deploy image-digest-pinned with staged rollout + shadow/canary diffing; add cross-version codec fixtures (P1-TEST-1) + Parquet/ClickHouse schema-version metadata and a documented migration procedure.
 - **Done when:** a book-logic change that alters replay output fails CI; deploys are digest-pinned; a schema-version bump has a tested migration path.
 
-### [ ] P3-EXEC-2 — Execution lifecycle state machine & exact-decimal prices
+### [x] P3-EXEC-2 — Execution lifecycle state machine & exact-decimal prices
+- **Progress (2026-06):** Done. A.144 — `validate_execution_lifecycle` rejects illegal transitions (event-after-terminal, fill-after-cancel, ack-before-submit, duplicate submit, overfill) + empty order_id + fill-without-price/size, with a typed error and 8 tests; `--skip-lifecycle-checks` for partial backfills. A.66 — exact-decimal parsing landed in P1-NUM-1 (`parse_scaled_decimal`, no f64).
 - **Severity:** low · **Findings:** A.144 (state machine), A.66 (covered by P1-NUM-1)
 - **Files:** `crates/pb-bin/src/commands/execution_append.rs:103`
 - **Problem:** No order-lifecycle state-machine validation (fill-after-cancel, ack-before-submit, oversized fills, empty `order_id`, intra-order timestamp inversions all accepted silently).
