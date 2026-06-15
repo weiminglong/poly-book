@@ -328,19 +328,59 @@ fn latest_reset_boundary_us(events: &[IngestEvent], target_timestamp_us: u64) ->
         .max()
 }
 
+/// Sort book events into a deterministic total order for replay.
+///
+/// The primary/secondary keys are clock-domain timestamps; the per-asset
+/// `sequence` is the next tiebreaker. Beyond that we add content-based
+/// tiebreakers (side, price, size, source event id) so that events which are
+/// otherwise equal under the timestamp+sequence key sort identically on every
+/// run — regardless of the concurrent, unordered order in which Parquet files
+/// were read (`buffer_unordered`). Without this, two replays of the same window
+/// could apply equal-key events in different orders and diverge (audit finding
+/// A.117). True arrival-order disambiguation of a same-microsecond pre-snapshot
+/// delta vs. its snapshot (A.116) requires a persisted monotonic ingest ordinal
+/// and is tracked separately.
 fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {
-    events.sort_by_key(|event| match mode {
-        ReplayMode::RecvTime => (
-            event.provenance.recv_timestamp_us,
-            0,
-            event.provenance.sequence.unwrap_or_default().raw(),
-        ),
+    events.sort_by(|a, b| {
+        let (a_primary, a_secondary) = ordering_keys(a, mode);
+        let (b_primary, b_secondary) = ordering_keys(b, mode);
+        a_primary
+            .cmp(&b_primary)
+            .then_with(|| a_secondary.cmp(&b_secondary))
+            .then_with(|| {
+                a.provenance
+                    .sequence
+                    .unwrap_or_default()
+                    .raw()
+                    .cmp(&b.provenance.sequence.unwrap_or_default().raw())
+            })
+            .then_with(|| side_rank(a.side).cmp(&side_rank(b.side)))
+            .then_with(|| a.price.raw().cmp(&b.price.raw()))
+            .then_with(|| a.size.raw().cmp(&b.size.raw()))
+            .then_with(|| {
+                a.provenance
+                    .source_event_id
+                    .cmp(&b.provenance.source_event_id)
+            })
+    });
+}
+
+/// Primary and secondary ordering timestamps for the given replay clock domain.
+fn ordering_keys(event: &BookEvent, mode: ReplayMode) -> (u64, u64) {
+    match mode {
+        ReplayMode::RecvTime => (event.provenance.recv_timestamp_us, 0),
         ReplayMode::ExchangeTime => (
             normalized_exchange_ts(event),
             event.provenance.recv_timestamp_us,
-            event.provenance.sequence.unwrap_or_default().raw(),
         ),
-    });
+    }
+}
+
+fn side_rank(side: Side) -> u8 {
+    match side {
+        Side::Bid => 0,
+        Side::Ask => 1,
+    }
 }
 
 fn normalized_exchange_ts(event: &BookEvent) -> u64 {
@@ -419,4 +459,109 @@ fn render_checkpoint_mismatch(book: &L2Book, checkpoint: &BookCheckpoint) -> Str
         book.best_ask(),
         checkpoint.asks.first().map(|level| (level.price, level.size)),
     )
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use pb_types::event::BookEventKind;
+    use pb_types::{FixedPrice, FixedSize};
+
+    fn book_event(
+        kind: BookEventKind,
+        side: Side,
+        price: u32,
+        size: u64,
+        recv_ts: u64,
+        seq: u64,
+        source_event_id: Option<&str>,
+    ) -> BookEvent {
+        BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: recv_ts,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: source_event_id.map(|s| s.to_string()),
+                source_session_id: None,
+                sequence: Some(Sequence::new(seq)),
+            },
+        }
+    }
+
+    /// Different read orders of the same multiset of events must produce an
+    /// identical sorted order (deterministic replay — A.117).
+    #[test]
+    fn sort_is_deterministic_across_input_permutations() {
+        // A batch of events that collide on (recv_ts, sequence) so only the
+        // content tiebreakers distinguish them.
+        let base = vec![
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 10, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 6000, 20, 100, 0, Some("b")),
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                5000,
+                30,
+                100,
+                0,
+                Some("c"),
+            ),
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 40, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 5500, 50, 100, 1, None),
+            book_event(BookEventKind::Delta, Side::Bid, 4900, 60, 99, 9, Some("z")),
+        ];
+
+        let mut canonical = base.clone();
+        sort_book_events(&mut canonical, ReplayMode::RecvTime);
+
+        // Several deterministic permutations (reversed, rotated) must all sort to
+        // the same canonical order.
+        let mut reversed: Vec<BookEvent> = base.iter().rev().cloned().collect();
+        sort_book_events(&mut reversed, ReplayMode::RecvTime);
+        assert_eq!(reversed, canonical);
+
+        let mut rotated = base.clone();
+        rotated.rotate_left(3);
+        sort_book_events(&mut rotated, ReplayMode::RecvTime);
+        assert_eq!(rotated, canonical);
+    }
+
+    /// The sort must be a strict total order on the content tiebreakers (no
+    /// adjacent elements compare Equal), otherwise ties could still resolve
+    /// nondeterministically under an unstable read order.
+    #[test]
+    fn sort_breaks_all_ties_deterministically() {
+        let mut events = vec![
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 10, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 6000, 20, 100, 0, Some("b")),
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                7000,
+                30,
+                100,
+                0,
+                Some("c"),
+            ),
+            book_event(BookEventKind::Delta, Side::Ask, 5500, 50, 100, 0, Some("d")),
+        ];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+        for pair in events.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let differs = side_rank(a.side) != side_rank(b.side)
+                || a.price.raw() != b.price.raw()
+                || a.size.raw() != b.size.raw()
+                || a.provenance.source_event_id != b.provenance.source_event_id
+                || a.provenance.sequence != b.provenance.sequence;
+            assert!(
+                differs,
+                "adjacent events are indistinguishable: {a:?} vs {b:?}"
+            );
+        }
+    }
 }

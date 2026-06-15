@@ -175,6 +175,10 @@ impl ParquetReader {
             + Send
             + Sync,
     {
+        // Files are read concurrently and may complete out of order. This is safe
+        // for determinism because the replay engine sorts the merged events into a
+        // total order (engine::sort_book_events) before applying them, so the
+        // unordered read order cannot affect reconstruction output (A.117).
         let batches = stream::iter(paths.into_iter().map(|path| {
             let extractor = extractor.clone();
             async move { self.read_parquet_file(&path, extractor).await }

@@ -61,6 +61,16 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   the reference checkpoint and replays deltas forward to it, then compares
   against the independent reference. It must never seed from the reference
   itself, or `matched` is trivially always true.
+- **Deterministic ordering**: `sort_book_events` imposes a *total* order —
+  timestamp (clock-domain), then `sequence`, then content tiebreakers (side,
+  price, size, source event id). Parquet files are read concurrently and may
+  arrive out of order (`buffer_unordered`), so this total order is what makes two
+  replays of the same window byte-identical (A.117). Note: distinguishing a
+  same-microsecond *pre-snapshot* delta from its snapshot by true arrival order
+  (A.116) needs a persisted monotonic ingest ordinal and remains deferred.
+- Replay never mutates live observability: a sequence gap found during
+  reconstruction is recorded in the returned continuity events, not pushed to the
+  live `pb_gaps_detected_total` recorder (A.152).
 
 ## Docs to Update After Changes
 
