@@ -551,6 +551,52 @@ async fn replay_engine_validate_matching_checkpoint() {
 }
 
 #[tokio::test]
+async fn replay_engine_validate_detects_divergence() {
+    // Regression test for the vacuous-validation bug (A.8/A.23): the reconstructed
+    // book must be compared against an INDEPENDENT reference checkpoint, so a
+    // replay that diverges from the reference is reported as a mismatch. Under
+    // the old code (which seeded reconstruction from the reference checkpoint
+    // itself) `matched` was always true and this test would fail.
+    let t0 = BASE_TS;
+    let snapshot_ts = t0;
+    let checkpoint_ts = t0 + 1000;
+
+    // Replayed market data yields bid size 1_000_000 at 5000.
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(snapshot_ts, Side::Bid, 5000, 1_000_000, 1),
+            make_snapshot_event(snapshot_ts, Side::Ask, 5100, 2_000_000, 1),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![],
+    };
+
+    // Reference checkpoint disagrees: bid size 2_000_000 at 5000.
+    let checkpoint = make_checkpoint(
+        checkpoint_ts,
+        vec![(5000, 2_000_000)],
+        vec![(5100, 2_000_000)],
+    );
+
+    let reader = MockReader::new()
+        .with_market_data(market_data)
+        .with_checkpoints(vec![checkpoint]);
+    let engine = ReplayEngine::new(reader);
+
+    let validation = engine
+        .validate_at(&test_asset_id(), t0, ReplayMode::RecvTime)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !validation.matched,
+        "a replay that diverges from the reference checkpoint must not match"
+    );
+    assert!(validation.mismatch_summary.is_some());
+}
+
+#[tokio::test]
 async fn replay_engine_validate_no_future_checkpoint_returns_none() {
     let reader = MockReader::new()
         .with_market_data(MarketDataWindow::default())

@@ -57,6 +57,10 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
   for efficiency in Parquet hour-path generation.
+- Replay validation seeds reconstruction from the checkpoint *strictly before*
+  the reference checkpoint and replays deltas forward to it, then compares
+  against the independent reference. It must never seed from the reference
+  itself, or `matched` is trivially always true.
 
 ## Docs to Update After Changes
 

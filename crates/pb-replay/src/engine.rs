@@ -109,14 +109,35 @@ impl<R: EventReader> ReplayEngine<R> {
             return Ok(None);
         };
 
-        let replay = self
-            .reconstruct_at(asset_id, reference.checkpoint_timestamp_us, mode)
+        // Reconstruct by seeding from the checkpoint *strictly before* the
+        // reference and replaying deltas forward to the reference timestamp,
+        // then compare against the independent reference checkpoint. The old
+        // code called `reconstruct_at(reference_ts)`, whose inclusive checkpoint
+        // bound re-read the reference checkpoint itself and an empty
+        // `[reference_ts, reference_ts]` window — so the book was seeded from
+        // the very thing it was compared against and `matched` was always true
+        // (audit findings A.8/A.23).
+        let reference_us = reference.checkpoint_timestamp_us;
+        let seed = self
+            .reader
+            .read_latest_checkpoint(asset_id, reference_us.saturating_sub(1))
             .await?;
-        let matched = books_match_checkpoint(&replay.book, &reference);
+        let start_us = seed
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_timestamp_us)
+            .unwrap_or_else(|| reference_us.saturating_sub(self.lookback_us));
+        let window = self
+            .reader
+            .read_market_data(asset_id, start_us, reference_us)
+            .await?;
+        let (book, _continuity_events, _used_checkpoint) =
+            reconstruct_book(asset_id, reference_us, mode, seed, window)?;
+
+        let matched = books_match_checkpoint(&book, &reference);
         let mismatch_summary = if matched {
             None
         } else {
-            Some(render_checkpoint_mismatch(&replay.book, &reference))
+            Some(render_checkpoint_mismatch(&book, &reference))
         };
         let persisted_at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -74,7 +74,7 @@
 
 ## Replay & book correctness
 
-### [ ] P1-REPLAY-1 — Make replay validation non-vacuous
+### [x] P1-REPLAY-1 — Make replay validation non-vacuous
 - **Severity:** high · **Findings:** A.8, A.23, A.52
 - **Files:** `crates/pb-replay/src/engine.rs:105`, `:113`
 - **Problem:** `replay_validation` picks the first checkpoint *after* the timestamp as reference, then `reconstruct_at` seeds from that same checkpoint via an inclusive bound — so `matched` compares the checkpoint to itself and is always `true`. Confirmed live against captured data. (All 85 captured checkpoints also have `wal_offset=NULL`, see P1-CKPT-1.)
