@@ -106,6 +106,14 @@ struct SanitizeResult {
     ends_in_line_comment: bool,
 }
 
+/// Escape a string for embedding in a single-quoted ClickHouse string literal.
+/// ClickHouse uses C-style escaping inside `'...'`, so backslash must be escaped
+/// first, then the single quote, to neutralize injection via config-sourced
+/// values (e.g. the database name in `list_datasets`).
+fn escape_ch_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 fn sanitize_sql(sql: &str) -> SanitizeResult {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
@@ -435,12 +443,16 @@ impl QueryService for ClickHouseQueryService {
     }
 
     async fn list_datasets(&self) -> Result<Vec<DatasetSchema>, ServiceError> {
+        // Escape the database name for a single-quoted ClickHouse string literal.
+        // It comes from config (PB__STORAGE__CLICKHOUSE_DATABASE), not request
+        // input, but interpolating it raw would let a compromised/malformed config
+        // value inject SQL here — defense-in-depth (HFT-review finding).
+        let escaped_db = escape_ch_string_literal(&self.database);
         let sql = format!(
             "SELECT table_name, column_name, data_type \
              FROM information_schema.columns \
-             WHERE table_schema = '{}' \
-             ORDER BY table_name, ordinal_position",
-            self.database
+             WHERE table_schema = '{escaped_db}' \
+             ORDER BY table_name, ordinal_position"
         );
 
         let resp: reqwest::Response = self
@@ -533,6 +545,23 @@ impl QueryService for AnyQueryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_ch_string_literal_neutralizes_injection() {
+        // A benign db name is unchanged.
+        assert_eq!(escape_ch_string_literal("poly_book"), "poly_book");
+        // A single quote that would close the literal is escaped.
+        assert_eq!(escape_ch_string_literal("a'b"), "a\\'b");
+        // A classic injection payload cannot break out of the literal.
+        let injected = escape_ch_string_literal("x' OR '1'='1");
+        assert_eq!(injected, "x\\' OR \\'1\\'=\\'1");
+        assert!(
+            !injected.contains("' OR '"),
+            "quote must not stay unescaped"
+        );
+        // Backslash is escaped first so it cannot re-enable a following quote.
+        assert_eq!(escape_ch_string_literal("a\\'b"), "a\\\\\\'b");
+    }
 
     #[test]
     fn validate_read_only_rejects_write_sql() {
