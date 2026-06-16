@@ -53,9 +53,12 @@ message IntegritySummaryResponse {
   string asset_id = 1;
   uint64 start_us = 2;
   uint64 end_us = 3;
-  uint32 book_event_count = 4;
-  uint32 trade_event_count = 5;
-  uint32 ingest_event_count = 6;
+  // uint64 to match the HTTP/service usize counts: over a long window the event
+  // counts can exceed 2^32, and uint32 silently truncated them (HFT-review #14).
+  // Widening a varint field is wire-compatible with existing clients.
+  uint64 book_event_count = 4;
+  uint64 trade_event_count = 5;
+  uint64 ingest_event_count = 6;
   uint32 checkpoint_count = 7;
   uint32 reconnect_count = 8;
   uint32 gap_count = 9;
@@ -80,7 +83,9 @@ message ExecutionTimelineRequest {
 
 message ExecutionTimelineResponse {
   repeated ExecutionEvent events = 1;
-  uint32 total_count = 2;
+  // uint64 to match the HTTP DTO/service usize total; uint32 truncated above 2^32
+  // events (HFT-review #5). Widening a varint field is wire-compatible.
+  uint64 total_count = 2;
 }
 
 message ExecutionEvent {

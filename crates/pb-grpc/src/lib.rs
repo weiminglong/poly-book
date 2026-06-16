@@ -59,12 +59,15 @@ fn continuity_to_proto(event: &pb_service::ContinuityEvent) -> proto::Continuity
     }
 }
 
+/// Map the internal completeness level to the SAME two-value domain the HTTP API
+/// exposes (`complete` / `best_effort`, see pb-api `CompletenessLabel`). The gRPC
+/// surface previously emitted a divergent four-value domain
+/// (full/partial/sparse/empty), so a client could not treat the two surfaces
+/// interchangeably (HFT-review #15).
 fn completeness_to_str(level: CompletenessLevel) -> &'static str {
     match level {
-        CompletenessLevel::Full => "full",
-        CompletenessLevel::Partial => "partial",
-        CompletenessLevel::Sparse => "sparse",
-        CompletenessLevel::Empty => "empty",
+        CompletenessLevel::Full => "complete",
+        _ => "best_effort",
     }
 }
 
@@ -179,9 +182,9 @@ impl WorkstationService for GrpcWorkstationService {
             asset_id: summary.asset_id,
             start_us: summary.start_us,
             end_us: summary.end_us,
-            book_event_count: summary.book_event_count as u32,
-            trade_event_count: summary.trade_event_count as u32,
-            ingest_event_count: summary.ingest_event_count as u32,
+            book_event_count: summary.book_event_count as u64,
+            trade_event_count: summary.trade_event_count as u64,
+            ingest_event_count: summary.ingest_event_count as u64,
             checkpoint_count: summary.checkpoint_count as u32,
             reconnect_count: summary.reconnect_count as u32,
             gap_count: summary.gap_count as u32,
@@ -249,7 +252,7 @@ impl WorkstationService for GrpcWorkstationService {
 
         let resp = proto::ExecutionTimelineResponse {
             events,
-            total_count: timeline.total_count as u32,
+            total_count: timeline.total_count as u64,
         };
 
         Ok(Response::new(resp))
@@ -548,11 +551,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn completeness_to_str_all_variants() {
-        assert_eq!(completeness_to_str(CompletenessLevel::Full), "full");
-        assert_eq!(completeness_to_str(CompletenessLevel::Partial), "partial");
-        assert_eq!(completeness_to_str(CompletenessLevel::Sparse), "sparse");
-        assert_eq!(completeness_to_str(CompletenessLevel::Empty), "empty");
+    fn completeness_to_str_matches_http_two_value_domain() {
+        // Must mirror the HTTP CompletenessLabel domain (complete / best_effort)
+        // so the two surfaces are interchangeable (HFT-review #15).
+        assert_eq!(completeness_to_str(CompletenessLevel::Full), "complete");
+        assert_eq!(
+            completeness_to_str(CompletenessLevel::Partial),
+            "best_effort"
+        );
+        assert_eq!(
+            completeness_to_str(CompletenessLevel::Sparse),
+            "best_effort"
+        );
+        assert_eq!(completeness_to_str(CompletenessLevel::Empty), "best_effort");
     }
 
     #[test]
@@ -802,8 +813,8 @@ mod tests {
         assert_eq!(resp.asset_id, "test-asset");
         assert_eq!(resp.start_us, start_us);
         assert_eq!(resp.end_us, end_us);
-        // completeness should be a valid string
-        assert!(["full", "partial", "sparse", "empty"].contains(&resp.completeness.as_str()));
+        // completeness mirrors the HTTP two-value domain (HFT-review #15).
+        assert!(["complete", "best_effort"].contains(&resp.completeness.as_str()));
 
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
