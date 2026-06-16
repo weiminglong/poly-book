@@ -231,6 +231,16 @@ fn reconstruct_book(
             .filter(|event| {
                 event.kind == BookEventKind::Snapshot
                     && event_ordering_ts(event, mode) == snapshot_time
+                    // Mirror the reset-boundary predicate from the rposition above:
+                    // without it, a *pre-reset* snapshot sharing the same ordering
+                    // timestamp as the chosen post-reset snapshot would be collected
+                    // and applied too, mixing pre/post-reset state into the rebuilt
+                    // book (HFT-review: reset-boundary leak). Most reachable in
+                    // ExchangeTime mode, where the venue can repeat an exchange
+                    // timestamp across a reconnect.
+                    && reset_boundary_us
+                        .map(|reset_ts| event.provenance.recv_timestamp_us >= reset_ts)
+                        .unwrap_or(true)
             })
             .collect();
 
@@ -663,6 +673,87 @@ mod sort_tests {
         assert_eq!(
             book.best_bid().map(|(_, size)| size),
             Some(FixedSize::new(100))
+        );
+    }
+
+    /// A pre-reset snapshot that shares the same ordering timestamp as the chosen
+    /// post-reset snapshot must NOT leak into the reconstructed book. In
+    /// ExchangeTime mode the venue can repeat an exchange timestamp across a
+    /// reconnect, so two snapshots straddling a SourceReset can share
+    /// `snapshot_time` while differing in recv time — the collection filter must
+    /// re-check the reset boundary (HFT-review: reset-boundary leak).
+    #[test]
+    fn reset_boundary_excludes_pre_reset_snapshot_sharing_exchange_ts() {
+        use pb_types::event::{IngestEvent, IngestEventKind, MarketDataWindow};
+
+        // Builder allowing distinct recv/exchange timestamps (book_event hardcodes
+        // exchange_ts = 0).
+        let snap = |price: u32, size: u64, recv: u64, exch: u64| BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind: BookEventKind::Snapshot,
+            side: Side::Bid,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: recv,
+                exchange_timestamp_us: exch,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: Some(Sequence::new(0)),
+                ingest_ordinal: None,
+            },
+        };
+
+        // Two pre-reset levels and one post-reset level, all sharing exchange_ts
+        // 1000 but with recv timestamps straddling a SourceReset at recv = 200.
+        // The 4000 level existed only pre-reset and must not survive.
+        let pre_a = snap(5000, 999, 100, 1000);
+        let pre_b = snap(4000, 50, 100, 1000);
+        let post = snap(5000, 100, 300, 1000);
+
+        let reset = IngestEvent {
+            asset_id: Some(AssetId::new("tok")),
+            kind: IngestEventKind::SourceReset,
+            provenance: EventProvenance {
+                recv_timestamp_us: 200,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: None,
+        };
+
+        let window = MarketDataWindow {
+            book_events: vec![pre_a, pre_b, post],
+            trade_events: vec![],
+            ingest_events: vec![reset],
+        };
+
+        let (book, _events, _used_cp) = reconstruct_book(
+            &AssetId::new("tok"),
+            2000,
+            ReplayMode::ExchangeTime,
+            None,
+            window,
+        )
+        .unwrap();
+
+        // Only the post-reset snapshot seeds the book: bid 5000@100. The pre-reset
+        // -only 4000 level must not leak (with the bug, depth would be 2).
+        assert_eq!(
+            book.bid_depth(),
+            1,
+            "pre-reset snapshot level leaked into reconstruction"
+        );
+        assert_eq!(
+            book.best_bid(),
+            Some((FixedPrice::new(5000).unwrap(), FixedSize::new(100)))
         );
     }
 
