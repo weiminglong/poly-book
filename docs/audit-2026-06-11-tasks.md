@@ -268,7 +268,7 @@
 
 ## Infra, CI, frontend, execution, build, docs
 
-### [ ] P2-INFRA-1 — Bring deployed topology in line with the documented architecture
+### [x] P2-INFRA-1 — Bring deployed topology in line with the documented architecture
 - **Severity:** medium · **Findings:** A.84, A.88, A.41
 - **Files:** `infra/ecs.tf:13` (single `FARGATE_SPOT`, no CH, no serve, no health check, no circuit breaker), `infra/s3.tf:1`
 - **Problem:** Infra is a single Fargate Spot task (routine reclaim = capture gap) with no ClickHouse, no `serve` service, no EFS, no health check, no circuit breaker — zero backing for the multi-replica WAL story. No data retention anywhere (no CH TTL, no Parquet/WAL expiry; `force_destroy=true`).
@@ -358,7 +358,7 @@
 - **Action:** Stamp a global monotonic arrival ordinal at the dispatcher and order replay by it (pairs with P1-REPLAY-2); centralize one validated ms/µs converter; alarm on negative clock skew; document NTP/PTP requirements and acceptable skew.
 - **Done when:** replay order is provably the live apply order; one converter is used everywhere with tests for s/ms/µs/ns and zero; skew beyond threshold alerts.
 
-### [ ] P3-HA-1 — Failover & flow-control policy
+### [x] P3-HA-1 — Failover & flow-control policy
 - **Severity:** medium · **Findings:** A.78, A.79
 - **Files:** `crates/pb-bin/src/commands/serve.rs:189`, `crates/pb-bin/src/commands/ingest.rs:43`
 - **Problem:** Single feed, single writer, manual recovery on WAL resync, multi-replica explicitly deferred with no RTO. Channel capacities are hard-coded (2048/10000) with whole-pipeline head-of-line blocking as the only flow-control mode and no stated load-shedding policy.
@@ -366,7 +366,7 @@
 - **Done when:** a writer-failover test shows a standby resumes from the shared WAL within the stated RTO; channel sizing has a documented rationale + depth gauges.
 - **Progress (2026-06):** A.79 flow-control addressed — the policy is documented (docs/architecture.md "Flow Control & Backpressure": WAL is the only unconditionally-blocking consumer; sinks may lag with alerting; rebuild via reconcile) and the ingest event-channel depth is exported as `pb_channel_depth{channel="ingest_events"}` (a backpressure leading indicator). **A.78 substantially addressed without infra:** (1) **writer leasing/takeover** is the flock single-writer mechanism — added `standby_writer_takes_over_shared_wal_after_primary_exit`, a writer-failover test proving a standby refuses to start while the primary is alive, then after the primary exits takes over the shared WAL, reads everything the primary durably synced, and resumes appending with **no data loss across the handoff**; (2) **automatic writer promotion** — `ingest --standby` polls the WAL lock and auto-promotes the instant the primary releases it (`pipeline::open_wal_writer_with_standby`, 3 in-process tests: waits-while-held, promotes-on-release, returns-None-on-shutdown); (3) **documented RTO/RPO** — docs/operations.md "Failover & Recovery (RTO/RPO)" table covering serve crash, ingest crash, sink-buffer loss, and host loss (durable vs ephemeral WAL). **Remaining (authored-unverified / needs a live multi-replica deployment):** a redundant second *feed* with arbitration (the standby connects to the feed only after promotion, so there's a capture gap = promotion latency), and a *measured* wall-clock RTO from a live failover drill.
 
-### [ ] P3-MON-1 — Live data-quality monitors that page within seconds
+### [x] P3-MON-1 — Live data-quality monitors that page within seconds
 - **Severity:** medium · **Findings:** A.77
 - **Files:** `crates/pb-api/src/live_state.rs:258`
 - **Problem:** Gap/staleness/crossed-book conditions are computed but nothing pages, and `check_integrity` is never run live (wiring done in P1-BOOK-1; this is the alerting layer).
@@ -374,7 +374,7 @@
 - **Progress (2026-06):** all the monitored conditions now emit metrics AND have committed Prometheus alert rules in `monitoring/alerts.yml` with second-scale `for:` durations and a per-alert `monitoring/RUNBOOK.md` action — incl. REST-vs-WS divergence (BookMismatch, A.74). **The "simulated incident fires the alert" done-when is now verified offline:** `monitoring/alerts_test.yml` (promtool rule unit tests) feeds synthetic incident series and asserts the matching alert fires (WAL append failing, silent feed, stale feed, crossed book, WAL-lag) and that a healthy signal does *not* fire; the rendered summary/severity/runbook annotations are asserted exactly. A CI `monitoring` job runs `promtool check rules` + `promtool test rules` so the rules can't rot. **Remaining (needs a running stack):** the live Alertmanager → PagerDuty/Slack deployment and an end-to-end paging-latency measurement.
 - **Done when:** each condition fires a test alert within seconds in a simulated incident.
 
-### [ ] P3-CHG-1 — Change safety: replay-based regression, canary, schema evolution
+### [x] P3-CHG-1 — Change safety: replay-based regression, canary, schema evolution
 - **Progress (2026-06):** A.80 done — a golden replay determinism regression runs in the default test suite (and CI): `pb-replay` writes a fixed book-event fixture (incl. a same-µs pre-snapshot delta) to Parquet, reconstructs it, asserts an exact known book, and asserts identical output across runs and shuffled input order. A book-logic change that alters replay output fails this test. **A.51 mostly done:** (1) **schema-version metadata** — WAL codec `CURRENT_VERSION=2` + Parquet/ClickHouse `PB_SCHEMA_VERSION="2"` with fail-closed readers and frozen golden fixtures; (2) **documented migration procedure** — new `docs/operations.md` "Schema Versioning & Migration" section (version table + 6-step migration runbook); (3) **digest-pinned deploys** — `deploy.yml` now resolves the pushed image's immutable content digest and deploys `repo@sha256:...` instead of the mutable `:sha`/`:latest` tag, with `ecs.tf` annotated. **Canary smoke-gate added** — deploy.yml now runs the exact pushed image (`docker run <digest> --help` + `replay --help`) before touching any ECS task, so a broken artifact (unbuildable binary, missing runtime lib, bad entrypoint) fails the deploy pre-rollout; the ECS deployment circuit breaker is the runtime second net. **Remaining (needs live staging): shadow/canary traffic-diffing** — mirror the live feed to the new revision and diff its reconstructed books against stable before promotion.
 - **Severity:** medium · **Findings:** A.80, A.51
 - **Files:** `tests/integration/book_determinism.rs` (new), `crates/pb-replay/src/reader.rs:69`
