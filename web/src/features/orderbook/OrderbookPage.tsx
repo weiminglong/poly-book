@@ -33,26 +33,32 @@ export default function OrderbookPage() {
   const snapshotQuery = useOrderBookSnapshot(effectiveAssetId, depth)
   const { snapshot: wsSnapshot, status: wsStatus } = useOrderBookStream(effectiveAssetId || null)
 
-  // Merge WS data with HTTP snapshot
+  // Merge WS data with HTTP snapshot. Memoized so a new object identity is only
+  // produced when an input actually changes — otherwise every render (including
+  // unrelated state changes) would hand memoized children new props and force
+  // them to re-render on the high-frequency live path (HFT-review #19).
   const httpSnapshot = snapshotQuery.data
-  const liveSnapshot: LiveOrderBookSnapshot | null =
-    wsStatus === 'connected' && wsSnapshot && wsSnapshot.asset_id === effectiveAssetId
-      ? {
-          asset_id: wsSnapshot.asset_id,
-          sequence: wsSnapshot.sequence,
-          last_update_us: wsSnapshot.last_update_us,
-          best_bid: wsSnapshot.bids[0] ?? null,
-          best_ask: wsSnapshot.asks[0] ?? null,
-          mid_price: wsSnapshot.mid_price,
-          spread: wsSnapshot.spread,
-          bid_depth: wsSnapshot.bids.length,
-          ask_depth: wsSnapshot.asks.length,
-          bids: wsSnapshot.bids,
-          asks: wsSnapshot.asks,
-          stale: httpSnapshot?.stale ?? false,
-          latest_warning: httpSnapshot?.latest_warning ?? null,
-        }
-      : (httpSnapshot ?? null)
+  const liveSnapshot: LiveOrderBookSnapshot | null = useMemo(
+    () =>
+      wsStatus === 'connected' && wsSnapshot && wsSnapshot.asset_id === effectiveAssetId
+        ? {
+            asset_id: wsSnapshot.asset_id,
+            sequence: wsSnapshot.sequence,
+            last_update_us: wsSnapshot.last_update_us,
+            best_bid: wsSnapshot.bids[0] ?? null,
+            best_ask: wsSnapshot.asks[0] ?? null,
+            mid_price: wsSnapshot.mid_price,
+            spread: wsSnapshot.spread,
+            bid_depth: wsSnapshot.bids.length,
+            ask_depth: wsSnapshot.asks.length,
+            bids: wsSnapshot.bids,
+            asks: wsSnapshot.asks,
+            stale: httpSnapshot?.stale ?? false,
+            latest_warning: httpSnapshot?.latest_warning ?? null,
+          }
+        : (httpSnapshot ?? null),
+    [wsStatus, wsSnapshot, httpSnapshot, effectiveAssetId],
+  )
 
   const transportLabel =
     wsStatus === 'connected'
@@ -94,7 +100,7 @@ export default function OrderbookPage() {
               key={asset.asset_id}
               type="button"
               onClick={() => setSelectedAssetId(asset.asset_id)}
-              className={`rounded-full border px-4 py-2 text-sm transition-colors ${
+              className={`rounded-full border px-4 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                 effectiveAssetId === asset.asset_id
                   ? 'border-ring bg-accent/18 text-foreground font-bold'
                   : 'border-card-border text-muted-foreground hover:border-ring/50'
@@ -112,7 +118,7 @@ export default function OrderbookPage() {
               key={d}
               type="button"
               onClick={() => setDepth(d)}
-              className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              className={`rounded-lg px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                 depth === d
                   ? 'bg-accent text-accent-foreground font-bold'
                   : 'bg-muted text-muted-foreground hover:text-foreground'

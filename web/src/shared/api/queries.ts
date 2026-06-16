@@ -150,7 +150,9 @@ export function useReplayReconstruction(
               source: 'parquet',
               depth: String(request.depth),
             }),
-            { signal },
+            // Historical reconstruction can scan a wide window; the default 4s
+            // timeout aborts legitimate queries (HFT-review #11).
+            { signal, timeoutMs: 30_000 },
           )
         },
     enabled: Boolean(request),
@@ -179,7 +181,8 @@ export function useIntegritySummary(
               start_us: String(request.startUs),
               end_us: String(request.endUs),
             }),
-            { signal },
+            // Integrity over a wide window can exceed the default 4s (HFT-review #11).
+            { signal, timeoutMs: 30_000 },
           )
         },
     enabled: isDemo || Boolean(request),
