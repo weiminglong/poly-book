@@ -9,8 +9,18 @@ output "ecs_cluster_name" {
 }
 
 output "ecs_service_name" {
-  description = "ECS service name"
+  description = "ECS ingest service name"
   value       = aws_ecs_service.app.name
+}
+
+output "serve_service_name" {
+  description = "ECS serve (read-only API) service name"
+  value       = aws_ecs_service.serve.name
+}
+
+output "wal_efs_id" {
+  description = "EFS file system id backing the durable WAL"
+  value       = aws_efs_file_system.wal.id
 }
 
 output "s3_bucket_name" {

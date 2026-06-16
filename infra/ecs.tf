@@ -10,11 +10,21 @@ resource "aws_ecs_cluster" "main" {
 resource "aws_ecs_cluster_capacity_providers" "main" {
   cluster_name = aws_ecs_cluster.main.name
 
-  capacity_providers = ["FARGATE_SPOT"]
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  # A Spot reclaim must not drop capture. Keep a base of on-demand (FARGATE)
+  # tasks always running, and only use FARGATE_SPOT for additional capacity above
+  # the base (audit P2-INFRA-1: a single FARGATE_SPOT task meant every routine
+  # Spot reclaim was a capture gap).
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    base              = var.ingest_on_demand_base
+    weight            = 1
+  }
 
   default_capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
-    weight            = 1
+    weight            = 4
   }
 }
 
@@ -47,11 +57,24 @@ resource "aws_ecs_task_definition" "app" {
         }
       ]
 
+      # Durable WAL on EFS so it survives task restarts and host loss.
+      mountPoints = [
+        {
+          sourceVolume  = "wal"
+          containerPath = "/data/wal"
+          readOnly      = false
+        }
+      ]
+
       environment = concat(
         [
           {
             name  = "PB__STORAGE__PARQUET_BASE_PATH"
             value = "s3://${aws_s3_bucket.data.id}/orderbook"
+          },
+          {
+            name  = "PB__WAL__BASE_PATH"
+            value = "/data/wal"
           },
           {
             name  = "PB__METRICS__LISTEN_ADDR"
@@ -75,6 +98,18 @@ resource "aws_ecs_task_definition" "app" {
       }
     }
   ])
+
+  volume {
+    name = "wal"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.wal.id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.wal.id
+        iam             = "ENABLED"
+      }
+    }
+  }
 }
 
 resource "aws_ecs_service" "app" {
@@ -83,9 +118,17 @@ resource "aws_ecs_service" "app" {
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
 
+  # On-demand base so a Spot reclaim cannot drop all ingest capacity; Spot for
+  # any capacity above the base.
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    base              = var.ingest_on_demand_base
+    weight            = 1
+  }
+
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
-    weight            = 1
+    weight            = 4
   }
 
   network_configuration {

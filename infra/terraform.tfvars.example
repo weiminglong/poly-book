@@ -10,6 +10,16 @@ github_org = "your-github-username"
 # desired_count      = 1
 # log_retention_days = 7
 
+# Topology (audit P2-INFRA-1). The ingest service keeps an on-demand base so a
+# Spot reclaim never drops all capture; serve runs the read-only API off the
+# shared EFS WAL; ClickHouse-on-ECS is opt-in (prefer managed ClickHouse).
+# ingest_on_demand_base     = 1
+# serve_desired_count       = 1
+# serve_tokens              = "<token-id-or-slug>"   # required for serve to start
+# enable_clickhouse_service = false
+# clickhouse_cpu            = 1024
+# clickhouse_memory         = 4096
+
 # Extra environment variables for the app container
 # app_env_vars = {
 #   "PB__FEED__WS_URL"            = "wss://ws-subscriptions-clob.polymarket.com/ws/market"

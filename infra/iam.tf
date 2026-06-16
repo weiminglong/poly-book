@@ -70,6 +70,33 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
   })
 }
 
+# EFS access for the durable WAL volume. Required because the WAL EFS access
+# point is mounted with IAM authorization (`iam = "ENABLED"`); without this the
+# ingest/serve tasks cannot mount it (audit P1-INFRA-1 / P2-INFRA-1).
+resource "aws_iam_role_policy" "ecs_task_efs" {
+  name = "${var.project_name}-efs-access"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:ClientMount",
+          "elasticfilesystem:ClientWrite"
+        ]
+        Resource = aws_efs_file_system.wal.arn
+        Condition = {
+          StringEquals = {
+            "elasticfilesystem:AccessPointArn" = aws_efs_access_point.wal.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
 # --- GitHub Actions OIDC Role ---
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -141,11 +168,12 @@ resource "aws_iam_role_policy" "github_actions" {
       },
       {
         # UpdateService / DescribeServices DO support resource-level permissions,
-        # so scope them to this service only — a compromised pipeline can no
-        # longer repoint or redeploy arbitrary ECS services in the account (A.133).
+        # so scope them to just the poly-book services — a compromised pipeline can
+        # no longer repoint or redeploy arbitrary ECS services in the account
+        # (A.133). Both the ingest (`app`) and `serve` services are deployable.
         Effect   = "Allow"
         Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
-        Resource = aws_ecs_service.app.id
+        Resource = [aws_ecs_service.app.id, aws_ecs_service.serve.id]
       },
       {
         Effect = "Allow"

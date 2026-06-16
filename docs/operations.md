@@ -260,13 +260,26 @@ assets) is straightforward when traffic or team structure warrants it.
 
 ## Infrastructure
 
-Terraform in `infra/` provisions the AWS resources used by the current
-deployment target:
+Terraform in `infra/` provisions the AWS resources for the deployment target:
 
 - ECR for image storage
-- ECS Fargate Spot for compute
-- S3 for Parquet storage
-- VPC, subnets, IAM, and CloudWatch resources
+- ECS Fargate compute — the ingest service keeps an **on-demand base**
+  (`ingest_on_demand_base`) with Spot only for overflow, so a Spot reclaim never
+  drops all capture (audit P2-INFRA-1)
+- a read-only **`serve`** API service (`serve.tf`) on the shared WAL
+- **EFS** (`efs.tf`) for the durable write-ahead log, mounted into both ingest
+  and serve (survives task restarts / host loss; pairs with the `--standby`
+  writer failover)
+- optional **single-node ClickHouse** on ECS+EFS (`clickhouse.tf`, opt-in via
+  `enable_clickhouse_service`; prefer managed ClickHouse for production), with
+  Cloud Map private DNS for `serve` discovery
+- S3 for Parquet storage (SSE-KMS, lifecycle, access logging)
+- VPC, subnets, IAM (incl. scoped EFS mount perms), and CloudWatch resources
+
+> **Status (audit P2-INFRA-1):** the `serve`/EFS/ClickHouse/on-demand topology
+> passes `terraform validate` + `fmt` but has **not** been `terraform apply`ed
+> against a live account. Applying it, plus a Spot-reclaim and a restart/failover
+> drill, is the remaining verification.
 
 Bootstrap:
 
