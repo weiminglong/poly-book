@@ -684,7 +684,19 @@ impl LiveReadModel {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = token.cancelled() => break,
+                    _ = token.cancelled() => {
+                        // Drain records already buffered in the channel before
+                        // exiting, so a shutdown does not abandon in-flight feed
+                        // updates the producers had already sent (HFT-review #2;
+                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // current buffer — no new records arrive after cancellation.
+                        while let Ok(record) = rx.try_recv() {
+                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                break;
+                            }
+                        }
+                        break;
+                    }
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
@@ -728,7 +740,19 @@ impl LiveReadModel {
 
             loop {
                 tokio::select! {
-                    _ = token.cancelled() => break,
+                    _ = token.cancelled() => {
+                        // Drain records already buffered in the channel before
+                        // exiting, so a shutdown does not abandon in-flight feed
+                        // updates the producers had already sent (HFT-review #2;
+                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // current buffer — no new records arrive after cancellation.
+                        while let Ok(record) = rx.try_recv() {
+                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                break;
+                            }
+                        }
+                        break;
+                    }
                     record = rx.recv() => {
                         match record {
                             Some(record) => {

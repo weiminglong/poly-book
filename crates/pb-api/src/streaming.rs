@@ -134,22 +134,20 @@ pub async fn ws_orderbook(
         .try_acquire_owned()
         .map_err(|_| ApiError::ServiceUnavailable("too many streaming connections".to_string()))?;
 
-    let is_active = state.live.is_asset_active(&asset_id).await;
-    if !is_active {
-        return Err(ApiError::NotFound(format!(
-            "asset not active: {raw_asset_id}"
-        )));
-    }
-
     let broadcast = state
         .broadcast
         .clone()
         .ok_or_else(|| ApiError::ServiceUnavailable("streaming not available".to_string()))?;
 
-    // Subscribe to the asset-specific broadcast channel.
-    let rx = broadcast.subscribe(&asset_id).ok_or_else(|| {
-        ApiError::ServiceUnavailable(format!("no broadcast channel for asset: {asset_id}"))
-    })?;
+    // Subscribe directly: the broadcast map is the authority for streamability
+    // (a per-asset channel exists iff the asset is active — set in lockstep with
+    // the read model), so `subscribe` returning None *is* "not active". Doing this
+    // in one lock acquisition removes the prior TOCTOU where a rotation between a
+    // separate is_asset_active check and the subscribe produced a spurious 503
+    // (HFT-review #3).
+    let rx = broadcast
+        .subscribe(&asset_id)
+        .ok_or_else(|| ApiError::NotFound(format!("asset not active: {raw_asset_id}")))?;
 
     let live = state.live.clone();
     let stale_after_secs = state.config.stale_after_secs;
