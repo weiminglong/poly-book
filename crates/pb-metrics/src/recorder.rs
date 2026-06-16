@@ -15,6 +15,14 @@ pub fn register_metrics() {
         "Total times the reconstructed top-of-book diverged from the venue-stated best bid/ask"
     );
     describe_counter!(
+        "pb_resnapshot_requests_dropped_total",
+        "Total self-heal resnapshot requests dropped because the request channel was full (recovery signal lost for that asset)"
+    );
+    describe_counter!(
+        "pb_ws_broadcast_lagged_total",
+        "Total times a WebSocket subscriber lagged past the broadcast buffer and was force-resynced"
+    );
+    describe_counter!(
         "pb_clock_skew_events_total",
         "Total messages whose venue timestamp was implausibly ahead of receive time (clock skew)"
     );
@@ -109,6 +117,21 @@ pub fn record_unknown_message_dropped() {
 /// after applying a delta — a silently dropped/corrupt update (A.74/A.109).
 pub fn record_book_mismatch() {
     counter!("pb_book_mismatches_total").increment(1);
+}
+
+/// A self-heal resnapshot request was dropped because the request channel was
+/// full. The book divergence is still recorded, but the corrective resnapshot for
+/// that asset was not enqueued, so an operator needs visibility that self-heal was
+/// skipped (HFT-review finding: previously a silent `let _ = try_send`).
+pub fn record_resnapshot_request_dropped() {
+    counter!("pb_resnapshot_requests_dropped_total").increment(1);
+}
+
+/// A WebSocket subscriber fell behind the broadcast buffer (lagged past capacity)
+/// and was force-resynced with a fresh snapshot. Rising counts mean clients can't
+/// keep up with the update rate (HFT-review finding: lag was warn-only, unmetered).
+pub fn record_ws_broadcast_lagged() {
+    counter!("pb_ws_broadcast_lagged_total").increment(1);
 }
 
 /// A message's venue (exchange) timestamp was implausibly ahead of our receive

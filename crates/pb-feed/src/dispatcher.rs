@@ -419,10 +419,21 @@ impl Dispatcher {
                         pb_metrics::record_book_mismatch();
                         warn!(asset_id = %asset_id, %details, "venue book mismatch detected");
                         // Request a REST resnapshot to self-heal (A.74). Non-blocking:
-                        // if the channel is full a request is already pending, so
-                        // dropping this one is correct and never backpressures ingest.
+                        // dropping never backpressures ingest. A `Full` channel means
+                        // a request is already pending for *some* asset, but if many
+                        // assets diverge at once the dropped request may be for a
+                        // distinct asset whose self-heal is now skipped — so meter the
+                        // drop instead of silently discarding it (HFT-review finding).
                         if let Some(tx) = &self.resnapshot_tx {
-                            let _ = tx.try_send(asset_id.0.clone());
+                            if let Err(e) = tx.try_send(asset_id.0.clone()) {
+                                if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                                    pb_metrics::record_resnapshot_request_dropped();
+                                    warn!(
+                                        asset_id = %asset_id,
+                                        "resnapshot request dropped (channel full); self-heal for this asset may be skipped"
+                                    );
+                                }
+                            }
                         }
                         self.send(PersistedRecord::Ingest(IngestEvent {
                             asset_id: Some(asset_id.clone()),
@@ -1808,6 +1819,56 @@ mod tests {
         // A resnapshot was requested for the diverging asset.
         let requested = resnap_rx.try_recv().expect("expected a resnapshot request");
         assert_eq!(&*requested, "tok1");
+    }
+
+    #[tokio::test]
+    async fn book_mismatch_with_full_resnapshot_channel_still_emits_event_and_does_not_error() {
+        // HFT-review finding: a full resnapshot channel must not abort dispatch and
+        // must not suppress the durable BookMismatch event — the drop is metered
+        // (pb_resnapshot_requests_dropped_total) but the ingest event still lands.
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        // Capacity-1 resnapshot channel, pre-filled so the next try_send is Full.
+        let (resnap_tx, _resnap_rx) = mpsc::channel::<Arc<str>>(1);
+        resnap_tx.try_send(Arc::from("pending")).unwrap();
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx).with_resnapshot_tx(resnap_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1", "price": "0.50", "size": "5", "side": "BUY",
+                "best_bid": "0.99", "best_ask": "0.60"
+            }]
+        });
+        // Dispatch must succeed even though the resnapshot channel is full.
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // The delta and the durable BookMismatch event are both still emitted.
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        let mismatch = event_rx.recv().await.unwrap();
+        match mismatch {
+            PersistedRecord::Ingest(ev) => assert_eq!(ev.kind, IngestEventKind::BookMismatch),
+            other => panic!("expected BookMismatch ingest event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

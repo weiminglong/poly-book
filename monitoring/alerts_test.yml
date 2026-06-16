@@ -95,6 +95,23 @@ tests:
               description: "The live or replayed book crossed. Usually a missed delta or a stale-vs-fresh ordering problem; cross-check with BookMismatch."
               runbook: monitoring/RUNBOOK.md#crossedbook
 
+  - interval: 1m
+    name: Dropped resnapshot requests warn
+    input_series:
+      - series: 'pb_resnapshot_requests_dropped_total{instance="ingest-1"}'
+        values: "0 0 1 2 3 4"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ResnapshotRequestsDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: ingest-1
+            exp_annotations:
+              summary: "Self-heal resnapshot requests are being dropped (channel full)"
+              description: "A book divergence was detected but the corrective resnapshot request could not be enqueued because the request channel was full. If many assets diverge at once, some assets' self-heal is skipped and their books stay corrupt until the next natural resnapshot. Correlate with BookMismatch volume."
+              runbook: monitoring/RUNBOOK.md#resnapshotrequestsdropped
+
   # --- Backpressure class (warning) ---
   - interval: 1m
     name: WAL consumer lag warns after sustained breach
@@ -113,3 +130,21 @@ tests:
               summary: "WAL consumer lag 286.1MiB on serve-1"
               description: "A WAL consumer (serve replica) is lagging beyond the retention window; if it falls behind pruning it will need a resync/re-hydrate."
               runbook: monitoring/RUNBOOK.md#walconsumerlaghigh
+
+  - interval: 1m
+    name: WS broadcast lag warns after sustained breach
+    input_series:
+      # Steady stream of lag events sustained past the for:1m window.
+      - series: 'pb_ws_broadcast_lagged_total{instance="serve-1"}'
+        values: "0 1 2 3 4 5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WsBroadcastLagging
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              instance: serve-1
+            exp_annotations:
+              summary: "WebSocket subscribers are lagging the broadcast buffer"
+              description: "One or more streaming clients fell behind the per-asset broadcast buffer and were force-resynced. Occasional events are benign (a slow client); a sustained rate means the update rate exceeds what clients can consume — consider a larger BROADCAST_CAPACITY or client-side throttling."
+              runbook: monitoring/RUNBOOK.md#wsbroadcastlagging

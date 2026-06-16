@@ -84,6 +84,23 @@ Best bid ≥ best ask in the live or replayed book.
 2. For replay, confirm the window is not straddling a `SourceReset`. For live,
    a resnapshot should clear a transient cross.
 
+## ResnapshotRequestsDropped
+**Severity: warning — self-heal may be skipped for some assets.**
+
+A book divergence was detected but the corrective resnapshot request could not be
+enqueued because the request channel was full (`pb_resnapshot_requests_dropped_total`).
+A single full event is benign (a resnapshot for that asset is already pending), but
+a sustained rate during a multi-asset divergence burst means some assets' self-heal
+was skipped.
+
+1. Correlate with `pb_book_mismatches_total`: a spike in both at once means many
+   assets diverged simultaneously and the 64-deep request channel overflowed.
+2. The divergences are still durably recorded as `BookMismatch` ingest events, so
+   identify affected assets via `/api/v1/integrity/summary`.
+3. Force a resnapshot for the affected assets (restart ingest, market rotation, or
+   a REST backfill snapshot). If recurring, raise the resnapshot channel capacity
+   in the ingest setup or rate-limit divergence-triggered requests per asset.
+
 ## SequenceGaps
 **Severity: info.**
 
@@ -123,3 +140,17 @@ A WAL consumer (e.g. a `serve` replica) is lagging beyond the retention window
    checkpoint (the serve tailer does this automatically on resync).
 3. A permanently-stuck consumer blocks WAL pruning and can lead to disk-full —
    resync or remove it.
+
+## WsBroadcastLagging
+**Severity: info.**
+
+A streaming client fell behind the per-asset WebSocket broadcast buffer and was
+force-resynced with a fresh snapshot (`pb_ws_broadcast_lagged_total`). No data is
+lost — the client recovers via the resync — but the event signals client-side
+backpressure.
+
+1. Occasional events (a single slow client, a network blip) are benign.
+2. A sustained rate means the update rate exceeds what clients can consume.
+   Options: raise `BROADCAST_CAPACITY` in `crates/pb-api/src/streaming.rs` (more
+   burst tolerance, more memory per asset), throttle client render rates, or have
+   clients subscribe to fewer assets.

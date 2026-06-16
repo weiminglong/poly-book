@@ -13,6 +13,11 @@ use crate::dto::BookUpdateMessage;
 use crate::error::ApiError;
 use crate::server::AppState;
 
+/// Per-asset broadcast buffer. At the BTC-5m update rate (~100 msg/s) this is
+/// ~2.5s of burst tolerance before a slow subscriber lags; lagged subscribers are
+/// not dropped — they are force-resynced with a fresh snapshot and the lag is
+/// metered via `pb_ws_broadcast_lagged_total` so operators can tell when clients
+/// can't keep up and the buffer needs raising.
 const BROADCAST_CAPACITY: usize = 256;
 /// Max concurrent WebSocket sessions across all assets; excess upgrades are
 /// rejected with 503 so a fan-out flood cannot exhaust memory/sockets (A.94).
@@ -231,6 +236,10 @@ async fn handle_ws_session(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        // A subscriber that fell behind the broadcast buffer is a
+                        // backpressure signal operators need to measure, not just a
+                        // log line (HFT-review finding: was warn-only/unmetered).
+                        pb_metrics::record_ws_broadcast_lagged();
                         warn!(asset_id, skipped, "ws subscriber lagged, sending resync snapshot");
                         if let Ok(snapshot) = live.snapshot(&asset_id, depth, stale_after_secs).await {
                             let resync = BookUpdateMessage {
