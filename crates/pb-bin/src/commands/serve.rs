@@ -37,8 +37,11 @@ pub async fn run(
         .get_string("api.listen_addr")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()?;
-    let default_depth = settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
+    // Clamp default_depth to max_depth: a default above the max would request more
+    // levels than any query is allowed to return (HFT-review: config invariant).
+    let default_depth =
+        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
     let stale_after_secs = settings
         .get_int("api.stale_after_secs")
         .unwrap_or(15)

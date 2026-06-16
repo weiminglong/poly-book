@@ -8,12 +8,33 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Read an integer config key, defaulting when absent and clamping to a minimum.
+///
+/// Config integers are `i64`; casting a negative value straight to `u32/u64/usize`
+/// wraps to a huge number (e.g. `-1 as u64 == u64::MAX`), which silently disables
+/// lag checks, allocates absurd buffers, or never fires intervals. A value below
+/// `min` (e.g. a `0` flush interval that would busy-loop, or a `0` segment size)
+/// is equally pathological. This clamps to `min` and warns rather than letting a
+/// hostile/typo'd config produce undefined behavior (HFT-review: config bounds).
+fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
+    let v = settings.get_int(key).unwrap_or(default);
+    if v < min {
+        tracing::warn!(
+            key,
+            value = v,
+            min,
+            "config value below minimum; clamping to minimum"
+        );
+        min
+    } else {
+        v
+    }
+}
+
 /// Build a `RateLimiter` from `[feed]` config (shared by REST callers).
 pub fn rest_rate_limiter(settings: &Config) -> pb_feed::RateLimiter {
-    let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
-    let rate_window = settings
-        .get_int("feed.rate_limit_window_secs")
-        .unwrap_or(10) as u32;
+    let rate_requests = cfg_int_min(settings, "feed.rate_limit_requests", 1500, 1) as u32;
+    let rate_window = cfg_int_min(settings, "feed.rate_limit_window_secs", 10, 1) as u32;
     pb_feed::RateLimiter::with_window(rate_requests, rate_window)
 }
 
@@ -200,9 +221,9 @@ pub async fn start_storage_sinks(
             .get_string("storage.parquet_base_path")
             .unwrap_or_else(|_| "./data".to_string());
         let (store, base_path) = build_object_store(&configured)?;
-        let flush_secs = settings
-            .get_int("storage.parquet_flush_interval_secs")
-            .unwrap_or(300) as u64;
+        // min 1s: a 0 interval would make the flush timer fire continuously.
+        let flush_secs =
+            cfg_int_min(settings, "storage.parquet_flush_interval_secs", 300, 1) as u64;
 
         let (ptx, prx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
@@ -229,14 +250,10 @@ pub async fn start_storage_sinks(
         let client = clickhouse::Client::default()
             .with_url(&ch_url)
             .with_database(&ch_db);
-        let batch_size = settings
-            .get_int("storage.clickhouse_batch_size")
-            .unwrap_or(10_000)
-            .max(0) as usize;
-        let batch_interval_secs = settings
-            .get_int("storage.clickhouse_batch_interval_secs")
-            .unwrap_or(1)
-            .max(0) as u64;
+        let batch_size = cfg_int_min(settings, "storage.clickhouse_batch_size", 10_000, 1) as usize;
+        // min 1s: a 0 interval would make the batch timer fire continuously.
+        let batch_interval_secs =
+            cfg_int_min(settings, "storage.clickhouse_batch_interval_secs", 1, 1) as u64;
         let sink = pb_store::ClickHouseSink::new(crx, client)
             .with_batch_config(batch_size, Duration::from_secs(batch_interval_secs));
         if let Err(e) = sink.ensure_table().await {
@@ -261,9 +278,9 @@ pub async fn start_storage_sinks(
 pub fn checkpoint_config_from_settings(
     settings: &Config,
 ) -> super::checkpoint_producer::CheckpointProducerConfig {
-    let checkpoint_interval_secs = settings
-        .get_int("storage.checkpoint_interval_secs")
-        .unwrap_or(60) as u64;
+    // min 1s: a 0 interval would make the checkpoint timer fire continuously.
+    let checkpoint_interval_secs =
+        cfg_int_min(settings, "storage.checkpoint_interval_secs", 60, 1) as u64;
     super::checkpoint_producer::CheckpointProducerConfig {
         rest_url: settings
             .get_string("feed.rest_url")
@@ -320,23 +337,18 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
     let base_path = settings
         .get_string("wal.base_path")
         .unwrap_or_else(|_| "./data/wal".to_string());
-    let segment_size_mb = settings.get_int("wal.segment_size_mb").unwrap_or(64) as u64;
-    let max_segments = settings.get_int("wal.max_segments").unwrap_or(16) as usize;
-    let max_consumer_lag_bytes = settings
-        .get_int("wal.max_consumer_lag_bytes")
-        .unwrap_or(256 * 1024 * 1024) as u64;
-    let position_commit_interval_ms = settings
-        .get_int("wal.position_commit_interval_ms")
-        .unwrap_or(1_000)
-        .max(1) as u64;
-    let flush_interval_ms = settings
-        .get_int("wal.flush_interval_ms")
-        .unwrap_or(20)
-        .max(1) as u64;
-    let sync_interval_ms = settings
-        .get_int("wal.sync_interval_ms")
-        .unwrap_or(200)
-        .max(1) as u64;
+    // min 1 MB: a 0 segment size would allocate zero-byte segments and wedge the
+    // writer. min 1 segment: 0 would break pruning/retention math.
+    let segment_size_mb = cfg_int_min(settings, "wal.segment_size_mb", 64, 1) as u64;
+    let max_segments = cfg_int_min(settings, "wal.max_segments", 16, 1) as usize;
+    // min 1 byte: a negative value cast to u64 would be u64::MAX and silently
+    // disable the consumer-lag check (the lag could never exceed it).
+    let max_consumer_lag_bytes =
+        cfg_int_min(settings, "wal.max_consumer_lag_bytes", 256 * 1024 * 1024, 1) as u64;
+    let position_commit_interval_ms =
+        cfg_int_min(settings, "wal.position_commit_interval_ms", 1_000, 1) as u64;
+    let flush_interval_ms = cfg_int_min(settings, "wal.flush_interval_ms", 20, 1) as u64;
+    let sync_interval_ms = cfg_int_min(settings, "wal.sync_interval_ms", 200, 1) as u64;
     pb_wal::WalConfig {
         base_path: std::path::PathBuf::from(base_path),
         segment_size: segment_size_mb * 1024 * 1024,
@@ -394,13 +406,13 @@ pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
         ws_url: settings
             .get_string("feed.ws_url")
             .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
-        ping_interval_secs: settings.get_int("feed.ping_interval_secs").unwrap_or(10) as u64,
-        reconnect_base_delay_ms: settings
-            .get_int("feed.reconnect_base_delay_ms")
-            .unwrap_or(100) as u64,
-        reconnect_max_delay_ms: settings
-            .get_int("feed.reconnect_max_delay_ms")
-            .unwrap_or(30000) as u64,
+        ping_interval_secs: cfg_int_min(settings, "feed.ping_interval_secs", 10, 1) as u64,
+        // min 1ms: a 0 base/max reconnect delay would spin a CPU-bound reconnect
+        // loop with no backoff.
+        reconnect_base_delay_ms: cfg_int_min(settings, "feed.reconnect_base_delay_ms", 100, 1)
+            as u64,
+        reconnect_max_delay_ms: cfg_int_min(settings, "feed.reconnect_max_delay_ms", 30000, 1)
+            as u64,
     }
 }
 
@@ -535,8 +547,8 @@ pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQue
 
 /// Read query guard settings from config.
 pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
-    let max_rows = settings.get_int("api.query_max_rows").unwrap_or(10_000) as usize;
-    let timeout_secs = settings.get_int("api.query_timeout_secs").unwrap_or(30) as u64;
+    let max_rows = cfg_int_min(settings, "api.query_max_rows", 10_000, 1) as usize;
+    let timeout_secs = cfg_int_min(settings, "api.query_timeout_secs", 30, 1) as u64;
     (max_rows, timeout_secs)
 }
 
@@ -606,6 +618,25 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    // --- Config bounds validation ---
+
+    #[test]
+    fn cfg_int_min_defaults_clamps_and_rejects_negatives() {
+        // Missing key -> default.
+        assert_eq!(cfg_int_min(&empty_config(), "x.y", 64, 1), 64);
+        // Present, above min -> unchanged.
+        assert_eq!(cfg_int_min(&config_with("x.y", "128"), "x.y", 64, 1), 128);
+        // Zero, below min -> clamped to min (would otherwise be a 0 interval /
+        // zero-byte segment).
+        assert_eq!(cfg_int_min(&config_with("x.y", "0"), "x.y", 64, 1), 1);
+        // Negative -> clamped to min, NOT cast to a huge unsigned value.
+        assert_eq!(cfg_int_min(&config_with("x.y", "-1"), "x.y", 64, 1), 1);
+        assert_eq!(
+            cfg_int_min(&config_with("x.y", "-1000"), "x.y", 64, 1) as u64,
+            1
+        );
     }
 
     // --- Supervisor ---
