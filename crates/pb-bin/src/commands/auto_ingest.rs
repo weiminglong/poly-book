@@ -110,6 +110,9 @@ pub async fn run(
         // point for all market generations, so the counter is globally monotonic
         // across rotations, giving replay a true-arrival total order (A.116).
         let mut ingest_ordinal: u64 = 0;
+        // Receive timestamp (µs) of the most recent record, for the feed-staleness
+        // gauge published on the flush tick (HFT-review: gauge was never set).
+        let mut last_recv_us: u64 = 0;
 
         loop {
             let mut event = tokio::select! {
@@ -128,6 +131,13 @@ pub async fn run(
                     continue;
                 }
                 _ = flush_tick.tick() => {
+                    // Publish feed staleness so the FeedStale alert can fire
+                    // (HFT-review: the gauge was defined + alerted but never set).
+                    if last_recv_us > 0 {
+                        let staleness_s =
+                            now_micros().saturating_sub(last_recv_us) as f64 / 1_000_000.0;
+                        pb_metrics::set_feed_staleness_seconds(staleness_s);
+                    }
                     if wal_unflushed {
                         if let Err(e) = wal_writer.flush() {
                             tracing::error!(error = %e, "WAL flush failed — aborting ingest");
@@ -163,6 +173,10 @@ pub async fn run(
                 },
             };
 
+            // Track the most recent receive time for the feed-staleness gauge.
+            if let Some(recv) = event.recv_timestamp_us() {
+                last_recv_us = last_recv_us.max(recv);
+            }
             // Stamp the monotonic ingest ordinal before persistence so replay can
             // order same-microsecond events by true arrival (A.116).
             if let Some(prov) = event.provenance_mut() {

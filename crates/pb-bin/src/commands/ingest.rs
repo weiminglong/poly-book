@@ -183,6 +183,12 @@ pub async fn run(
     // safely continue with a dead feed/dispatcher/sink, so we shut down and
     // propagate a non-zero exit instead of returning Ok.
     let mut supervision_failure: Option<&'static str> = None;
+    // Receive timestamp (µs) of the most recent record, used to publish the feed
+    // staleness gauge on the periodic flush tick so it RISES during feed silence
+    // (HFT-review: the gauge was defined + alerted on but never populated, so the
+    // FeedStale alert could never fire). 0 until the first record, so a slow
+    // startup connect does not report false staleness.
+    let mut last_recv_us: u64 = 0;
 
     loop {
         let mut event = tokio::select! {
@@ -201,6 +207,13 @@ pub async fn run(
             _ = flush_tick.tick() => {
                 // Sample the event-channel backpressure depth (A.79).
                 pb_metrics::set_channel_depth("ingest_events", event_rx.len());
+                // Publish feed staleness so the FeedStale alert can fire. Only
+                // once a record has been seen, so startup is not flagged stale.
+                if last_recv_us > 0 {
+                    let staleness_s =
+                        now_micros().saturating_sub(last_recv_us) as f64 / 1_000_000.0;
+                    pb_metrics::set_feed_staleness_seconds(staleness_s);
+                }
                 if wal_unflushed {
                     wal_writer.flush()
                         .map_err(|e| anyhow::anyhow!("WAL flush failed: {e}"))?;
@@ -243,6 +256,10 @@ pub async fn run(
                 }
             },
         };
+        // Track the most recent receive time for the feed-staleness gauge.
+        if let Some(recv) = event.recv_timestamp_us() {
+            last_recv_us = last_recv_us.max(recv);
+        }
         // Stamp the monotonic ingest ordinal before persistence so replay can
         // order same-microsecond events by true arrival (A.116).
         if let Some(prov) = event.provenance_mut() {
