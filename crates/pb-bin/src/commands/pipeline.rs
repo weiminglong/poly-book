@@ -348,6 +348,47 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
     }
 }
 
+/// Open the WAL writer, optionally as a hot standby that waits to take over.
+///
+/// Without `standby`, this is the fail-fast behavior: a second writer on the same
+/// WAL directory returns the `WriterLocked` error immediately (the single-writer
+/// flock; audit A.128). With `standby`, a `WriterLocked` is treated as "the
+/// primary is alive" — the process polls the lock on `poll` and promotes itself to
+/// primary writer the moment the lock is released (the primary exits/dies),
+/// resuming on the shared WAL with no data loss (the takeover semantics are
+/// covered by `pb_wal`'s `standby_writer_takes_over_shared_wal_after_primary_exit`
+/// test). Returns `Ok(None)` if `shutdown` fires while still waiting.
+///
+/// NOTE (audit P3-HA-1): this is automatic *writer* promotion only. Redundant
+/// feed connectivity with arbitration, and a measured wall-clock failover RTO,
+/// require a real multi-replica deployment and are not exercised here.
+pub async fn open_wal_writer_with_standby(
+    config: pb_wal::WalConfig,
+    standby: bool,
+    poll: Duration,
+    shutdown: &CancellationToken,
+) -> Result<Option<pb_wal::WalWriter>> {
+    loop {
+        match pb_wal::WalWriter::open(config.clone()) {
+            Ok(writer) => return Ok(Some(writer)),
+            Err(pb_wal::WalError::WriterLocked { path }) if standby => {
+                tracing::info!(
+                    ?path,
+                    "standby: WAL is held by the active writer; waiting to promote"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(poll) => {}
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("standby: shutdown requested before promotion");
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("failed to open WAL writer: {e}")),
+        }
+    }
+}
+
 pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
     pb_feed::WsConfig {
         ws_url: settings
@@ -579,6 +620,90 @@ mod tests {
         });
         let exited = sup.next_exit().await;
         assert_eq!(exited, Some("short-lived"));
+    }
+
+    // --- Standby writer promotion (P3-HA-1) ---
+
+    fn standby_wal_config(dir: &std::path::Path) -> pb_wal::WalConfig {
+        pb_wal::WalConfig {
+            base_path: dir.to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..pb_wal::WalConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn non_standby_open_fails_fast_when_wal_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let _primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+        // standby=false must surface the WriterLocked as an error, not wait.
+        let result =
+            open_wal_writer_with_standby(config, false, Duration::from_millis(10), &shutdown).await;
+        assert!(
+            result.is_err(),
+            "non-standby open must fail fast when locked"
+        );
+    }
+
+    #[tokio::test]
+    async fn standby_open_waits_then_promotes_when_lock_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+
+        let cfg = config.clone();
+        let sd = shutdown.clone();
+        let standby = tokio::spawn(async move {
+            open_wal_writer_with_standby(cfg, true, Duration::from_millis(20), &sd).await
+        });
+
+        // Give the standby several poll cycles; while the primary holds the lock
+        // it must not promote.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !standby.is_finished(),
+            "standby must wait while primary holds the lock"
+        );
+
+        // Primary exits -> the standby promotes on its next poll.
+        drop(primary);
+        let promoted = tokio::time::timeout(Duration::from_secs(2), standby)
+            .await
+            .expect("standby should promote within the timeout")
+            .expect("join ok")
+            .expect("open ok");
+        assert!(
+            promoted.is_some(),
+            "standby must acquire the WAL after the primary releases it"
+        );
+    }
+
+    #[tokio::test]
+    async fn standby_open_returns_none_on_shutdown_while_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let _primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+
+        let cfg = config.clone();
+        let sd = shutdown.clone();
+        let standby = tokio::spawn(async move {
+            open_wal_writer_with_standby(cfg, true, Duration::from_millis(20), &sd).await
+        });
+
+        // Cancel while it is still waiting for the (still-held) lock.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), standby)
+            .await
+            .expect("should return promptly after shutdown")
+            .expect("join ok")
+            .expect("open ok");
+        assert!(result.is_none(), "shutdown while waiting must yield None");
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. |
+| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover, P3-HA-1). |
 | `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
 | `replay` | Reconstruct historical orderbook state at a specific timestamp. |
 | `execution-replay` | Replay stored execution history independently of market-data replay. |

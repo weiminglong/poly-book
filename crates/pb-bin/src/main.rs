@@ -54,6 +54,10 @@ enum Commands {
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
+        /// Start as a hot standby: wait for the active writer's WAL lock and
+        /// auto-promote when it is released (writer failover; audit P3-HA-1).
+        #[arg(long, default_value_t = false)]
+        standby: bool,
     },
     /// Replay historical orderbook state at a specific timestamp
     Replay {
@@ -236,6 +240,7 @@ async fn main() -> Result<()> {
             parquet,
             clickhouse,
             metrics,
+            standby,
         } => {
             commands::ingest::run(
                 settings,
@@ -243,6 +248,7 @@ async fn main() -> Result<()> {
                 parquet,
                 clickhouse,
                 metrics,
+                standby,
                 shutdown,
                 slug_registry,
             )
@@ -367,12 +373,23 @@ mod tests {
                 parquet,
                 clickhouse,
                 metrics,
+                standby,
             } => {
                 assert!(tokens.is_none());
                 assert!(parquet);
                 assert!(!clickhouse);
                 assert!(metrics);
+                assert!(!standby);
             }
+            _ => panic!("expected Ingest"),
+        }
+    }
+
+    #[test]
+    fn parse_ingest_standby_flag() {
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--standby"]).unwrap();
+        match cli.command {
+            Commands::Ingest { standby, .. } => assert!(standby),
             _ => panic!("expected Ingest"),
         }
     }

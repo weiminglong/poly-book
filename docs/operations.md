@@ -364,15 +364,22 @@ Recovery objectives by failure mode:
 | `serve` (API) process crash | Restart; re-hydrate from latest checkpoint + WAL tail | 0 (read-only; no data originates here) | seconds — bounded by checkpoint hydration + WAL replay |
 | `ingest` process crash, same host | Restart `ingest`; flock is already released; it resumes appending to the last segment | ≤ `wal.sync_interval_ms` of un-`fdatasync`'d records (default 200 ms) on OS-crash/power-loss; **0** on a clean process kill | seconds — process start + lock acquire |
 | Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` rebuilds affected partitions from the durable WAL (offline) | 0 for any window the WAL still retains | minutes — offline rebuild, scales with window |
-| Host loss (WAL on durable/EFS volume) | Start a standby `ingest` against the shared WAL volume; it acquires the released lock and resumes | ≤ last synced records, as above | minutes — host/standby provisioning |
+| Host loss (WAL on durable/EFS volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
 | Host loss (WAL on ephemeral storage) | Parquet on S3 is durable; the in-flight WAL tail is lost | the un-flushed Parquet window not yet mirrored to the WAL volume | minutes |
 
-**Still manual / deferred** (needs a real multi-replica deployment to author and
-verify, tracked under audit P3-HA-1 / A.78): a redundant second feed with
-arbitration, *automatic* standby promotion (the takeover above is a documented
-runbook step, not an automated election), and a measured wall-clock RTO from a
-live failover drill. Until then, the single-writer flock + durable storage +
-`reconcile` is the supported recovery path.
+**Automatic writer promotion** is available: start the standby as
+`ingest --standby` and it polls the shared WAL lock, promoting itself to the
+active writer the instant the primary releases it (no manual intervention; the
+takeover preserves the primary's durably-synced records). The promotion *logic* is
+unit-tested in-process (`pipeline::open_wal_writer_with_standby` tests +
+`pb_wal`'s takeover test).
+
+**Still deferred** (needs a real multi-replica deployment to author and verify,
+tracked under audit P3-HA-1 / A.78): a redundant second *feed* with arbitration
+(the standby connects to the feed only after it promotes, so there is a capture
+gap equal to the promotion latency), and a *measured* wall-clock RTO from a live
+failover drill. The single-writer flock + `--standby` auto-promotion + durable
+storage + `reconcile` is the supported recovery path.
 
 ### Historical Backend Selection
 

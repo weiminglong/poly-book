@@ -6,12 +6,14 @@ use tokio_util::sync::CancellationToken;
 use super::pipeline;
 use super::pipeline::now_micros;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     settings: Config,
     tokens: Option<String>,
     enable_parquet: bool,
     enable_clickhouse: bool,
     enable_metrics: bool,
+    standby: bool,
     shutdown: CancellationToken,
     slug_registry: SlugRegistry,
 ) -> Result<()> {
@@ -108,8 +110,23 @@ pub async fn run(
     let wal_base_path = wal_config.base_path.clone();
     // The WAL is the durability backbone: a failure to open it is fatal, not a
     // "continue without WAL" warning that silently disables durability (A.129).
-    let mut wal_writer = pb_wal::WalWriter::open(wal_config)
-        .map_err(|e| anyhow::anyhow!("failed to open WAL writer: {e}"))?;
+    // With --standby, a process started against a WAL already held by an active
+    // writer waits and auto-promotes when that writer exits (P3-HA-1) instead of
+    // failing fast on the single-writer flock.
+    if standby {
+        tracing::info!("standby mode: will wait for the active writer's WAL lock before ingesting");
+    }
+    let Some(mut wal_writer) = pipeline::open_wal_writer_with_standby(
+        wal_config,
+        standby,
+        std::time::Duration::from_secs(1),
+        &shutdown,
+    )
+    .await?
+    else {
+        // shutdown fired while a standby was still waiting to promote
+        return Ok(());
+    };
     tracing::info!("WAL writer opened");
 
     tracing::info!("ingestion pipeline running, press Ctrl+C to stop");
