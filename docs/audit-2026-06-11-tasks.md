@@ -497,6 +497,13 @@ metrics route label: clone the `MatchedPath` (Arc bump) instead of per-request
 cosmetic consistency is a breaking change and the only active consumer (SPA) uses
 HTTP.
 
+**CI-flake fix (found during verification):** the two replay HTTP tests
+intermittently 504'd under `cargo test --workspace` — real Parquet reads through
+the production router, starved past the hardcoded 30s `HTTP_REQUEST_TIMEOUT` when
+the parallel workspace run saturated the CPU (they passed in isolation). Made the
+timeout config-driven (`api.http_request_timeout_secs`, default 30s in prod;
+tests use 600s). Full workspace gate now deterministically green.
+
 **Deferred (attended): #9 unknown-config-key validation.** A typo'd config key is
 silently ignored. The robust fix is a typed-config struct with
 `#[serde(deny_unknown_fields)]`, but the code reads config ad-hoc via `get_int`,
