@@ -112,7 +112,15 @@ impl WorkstationService for GrpcWorkstationService {
         let req = request.into_inner();
         let mode = parse_replay_mode(&req.mode)?;
         let asset_id = pb_types::AssetId::new(&*req.asset_id);
-        let depth = req.depth.map(|d| d as usize);
+        // Mirror the HTTP guard: an explicit depth of 0 is invalid (it would
+        // request zero levels). None means "service default" (HFT-review #24).
+        let depth = match req.depth {
+            Some(0) => {
+                return Err(Status::invalid_argument("depth must be greater than zero"));
+            }
+            Some(d) => Some(d as usize),
+            None => None,
+        };
 
         let result = self
             .replay
@@ -129,8 +137,10 @@ impl WorkstationService for GrpcWorkstationService {
             best_ask: result.best_ask.map(|(p, s)| price_level_to_proto(p, s)),
             mid_price: result.mid_price,
             spread: result.spread,
-            bid_depth: result.bid_depth as u32,
-            ask_depth: result.ask_depth as u32,
+            // Saturate rather than silently truncate usize->u32 (HFT-review #26);
+            // a depth above u32::MAX is absurd but truncation would corrupt it.
+            bid_depth: u32::try_from(result.bid_depth).unwrap_or(u32::MAX),
+            ask_depth: u32::try_from(result.ask_depth).unwrap_or(u32::MAX),
             bids: result
                 .bids
                 .iter()
