@@ -549,7 +549,13 @@ impl ClickHouseRecordWriter {
         // once-without-duplicates property the audit required (A.60/A.124).
         let dedup_token = {
             use std::hash::{Hash, Hasher};
-            let bytes = serde_json::to_vec(records).unwrap_or_default();
+            // Propagate a serialization failure rather than collapsing to empty
+            // bytes (`unwrap_or_default`): two different batches that both failed
+            // to serialize would otherwise hash identically, and ClickHouse's
+            // dedup window would silently drop the second batch — losing rows
+            // (HFT-review finding). A failed dedup token means the whole flush
+            // fails and the records stay in the WAL for retry/reconcile.
+            let bytes = serde_json::to_vec(records)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             bytes.hash(&mut hasher);
             format!("{:016x}", hasher.finish())

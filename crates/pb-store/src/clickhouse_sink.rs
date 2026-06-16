@@ -72,10 +72,27 @@ impl ClickHouseSink {
                     // flush so a graceful stop does not abandon records already
                     // sent by the upstream (audit finding A.153). Bounded so a
                     // stuck upstream cannot block shutdown forever.
-                    self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
+                    let drain_complete =
+                        self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
                     if !buffer.is_empty() {
                         tracing::info!(buffered = buffer.len(), "ClickHouseSink flushing on shutdown");
                         self.flush(&mut buffer).await?;
+                    }
+                    if !drain_complete {
+                        // The drain hit its deadline with records still queued: this
+                        // is an incomplete shutdown that abandons data. Surface it as
+                        // an error so the supervisor records the failure instead of
+                        // reporting a clean stop (HFT-review finding). The abandoned
+                        // records remain durable in the WAL and are recoverable via
+                        // `reconcile`.
+                        let remaining = self.rx.len();
+                        tracing::error!(
+                            remaining,
+                            "ClickHouseSink drain timed out on shutdown; {remaining} records abandoned (recoverable from WAL via reconcile)"
+                        );
+                        return Err(StoreError::Other(format!(
+                            "ClickHouseSink shutdown drain timed out with {remaining} records still queued"
+                        )));
                     }
                     tracing::info!("ClickHouseSink graceful shutdown complete");
                     return Ok(());
@@ -110,7 +127,15 @@ impl ClickHouseSink {
     /// a deadline, so a graceful stop does not abandon already-sent records
     /// (audit finding A.153). The upstream drops its sender during shutdown, so
     /// `recv()` returns `None` once drained; the timeout guards a stuck upstream.
-    async fn drain_channel(&mut self, buffer: &mut Vec<PersistedRecord>, deadline: Duration) {
+    ///
+    /// Returns `true` if the channel drained to completion (`recv() → None`), or
+    /// `false` if the deadline was hit with records potentially still queued — the
+    /// caller surfaces that as an incomplete-shutdown error (HFT-review finding).
+    async fn drain_channel(
+        &mut self,
+        buffer: &mut Vec<PersistedRecord>,
+        deadline: Duration,
+    ) -> bool {
         let drained = tokio::time::timeout(deadline, async {
             let mut count = 0usize;
             while let Some(record) = self.rx.recv().await {
@@ -129,13 +154,16 @@ impl ClickHouseSink {
         })
         .await;
         match drained {
-            Ok(count) if count > 0 => {
-                tracing::info!(drained = count, "ClickHouseSink drained channel backlog on shutdown")
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        drained = count,
+                        "ClickHouseSink drained channel backlog on shutdown"
+                    );
+                }
+                true
             }
-            Ok(_) => {}
-            Err(_) => tracing::warn!(
-                "ClickHouseSink channel drain timed out on shutdown; some records may remain in the channel"
-            ),
+            Err(_) => false,
         }
     }
 

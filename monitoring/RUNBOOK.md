@@ -40,6 +40,24 @@ its buffer; only after `MAX_FLUSH_RETRIES` does it surface the error).
 3. The WAL still has every record. Once storage is healthy, rebuild any lost
    Parquet window with `cargo run -- reconcile` (offline — stop ingest first).
 
+## WalDecodeError
+**Severity: critical — serve read model has diverged from the WAL.**
+
+A CRC-valid WAL frame failed `codec::decode` during live tailing and was skipped
+(`pb_wal_decode_errors_total`). The frame passed its CRC, so the bytes are intact,
+but the codec rejected them — almost always a codec **version mismatch** (a serve
+build older than the ingest build that wrote a newer frame format) or, far less
+likely, a CRC collision on a corrupt frame.
+
+1. Confirm the ingest and serve binaries are the **same build/codec version**
+   (`pb_wal::codec::CURRENT_VERSION`). A serve replica behind ingest after a codec
+   bump is the usual cause — redeploy serve to match.
+2. The skipped record is permanently absent from that serve node's in-memory read
+   model; restart serve to re-hydrate from checkpoints + replay the WAL (note: if
+   the frame is genuinely corrupt, re-hydration will also skip it).
+3. If it recurs across restarts, the WAL has a poison frame — `reconcile` the
+   affected window from the source and investigate the codec/segment.
+
 ## FeedSilent
 **Severity: critical — capture gap.**
 

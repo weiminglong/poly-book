@@ -37,6 +37,20 @@ groups:
             in the WAL and can be rebuilt with `reconcile`.
           runbook: monitoring/RUNBOOK.md#sinkflushfailing
 
+      - alert: WalDecodeError
+        expr: increase(pb_wal_decode_errors_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL frame failed to decode during live tailing on {{ $labels.instance }}"
+          description: >-
+            A CRC-valid WAL frame could not be decoded by the codec and was skipped
+            during live tailing — the serve read model has diverged from the WAL for
+            that record. This should be near-impossible (a codec version mismatch or
+            CRC collision). Investigate the WAL/codec version and reconcile.
+          runbook: monitoring/RUNBOOK.md#waldecodeerror
+
       - alert: FeedSilent
         expr: rate(pb_messages_received_total[2m]) == 0
         for: 30s

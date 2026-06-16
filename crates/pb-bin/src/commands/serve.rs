@@ -324,7 +324,19 @@ async fn tail_session(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to decode WAL record");
+                    // A CRC-valid frame that fails to decode means the live read
+                    // model has diverged from the WAL for this record. We skip it
+                    // (rather than break to Resync) to guarantee forward progress —
+                    // re-hydration would replay and re-hit the same poison frame,
+                    // wedging the tailer in an infinite resync loop. But the skip
+                    // must be loud and alertable, not a silent warn (HFT-review
+                    // finding): operators reconcile from the WAL if it recurs.
+                    pb_metrics::record_wal_decode_error();
+                    tracing::error!(
+                        error = %e,
+                        "failed to decode CRC-valid WAL record during live tailing; \
+                         skipping — live read model has diverged for this record"
+                    );
                 }
             },
             Ok(None) => {

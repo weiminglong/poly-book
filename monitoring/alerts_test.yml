@@ -38,6 +38,23 @@ tests:
               runbook: monitoring/RUNBOOK.md#walappendfailing
 
   - interval: 1m
+    name: WAL decode error pages
+    input_series:
+      - series: 'pb_wal_decode_errors_total{instance="serve-1"}'
+        values: "0 0 1 2 3 4"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WalDecodeError
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: serve-1
+            exp_annotations:
+              summary: "WAL frame failed to decode during live tailing on serve-1"
+              description: "A CRC-valid WAL frame could not be decoded by the codec and was skipped during live tailing — the serve read model has diverged from the WAL for that record. This should be near-impossible (a codec version mismatch or CRC collision). Investigate the WAL/codec version and reconcile."
+              runbook: monitoring/RUNBOOK.md#waldecodeerror
+
+  - interval: 1m
     name: Silent feed pages
     input_series:
       # A flat counter means rate == 0: no messages are being received.

@@ -66,6 +66,10 @@ pub fn register_metrics() {
         "Total WAL append failures (each is a durability-fatal event)"
     );
     describe_counter!(
+        "pb_wal_decode_errors_total",
+        "Total CRC-valid WAL frames that failed to decode during live tailing and were skipped (live read model has diverged from the WAL for those records)"
+    );
+    describe_counter!(
         "pb_sink_flush_failures_total",
         "Total storage sink flush failures (per sink), including retries"
     );
@@ -179,6 +183,15 @@ pub fn record_crossed_book() {
 
 pub fn record_wal_append_failure() {
     counter!("pb_wal_append_failures_total").increment(1);
+}
+
+/// A CRC-valid WAL frame failed to `codec::decode` during live tailing and was
+/// skipped. This should be near-impossible (CRC passed but the codec rejected the
+/// payload — a version mismatch or astronomically-unlikely CRC collision); the
+/// live read model has silently diverged from the WAL for that record, so it must
+/// be loud and alertable rather than a silent skip (HFT-review finding).
+pub fn record_wal_decode_error() {
+    counter!("pb_wal_decode_errors_total").increment(1);
 }
 
 pub fn record_sink_flush_failure(sink: &'static str) {
