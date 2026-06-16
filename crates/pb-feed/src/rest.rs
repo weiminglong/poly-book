@@ -35,17 +35,20 @@ pub struct RestClient {
 }
 
 impl RestClient {
-    pub fn new(rate_limiter: RateLimiter) -> Self {
+    pub fn new(rate_limiter: RateLimiter) -> Result<Self, FeedError> {
+        // Propagate a build failure rather than falling back to Client::new(),
+        // which would silently drop the connect/request timeouts and allow an
+        // upstream REST call to hang indefinitely — unacceptable for an HFT feed
+        // (HFT-review). build() only fails if the TLS backend can't initialize.
         let client = Client::builder()
             .connect_timeout(REST_CONNECT_TIMEOUT)
             .timeout(REST_REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| Client::new());
-        Self {
+            .build()?;
+        Ok(Self {
             client,
             rate_limiter,
             config: RestConfig::default(),
-        }
+        })
     }
 
     pub fn with_config(mut self, config: RestConfig) -> Self {

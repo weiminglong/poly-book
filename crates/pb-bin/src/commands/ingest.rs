@@ -78,7 +78,7 @@ pub async fn run(
     // Self-healing worker: on a detected book divergence, fetch a fresh REST
     // snapshot and re-inject it into the feed (A.74). It reuses the dispatcher's
     // normal snapshot path via the shared raw channel.
-    let resnapshot_rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))
+    let resnapshot_rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))?
         .with_config(pipeline::rest_config_from_settings(&settings));
     let resnapshot_token = shutdown.child_token();
     supervisor.spawn("resnapshot-worker", async move {

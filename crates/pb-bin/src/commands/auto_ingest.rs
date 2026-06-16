@@ -231,7 +231,7 @@ pub async fn run(
     // continue without a silent storage gap; record it so run() exits non-zero.
     let mut supervision_failure: Option<&'static str> = None;
 
-    let rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))
+    let rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))?
         .with_config(pipeline::rest_config_from_settings(&settings));
 
     let ws_config = pipeline::ws_config_from_settings(&settings);

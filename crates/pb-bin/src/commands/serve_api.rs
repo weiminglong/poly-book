@@ -232,7 +232,13 @@ fn spawn_auto_rotate_runtime(
                 .get_string("feed.gamma_url")
                 .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
         };
-        let rest = pb_feed::RestClient::new(rate_limiter).with_config(rest_config);
+        let rest = match pb_feed::RestClient::new(rate_limiter) {
+            Ok(c) => c.with_config(rest_config),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to build REST client; auto-rotate cannot start");
+                return;
+            }
+        };
         let ws_config = pipeline::ws_config_from_settings(&settings);
 
         let mut front_token: Option<CancellationToken> = None;

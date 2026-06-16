@@ -10,10 +10,13 @@ use super::market_discovery::{extract_discovery, populate_registry};
 /// These markets use slug `btc-updown-5m-{ts}` where `ts` is the current
 /// unix timestamp floored to the nearest 300-second boundary.
 fn current_btc_5m_slug() -> String {
+    // Saturate to 0 on a pre-epoch clock rather than panic (matches
+    // pipeline::now_micros). A broken clock yields a bogus slug that simply finds
+    // no market — strictly better than crashing the discover command (HFT-review).
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_secs();
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let bucket = now - (now % 300);
     format!("btc-updown-5m-{bucket}")
 }
@@ -68,7 +71,7 @@ pub async fn run(
             .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
     };
 
-    let rest = pb_feed::RestClient::new(rate_limiter).with_config(rest_config);
+    let rest = pb_feed::RestClient::new(rate_limiter)?.with_config(rest_config);
     let keyword = filter.as_deref().unwrap_or("btc").to_lowercase();
 
     // For BTC queries, first try to find the live 5-minute market by slug

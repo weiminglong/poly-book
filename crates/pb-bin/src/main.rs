@@ -197,14 +197,21 @@ async fn main() -> Result<()> {
     // Create shutdown token
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
+    // Register the SIGTERM handler synchronously BEFORE spawning, so a failed
+    // registration is a clean startup error (non-zero exit) rather than a panic
+    // buried in a detached task that would silently break all shutdown signaling
+    // (HFT-review). The registered Signal is then moved into the listener task.
+    #[cfg(unix)]
+    let mut sigterm = {
+        use tokio::signal::unix::{signal, SignalKind};
+        signal(SignalKind::terminate())
+            .map_err(|e| anyhow::anyhow!("failed to register SIGTERM handler: {e}"))?
+    };
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
 
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm =
-                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
             tokio::select! {
                 result = ctrl_c => {
                     if let Err(e) = result {
