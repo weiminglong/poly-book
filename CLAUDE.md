@@ -8,7 +8,7 @@ and a read-only workstation API. Cargo workspace with crates under `crates/`.
 ```bash
 cargo check                                          # type-check all crates
 cargo test --workspace --exclude pb-integration-tests # unit + property tests
-cargo bench                                          # Criterion benchmarks (pb-types, pb-book)
+cargo bench                                          # Criterion benchmarks (pb-types, pb-book, pb-wal, pb-api, pb-service)
 cargo +nightly fuzz run fuzz_book_delta               # fuzz targets (requires nightly)
 cargo +nightly fuzz run fuzz_query_guard              # query guard fuzz target (requires nightly)
 cargo run -- --help                                  # CLI binary

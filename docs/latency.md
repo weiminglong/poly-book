@@ -29,6 +29,13 @@ WebSocket frame arrival
     │   └─ check_integrity        ~10 ns
     │   └─ top_bids/asks(5)       ~20 ns
     │
+    ├─ WAL append (durability)    ~340 ns     (encode + framed buffered append)
+    │   └─ codec::encode          ~80 ns      (bincode + version byte)
+    │   └─ append + flush         ~260 ns/rec (CRC + length-prefix + BufWriter)
+    │   └─ fdatasync              batched on sync_interval_ms, NOT per record
+    │       (a per-record fdatasync is ms-scale — ~10⁴× the amortized append —
+    │        which is why the WAL batches it; see `cargo bench -p pb-wal`)
+    │
     ├─ Storage flush              async, off hot path
     │   └─ Parquet row group      ~10–50 ms  (buffered, 5-min interval)
     │   └─ ClickHouse batch       ~5–20 ms   (1-sec interval)
@@ -60,6 +67,7 @@ WebSocket frame arrival
 cargo bench                      # all benchmarks
 cargo bench -p pb-types          # fixed-point and wire deser
 cargo bench -p pb-book           # book operations, depth, and analytics
+cargo bench -p pb-wal            # WAL durability hot path (encode, append, fsync)
 ```
 
 ### Prometheus Metrics

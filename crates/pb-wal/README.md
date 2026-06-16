@@ -130,6 +130,11 @@ and feeds decoded records into the live read model.
 - Tests cover CRC/length corruption detection, truncated and zero-filled tail
   recovery on reopen, incremental tailing, empty-dir reader recovery, codec
   round-trips, segment rotation, reader position persistence, and pruner safety.
+- **Benchmarks** (`cargo bench -p pb-wal`, `benches/wal_append.rs`) measure the
+  durability hot path: `codec::encode` (~80 ns), steady-state `append+flush`
+  (~260 ns/record, fsync amortized), and per-record `fdatasync` (ms-scale —
+  ~10⁴× the amortized append, which is why fsync is batched on
+  `sync_interval_ms`). See `docs/latency.md` for the full pipeline budget.
 
 ## Docs to Update After Changes
 

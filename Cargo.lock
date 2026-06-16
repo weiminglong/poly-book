@@ -2877,6 +2877,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "crc32c",
+ "criterion",
  "pb-types",
  "proptest",
  "rustix",
