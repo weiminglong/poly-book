@@ -92,8 +92,12 @@ export function useOrderBookStream(assetId: string | null) {
           lastMessageAtRef.current = Date.now()
           setStale(false)
           setSnapshot(data)
-        } catch {
-          // Ignore malformed messages.
+        } catch (err) {
+          // Surface malformed frames instead of silently discarding them. A
+          // persistently-malformed stream leaves wsSnapshot null and silently
+          // degrades the page to HTTP polling under a green badge; the warning
+          // gives that failure a diagnostic trail (HFT-review #27).
+          console.warn('Discarding malformed orderbook stream message:', err)
         }
       }
 

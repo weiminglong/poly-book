@@ -477,15 +477,20 @@ this round:
 - **gRPC parity (fixed):** reconstruct now rejects `depth==0` (mirrors HTTP);
   depth-count `usize→u32` casts saturate via `try_from` instead of truncating.
 
-**Remaining (next tick(s)):**
+**Frontend cluster (fixed):** #11 replay/integrity 30s timeout (was aborting at
+4s); #16 + #27 error/malformed-message diagnostics (were silently swallowed);
+#12 focus-visible rings on selector buttons; #13/#20/#22 DepthChart ResizeObserver
+(with window-resize fallback) + memoized cumulative + single-pass min/max +
+no per-draw canvas resize; #19/#21 memoized OrderbookPage liveSnapshot +
+PriceLadder maxSize. **Skipped (documented):** #17/#18 (display-only parseFloat
+precision, only beyond realistic venue magnitudes) and #23 (schema-browser
+re-render — low/crit-0, non-hot static data). web: biome + tsc + 136 vitest green.
+
+**Remaining (next tick):**
 - **Wire-contract reconciliation (#4/#5/#14/#15):** HTTP DTO ↔ gRPC proto ↔ web
   Zod schema field/type divergence (WS `bid_depth`/`ask_depth`, `total_count`
   u32-vs-u64, `IntegritySummary` field names, `completeness` value domain). Needs
   proto regen + DTO + web schema together.
-- **Frontend (#11–#23, #27, #16):** replay 4s-timeout, focus-visible a11y,
-  ResizeObserver, memoization of hot-render computations, fixed-point precision in
-  the depth chart/formatters, error-parse diagnostics, WS initial-snapshot
-  degradation. Needs the web toolchain (vitest/tsc/biome).
 - **#9 unknown config keys** (strict validation) and **#25 metrics label alloc**
   (micro-opt).
 
