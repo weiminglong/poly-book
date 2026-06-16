@@ -258,13 +258,18 @@ impl Dispatcher {
                     }
                 }
 
-                // Convert every level up-front. A mid-message conversion failure
-                // must not leave a truncated snapshot downstream (which would be
-                // indistinguishable from a complete one) and must not poison the
-                // staleness tracker, so on error we emit a continuity-reset
-                // marker and leave all tracker state untouched (A.108).
-                let mut levels: Vec<(Side, FixedPrice, FixedSize)> =
-                    Vec::with_capacity(book.bids.len() + book.asks.len());
+                // Convert every level up-front, directly into per-side vectors. A
+                // mid-message conversion failure must not leave a truncated snapshot
+                // downstream (which would be indistinguishable from a complete one)
+                // and must not poison the staleness tracker, so on error we emit a
+                // continuity-reset marker and leave all tracker state untouched
+                // (A.108). Building snap_bids/snap_asks here (rather than a combined
+                // `levels` vec that is then re-partitioned) removes a full Vec
+                // allocation and a re-iteration on the snapshot path (HFT-review #13).
+                let mut snap_bids: Vec<(FixedPrice, FixedSize)> =
+                    Vec::with_capacity(book.bids.len());
+                let mut snap_asks: Vec<(FixedPrice, FixedSize)> =
+                    Vec::with_capacity(book.asks.len());
                 let mut conversion_error: Option<FeedError> = None;
                 'convert: for (side, entries) in [(Side::Bid, &book.bids), (Side::Ask, &book.asks)]
                 {
@@ -273,7 +278,10 @@ impl Dispatcher {
                             FixedPrice::try_from(entry.price),
                             FixedSize::try_from(entry.size),
                         ) {
-                            (Ok(price), Ok(size)) => levels.push((side, price, size)),
+                            (Ok(price), Ok(size)) => match side {
+                                Side::Bid => snap_bids.push((price, size)),
+                                Side::Ask => snap_asks.push((price, size)),
+                            },
                             (Err(e), _) | (_, Err(e)) => {
                                 conversion_error = Some(e.into());
                                 break 'convert;
@@ -321,21 +329,24 @@ impl Dispatcher {
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
 
                 // Rebuild the shadow book from this snapshot so subsequent deltas
-                // can be cross-checked against the venue best bid/ask (A.74).
-                let mut snap_bids: Vec<(FixedPrice, FixedSize)> = Vec::new();
-                let mut snap_asks: Vec<(FixedPrice, FixedSize)> = Vec::new();
-                for &(side, price, size) in &levels {
-                    match side {
-                        Side::Bid => snap_bids.push((price, size)),
-                        Side::Ask => snap_asks.push((price, size)),
-                    }
-                }
+                // can be cross-checked against the venue best bid/ask (A.74). Uses
+                // the per-side vectors built during conversion — no re-partition.
                 self.validation_books
                     .entry(asset_id.0.clone())
                     .or_insert_with(|| L2Book::new(asset_id.clone()))
                     .apply_snapshot(&snap_bids, &snap_asks, Sequence::default(), exchange_ts);
 
-                for (side, price, size) in levels {
+                // Emit bids then asks, preserving the original (bid-first) ordering
+                // so sequence assignment is unchanged.
+                let emit = snap_bids
+                    .into_iter()
+                    .map(|(price, size)| (Side::Bid, price, size))
+                    .chain(
+                        snap_asks
+                            .into_iter()
+                            .map(|(price, size)| (Side::Ask, price, size)),
+                    );
+                for (side, price, size) in emit {
                     let sequence = self.next_sequence_for(&asset_id);
                     let event = BookEvent {
                         asset_id: asset_id.clone(),

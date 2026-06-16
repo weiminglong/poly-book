@@ -393,6 +393,49 @@
 
 ---
 
+## Post-audit HFT-hardening review (2026-06, multi-agent adversarial)
+
+A 6-lens multi-agent review (panic-safety, silent-data-loss, hot-path latency,
+numeric correctness, concurrency, API robustness) with 3-vote adversarial
+verification surfaced 16 majority-confirmed findings beyond the original 159.
+Fixed in dedicated commits; the verification verdict for each is recorded so the
+analysis is not re-chased:
+
+- **Observability (fixed):** `pb_resnapshot_requests_dropped_total` + warn on a
+  full resnapshot channel (was `let _ = try_send`); `pb_ws_broadcast_lagged_total`
+  on WS subscriber lag; both with alerts + RUNBOOK + promtool tests.
+- **Silent data loss (fixed):** ClickHouse dedup-token `unwrap_or_default()` →
+  `?` (mis-dedup-on-serialize-failure); ClickHouse drain-timeout now returns Err
+  so the supervisor sees incomplete shutdown; WAL tail decode error now metered
+  (`pb_wal_decode_errors_total`) + ERROR (was a silent skip), with a critical
+  alert. Deliberately skip-not-resync on a poison frame to avoid an infinite
+  re-hydration loop.
+- **Read-surface bounds (fixed):** gRPC `max_encoding/decoding_message_size` 16
+  MiB; ClickHouse `read_ingest_events`/`read_execution_events` via a
+  `bounded_client` (`max_result_rows` + `result_overflow_mode='throw'`, verified
+  against live CH).
+- **WS init (fixed):** initial-snapshot failure now branches —
+  `AssetNotActive` closes the session (was holding a slot to idle timeout);
+  `SnapshotNotReady` retries briefly then proceeds (each broadcast update carries
+  the full depth-bounded book).
+- **Hot-path allocation:** snapshot-path re-partition removed — `snap_bids`/
+  `snap_asks` built directly during conversion, dropping a full Vec + a
+  re-iteration (#13, fixed). **#5 (PublishedState clone) — verified ALREADY
+  MITIGATED:** `assets` is `HashMap<String, Arc<AssetReadView>>`, so the
+  per-publish clone is HashMap-spine + a ~2-element `Vec<String>`, NOT the book
+  data; the proposed `Arc::make_mut` would clone the spine anyway (readers hold
+  refs) — a no-op. **#6 (full-depth view materialization) — deferred:** a
+  defensible write-once/slice-per-read design; capping at `max_depth` only helps
+  for books deeper than the API max (negligible at BTC-5m scale) and shifts work
+  write→read. **#4 (source_event_id clone per snapshot level) — deferred:** each
+  emitted event needs its own owned `Option<String>`; eliminating it requires an
+  `Arc<str>` change across the whole persisted model (WAL codec + Parquet + CH) —
+  out of proportion to a per-snapshot cost. **#16 (format! on rare error path) —
+  deferred:** low value, non-steady-state.
+- **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** see commit history.
+
+---
+
 # Coverage map (every finding → task)
 
 > All 159 confirmed findings are accounted for. Low/info items are folded into the task that shares their root cause.
