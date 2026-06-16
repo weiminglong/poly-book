@@ -757,6 +757,60 @@ mod sort_tests {
         );
     }
 
+    /// ExchangeTime replay mode (the `event_ordering_ts == exchange_timestamp_us`
+    /// branch) had no coverage. When the host and venue clocks are synced
+    /// (recv_ts == exchange_ts), ExchangeTime reconstruction must produce the same
+    /// book as RecvTime (HFT-review coverage gap).
+    #[test]
+    fn exchange_time_and_recv_time_agree_when_clocks_synced() {
+        use pb_types::event::MarketDataWindow;
+
+        let ev = |kind, side, price: u32, size: u64, ts: u64, seq: u64| BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: ts,
+                exchange_timestamp_us: ts, // synced clocks
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: Some(seq),
+            },
+        };
+        let events = vec![
+            ev(BookEventKind::Snapshot, Side::Bid, 5000, 100, 1000, 0),
+            ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, 1000, 0),
+            ev(BookEventKind::Delta, Side::Bid, 4900, 50, 1100, 1),
+            ev(BookEventKind::Delta, Side::Ask, 5100, 0, 1200, 2), // remove the ask
+        ];
+        let mk = || MarketDataWindow {
+            book_events: events.clone(),
+            trade_events: vec![],
+            ingest_events: vec![],
+        };
+
+        let (recv_book, _, _) =
+            reconstruct_book(&AssetId::new("tok"), 2000, ReplayMode::RecvTime, None, mk()).unwrap();
+        let (exch_book, _, _) = reconstruct_book(
+            &AssetId::new("tok"),
+            2000,
+            ReplayMode::ExchangeTime,
+            None,
+            mk(),
+        )
+        .unwrap();
+
+        assert_eq!(recv_book.bids_sorted(), exch_book.bids_sorted());
+        assert_eq!(recv_book.asks_sorted(), exch_book.asks_sorted());
+        // Sanity: the bid delta added a level, the ask delta removed the only ask.
+        assert_eq!(exch_book.bid_depth(), 2);
+        assert_eq!(exch_book.ask_depth(), 0);
+    }
+
     /// A same-microsecond delta that arrived *before* the snapshot (lower ingest
     /// ordinal) must sort before the snapshot, even though its `sequence` is
     /// higher than the snapshot's reset-to-0 sequence (audit finding A.116).

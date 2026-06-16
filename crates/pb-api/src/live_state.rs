@@ -1084,6 +1084,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn crossed_book_at_snapshot_materialization_is_detected() {
+        // A snapshot GROUP that is itself crossed (best bid >= best ask) must be
+        // flagged when it materializes. This is the snapshot path
+        // (materialize_pending_for_asset -> check_book_integrity), distinct from
+        // the delta path covered above (HFT-review coverage gap).
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        // Crossed snapshot: bid 0.60 sits above ask 0.50.
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.60, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.50, 20.0, 1))
+            .await;
+        // A non-snapshot record forces the pending snapshot group to materialize.
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: Some("ws-session-1".to_string()),
+                    sequence: None,
+                    ingest_ordinal: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let snapshot = model.snapshot("tok1", 5, 100).await.unwrap();
+        let warning = snapshot
+            .latest_warning
+            .expect("crossed snapshot should surface a warning at materialization");
+        assert_eq!(warning.kind, "crossed_book");
+    }
+
+    #[tokio::test]
     async fn snapshot_stays_not_ready_until_group_materializes() {
         let model = LiveReadModel::new(FeedMode::FixedTokens);
         model.set_active_assets(vec!["tok1".to_string()]).await;

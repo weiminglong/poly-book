@@ -282,6 +282,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_wal_tail_skips_record_at_exact_checkpoint_offset() {
+        // The skip predicate is `current_global <= skip_to`, where current_global
+        // is the offset *past* the record just read. A record whose end offset
+        // equals the checkpoint offset is the last record already captured in the
+        // checkpoint and must be skipped, not double-applied (off-by-one boundary).
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        // One record fully covered by the checkpoint; cutoff == its exact end.
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record(Side::Bid, 5000, 10.0, 0)).unwrap())
+            .unwrap();
+        let cutoff = writer.global_offset();
+        // One record strictly after the checkpoint.
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record(Side::Bid, 5001, 10.0, 1)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let (replayed, _pos) = replay_wal_tail(&live, &config, Some(cutoff)).await;
+        assert_eq!(
+            replayed, 1,
+            "record at the exact checkpoint offset must be skipped, only the later record replayed"
+        );
+    }
+
+    #[tokio::test]
     async fn hydration_returns_end_position_for_live_handoff() {
         let dir = tempfile::tempdir().unwrap();
         let config = pb_wal::WalConfig {
