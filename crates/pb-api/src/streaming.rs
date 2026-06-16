@@ -185,26 +185,52 @@ async fn handle_ws_session(
     // Held for the session lifetime; releasing it frees a connection slot.
     _permit: OwnedSemaphorePermit,
 ) {
-    // Send initial full snapshot.
-    match live.snapshot(&asset_id, depth, stale_after_secs).await {
-        Ok(snapshot) => {
-            let init_msg = BookUpdateMessage {
-                asset_id: snapshot.asset_id.clone(),
-                slug: slug.clone().or(snapshot.slug.clone()),
-                sequence: snapshot.sequence,
-                last_update_us: snapshot.last_update_us,
-                bids: snapshot.bids,
-                asks: snapshot.asks,
-                mid_price: snapshot.mid_price,
-                spread: snapshot.spread,
-            };
-            if send_json(&mut socket, &init_msg).await.is_err() {
+    // Send the initial full snapshot. Handle the two failure modes distinctly
+    // instead of silently entering the loop (HFT-review finding):
+    //   * AssetNotActive  -> the asset will never produce updates; close now
+    //     rather than hold a connection slot until the idle timeout.
+    //   * SnapshotNotReady -> a startup race; retry briefly. If still not ready,
+    //     proceed into the loop: each broadcast update carries the full
+    //     depth-bounded book, so the client self-heals on the next update.
+    const INIT_SNAPSHOT_RETRIES: usize = 5;
+    const INIT_SNAPSHOT_BACKOFF: Duration = Duration::from_millis(100);
+    let mut sent_init = false;
+    for attempt in 0..INIT_SNAPSHOT_RETRIES {
+        match live.snapshot(&asset_id, depth, stale_after_secs).await {
+            Ok(snapshot) => {
+                let init_msg = BookUpdateMessage {
+                    asset_id: snapshot.asset_id.clone(),
+                    slug: slug.clone().or(snapshot.slug.clone()),
+                    sequence: snapshot.sequence,
+                    last_update_us: snapshot.last_update_us,
+                    bids: snapshot.bids,
+                    asks: snapshot.asks,
+                    mid_price: snapshot.mid_price,
+                    spread: snapshot.spread,
+                };
+                if send_json(&mut socket, &init_msg).await.is_err() {
+                    return;
+                }
+                sent_init = true;
+                break;
+            }
+            Err(crate::live_state::SnapshotLookupError::AssetNotActive) => {
+                debug!(asset_id, "ws subscribe for inactive asset; closing session");
+                let _ = socket.send(Message::Close(None)).await;
                 return;
             }
+            Err(crate::live_state::SnapshotLookupError::SnapshotNotReady) => {
+                if attempt + 1 < INIT_SNAPSHOT_RETRIES {
+                    tokio::time::sleep(INIT_SNAPSHOT_BACKOFF).await;
+                }
+            }
         }
-        Err(_) => {
-            debug!(asset_id, "snapshot not ready for ws initial send");
-        }
+    }
+    if !sent_init {
+        debug!(
+            asset_id,
+            "ws initial snapshot not ready after retries; first live update will carry full state"
+        );
     }
 
     let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
