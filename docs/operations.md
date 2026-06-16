@@ -59,6 +59,8 @@ historical_backend = "parquet"  # or "clickhouse"
 query_workbench_enabled = false
 query_max_rows = 10000
 query_timeout_secs = 30
+http_request_timeout_secs = 30   # per-request HTTP timeout (504 if exceeded); not the WS stream
+# auth_token = ""                # optional bearer token; when set, all API/WS routes require it (health stays open)
 
 [wal]
 base_path = "./data/wal"

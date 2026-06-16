@@ -83,6 +83,11 @@ pub async fn run_resnapshot_worker(
                         continue;
                     }
                 }
+                // Evict entries older than the debounce window: they no longer
+                // affect debouncing, so retaining them would grow the map without
+                // bound as markets rotate over a long-running ingest (HFT-review
+                // #8). n is small, so the O(n) sweep per request is negligible.
+                last_fetch.retain(|_, t| now.duration_since(*t) < RESNAPSHOT_DEBOUNCE);
                 last_fetch.insert(asset.clone(), now);
                 match rest.fetch_book(&asset).await {
                     Ok(resp) => {

@@ -59,9 +59,16 @@ impl RestClient {
     pub async fn fetch_book(&self, token_id: &str) -> Result<RestBookResponse, FeedError> {
         self.rate_limiter.acquire().await;
         pb_metrics::record_rest_request();
-        let url = format!("{}/book?token_id={token_id}", self.config.clob_base_url);
-        debug!(url, "fetching book");
-        let resp = self.client.get(&url).send().await?;
+        // Build the URL via parse_with_params, which percent-encodes the value, so
+        // a token_id containing `&`/`?`/`#` cannot inject extra query params; log
+        // the id as a structured field rather than interpolated into the URL
+        // (HFT-review #14 defense-in-depth).
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}/book", self.config.clob_base_url),
+            &[("token_id", token_id)],
+        )?;
+        debug!(token_id, "fetching book");
+        let resp = self.client.get(url).send().await?;
         let resp = classify_response(resp)?;
         let book = resp.json().await?;
         Ok(book)
@@ -89,9 +96,14 @@ impl RestClient {
     pub async fn discover_by_slug(&self, slug: &str) -> Result<Vec<GammaEvent>, FeedError> {
         self.rate_limiter.acquire().await;
         pb_metrics::record_rest_request();
-        let url = format!("{}/events?slug={slug}", self.config.gamma_base_url);
-        debug!(url, "discovering by slug");
-        let resp = self.client.get(&url).send().await?;
+        // parse_with_params percent-encodes the slug so it cannot inject extra
+        // query params (HFT-review #14 defense-in-depth).
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}/events", self.config.gamma_base_url),
+            &[("slug", slug)],
+        )?;
+        debug!(slug, "discovering by slug");
+        let resp = self.client.get(url).send().await?;
         let resp = classify_response(resp)?;
         let events = resp.json().await?;
         Ok(events)
