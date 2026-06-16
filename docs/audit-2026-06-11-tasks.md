@@ -458,6 +458,37 @@ A second 6-lens review (70 agents) found 14 more majority-confirmed findings:
 - **Already covered (no new test):** WAL incremental tail
   (`reader_tails_appended_records_incrementally`).
 
+### Third pass (under-covered surface: frontend/integration/observability/CLI/completeness)
+
+A third 6-lens review (127 agents) found 27 majority-confirmed findings on
+surfaces the two backend passes structurally could not see. Backend cluster fixed
+this round:
+
+- **Config bounds (fixed, critical):** numeric config cast `i64 as u32/u64/usize`
+  with no validation — a negative `wal.max_consumer_lag_bytes` became `u64::MAX`
+  (silently disabling the lag check), `segment_size_mb=0` meant zero-byte
+  segments, `0` intervals busy-looped, `0` reconnect delays spun. Added
+  `cfg_int_min` clamping helper routed through every `pipeline.rs` reader; clamp
+  `default_depth <= max_depth` in serve/serve-api.
+- **Observability (fixed, high):** `pb_feed_staleness_seconds` was defined +
+  alerted (FeedStale) + dashboarded but had ZERO call sites → the alert could
+  never fire. Wired it in both ingest loops (publish `now - last_recv` on the
+  flush tick).
+- **gRPC parity (fixed):** reconstruct now rejects `depth==0` (mirrors HTTP);
+  depth-count `usize→u32` casts saturate via `try_from` instead of truncating.
+
+**Remaining (next tick(s)):**
+- **Wire-contract reconciliation (#4/#5/#14/#15):** HTTP DTO ↔ gRPC proto ↔ web
+  Zod schema field/type divergence (WS `bid_depth`/`ask_depth`, `total_count`
+  u32-vs-u64, `IntegritySummary` field names, `completeness` value domain). Needs
+  proto regen + DTO + web schema together.
+- **Frontend (#11–#23, #27, #16):** replay 4s-timeout, focus-visible a11y,
+  ResizeObserver, memoization of hot-render computations, fixed-point precision in
+  the depth chart/formatters, error-parse diagnostics, WS initial-snapshot
+  degradation. Needs the web toolchain (vitest/tsc/biome).
+- **#9 unknown config keys** (strict validation) and **#25 metrics label alloc**
+  (micro-opt).
+
 - **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** the periodic
   fdatasync and prune (read_dir + metadata + remove_file) are blocking syscalls
   run on the ingest `select!` loop. Wrapped both in `tokio::task::block_in_place`
