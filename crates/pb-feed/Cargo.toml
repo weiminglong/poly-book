@@ -26,3 +26,10 @@ futures-util = { workspace = true }
 governor = { workspace = true }
 url = { workspace = true }
 rustc-hash = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "dispatcher"
+harness = false

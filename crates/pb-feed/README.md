@@ -107,6 +107,10 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,
   same-millisecond and duplicate snapshot handling, atomic snapshot emission,
   lifecycle events, and run loop shutdown.
+- **Benchmark** (`cargo bench -p pb-feed`, `benches/dispatcher.rs`) measures the
+  normalize hot path end-to-end through the async pipeline — JSON parse +
+  normalize + shadow-book apply + venue cross-check + channel handoff — at
+  ~480 ns / ~2.1M `price_change` entries per second. See `docs/latency.md`.
 
 ## Docs to Update After Changes
 

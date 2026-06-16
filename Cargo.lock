@@ -2711,6 +2711,7 @@ dependencies = [
 name = "pb-feed"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "futures-util",
  "governor",
  "pb-book",

@@ -16,10 +16,14 @@ WebSocket frame arrival
     │   └─ Price change delta     ~0.5 µs
     │   └─ Last trade price       ~0.3 µs
     │
-    ├─ Dispatcher normalize       ~1–3 µs     (parse + intern + sequence)
+    ├─ Dispatcher normalize       ~480 ns/entry (measured, full async pipeline)
     │   └─ FixedPrice::try_from   ~30 ns
     │   └─ FxHashMap lookup       ~10 ns
+    │   └─ shadow-book apply +    ~included    (A.74 cross-check vs venue
+    │      best_bid/ask mismatch                best_bid/ask per price_change entry)
     │   └─ Channel send           ~50–100 ns
+    │   (`cargo bench -p pb-feed`: ~2.1M price_change entries/s incl. JSON parse,
+    │    normalize, shadow-book cross-check, and channel handoff)
     │
     ├─ Book update                ~50–200 ns  (BTreeMap insert/remove)
     │   └─ apply_delta            ~50 ns
