@@ -432,6 +432,32 @@ analysis is not re-chased:
   `Arc<str>` change across the whole persisted model (WAL codec + Parquet + CH) —
   out of proportion to a per-snapshot cost. **#16 (format! on rare error path) —
   deferred:** low value, non-steady-state.
+### Second pass (different lenses: replay/storage/SQL/boundary/coverage/regression)
+
+A second 6-lens review (70 agents) found 14 more majority-confirmed findings:
+
+- **Replay determinism (fixed):** reset-boundary leak in initial-snapshot
+  collection (`engine.rs` — a pre-reset snapshot sharing the chosen snapshot's
+  ordering timestamp leaked into the rebuilt book in ExchangeTime mode; regression
+  test added); ClickHouse ingest-read `ORDER BY` extended with `event_kind,
+  sequence`; checkpoint reads tiebreak on `wal_offset` (no migration).
+- **Durability (fixed):** ParquetSink had the *same* drain-timeout silent-loss
+  bug ClickHouseSink had — now returns Err on timeout (supervisor sees incomplete
+  shutdown); two tests updated to model the real sender-drop shutdown.
+- **Security (fixed):** `list_datasets` interpolated the config-sourced database
+  name raw into SQL — added `escape_ch_string_literal` + injection test.
+- **Overflow (fixed):** sequence `+ 1` (book `check_sequence`, `Sequence::next`)
+  panics at `u64::MAX` under overflow-checks → `wrapping_add` + boundary tests.
+- **Coverage (added):** ExchangeTime/RecvTime parity, checkpoint exact-offset
+  skip, crossed-snapshot-at-materialization.
+- **Verified FALSE POSITIVE (documented, not changed):** book `total_*_raw`
+  subtraction "underflow" (#8/#10) — `old_raw` is always 0 or a value read from
+  the map and `total` is the exact sum of map values, so `old_raw <= total` is
+  structural; the malformed-feed concern doesn't apply (old_raw is never from the
+  delta). Documented the invariant rather than adding hot-path checked arithmetic.
+- **Already covered (no new test):** WAL incremental tail
+  (`reader_tails_appended_records_incrementally`).
+
 - **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** the periodic
   fdatasync and prune (read_dir + metadata + remove_file) are blocking syscalls
   run on the ingest `select!` loop. Wrapped both in `tokio::task::block_in_place`
