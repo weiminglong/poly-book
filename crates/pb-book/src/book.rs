@@ -57,6 +57,12 @@ impl L2Book {
         self.total_bid_raw = 0;
         self.total_ask_raw = 0;
 
+        // `old_raw` is always either 0 (new price) or the size previously stored
+        // at this price in the map, and `total_*_raw` is maintained as the exact
+        // sum of all stored sizes. So `old_raw <= total_*_raw` is a structural
+        // invariant and the subtraction cannot underflow — no checked arithmetic
+        // is needed here (HFT-review verified this is not reachable from feed data,
+        // since old_raw is sourced from the map, never the incoming delta).
         for &(price, size) in bids {
             if !size.is_zero() {
                 let old_raw = self
@@ -169,8 +175,14 @@ impl L2Book {
     /// sentinel disabled detection exactly post-snapshot/post-checkpoint where
     /// `sequence == 0` is legitimate (A.148).
     pub fn check_sequence(&self, incoming: Sequence) -> Result<(), BookError> {
-        if self.seq_initialized && incoming.raw() != self.sequence.raw() + 1 {
-            let expected = self.sequence.raw() + 1;
+        // wrapping_add, not `+ 1`: with overflow-checks = true (release profile,
+        // ADR-0007) a plain `+ 1` panics when the stored/replayed sequence is
+        // u64::MAX. Sequence values can come from corrupt storage or a hostile
+        // feed, so harden the comparison rather than risk a panic on the
+        // replay/ingest path (HFT-review finding). Wrapping is the correct
+        // "next sequence" semantics at the boundary.
+        let expected = self.sequence.raw().wrapping_add(1);
+        if self.seq_initialized && incoming.raw() != expected {
             let got = incoming.raw();
             return Err(BookError::SequenceGap {
                 asset_id: self.asset_id.to_string(),
@@ -374,6 +386,17 @@ mod tests {
         let book = make_book();
         assert!(book.check_sequence(Sequence::new(2)).is_ok());
         assert!(book.check_sequence(Sequence::new(5)).is_err());
+    }
+
+    #[test]
+    fn check_sequence_wraps_at_u64_max() {
+        // With overflow-checks = true, a plain `sequence + 1` would panic when the
+        // stored sequence is u64::MAX. wrapping_add makes the next expected
+        // sequence 0 — no panic, correct wrap semantics (HFT-review finding).
+        let mut book = L2Book::new(AssetId::new("wrap"));
+        book.apply_snapshot(&[], &[], Sequence::new(u64::MAX), 1);
+        assert!(book.check_sequence(Sequence::new(0)).is_ok());
+        assert!(book.check_sequence(Sequence::new(2)).is_err());
     }
 
     #[test]
