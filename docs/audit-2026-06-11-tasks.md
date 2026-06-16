@@ -504,6 +504,41 @@ the parallel workspace run saturated the CPU (they passed in isolation). Made th
 timeout config-driven (`api.http_request_timeout_secs`, default 30s in prod;
 tests use 600s). Full workspace gate now deterministically green.
 
+### Fourth pass (new lenses: security/shutdown-lifecycle/resource-leaks/atomics/docs-vs-code/error-paths)
+
+A fourth 6-lens review (73 agents) found 17 confirmed; the substantive ones fixed:
+
+- **Panic-on-setup (fixed):** clock `expect("system clock before epoch")` in
+  discover/market_discovery → saturate-to-0 (matches `now_micros`); the SIGTERM
+  handler `.expect()` (was in a detached spawn — a failure silently broke ALL
+  shutdown signaling) → register synchronously before the spawn and propagate;
+  `RestClient::new` `.unwrap_or_else(Client::new)` (silently dropped REST timeouts)
+  → returns `Result`, propagates `build()?`.
+- **Concurrency/lifecycle (fixed):** WS subscribe TOCTOU (is_asset_active +
+  subscribe under two locks → spurious 503) → single-lock subscribe-is-authority;
+  the feed consumer abandoned buffered records on `token.cancelled()` → drain on
+  cancel (mirrors the sink drains).
+- **Security defense-in-depth (fixed):** `token_id`/`slug` interpolated raw into
+  REST URLs → `reqwest::Url::parse_with_params` (percent-encoded) + structured-field
+  logging.
+- **Resource (fixed):** resnapshot `last_fetch` map now evicts past-debounce
+  entries (bounded under rotation).
+- **Docs (fixed):** operations.md `[api]` gained `http_request_timeout_secs` +
+  `auth_token`.
+- **Documented as correct / benign / covered (no change):** #7 (serve_api warms
+  the read model before binding — fine for the non-durable combined mode);
+  #10/#17 (`needs_resync`/`wal_lag_bytes` `Relaxed` — semantically correct for
+  standalone status flags that don't guard other memory); #15 (dispatcher per-asset
+  maps — bounded by the per-market dispatcher lifecycle / fixed token set); #16
+  (set_active_assets retain/insert — verified correct).
+
+**Convergence:** four adversarial passes (backend logic → replay/storage →
+frontend/integration → security/lifecycle) have now run. Pass 4's yield was
+robustness/defense-in-depth (its one "critical" was a pre-epoch-clock panic), not
+the data-corruption class the original audit found — clear diminishing returns.
+The review program is treated as converged; further proactive passes are paused in
+favor of maintenance cadence (act on new direction / regressions).
+
 **Deferred (attended): #9 unknown-config-key validation.** A typo'd config key is
 silently ignored. The robust fix is a typed-config struct with
 `#[serde(deny_unknown_fields)]`, but the code reads config ad-hoc via `get_int`,
