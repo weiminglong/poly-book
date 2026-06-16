@@ -10,6 +10,7 @@ cargo check                                          # type-check all crates
 cargo test --workspace --exclude pb-integration-tests # unit + property tests
 cargo bench                                          # Criterion benchmarks (pb-types, pb-book, pb-wal, pb-api, pb-service)
 cargo +nightly fuzz run fuzz_book_delta               # fuzz targets (requires nightly)
+cargo +nightly fuzz run fuzz_codec_decode             # WAL codec decode fuzz target (requires nightly)
 cargo +nightly fuzz run fuzz_query_guard              # query guard fuzz target (requires nightly)
 cargo run -- --help                                  # CLI binary
 ```
@@ -133,7 +134,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `bench` — `cargo bench --workspace --no-run` (compiles every Criterion benchmark so the latency harness can't rot; statistical regression gating is local-only, not on shared runners)
 - `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
-- `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta); additional local target `fuzz_query_guard`
+- `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta, query guard, WS deser, WAL codec decode, fixed-point parse)
 - `miri` — undefined behavior checks on pb-types, pb-book
 
 Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny).

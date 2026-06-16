@@ -181,6 +181,14 @@ jobs:
       # blocklist + server-side readonly/limit enforcement.
       - name: Fuzz query guard (30s)
         run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
+      # The deserialization-path targets (audit P2-CI-1): a malformed WS frame or
+      # WAL codec frame must error, never panic the ingest/replay process.
+      - name: Fuzz WS deserialization (30s)
+        run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
+      - name: Fuzz WAL codec decode (30s)
+        run: cargo +nightly fuzz run fuzz_codec_decode -- -max_total_time=30 -timeout=10
+      - name: Fuzz fixed-point parse (30s)
+        run: cargo +nightly fuzz run fuzz_fixed_price -- -max_total_time=30 -timeout=10
 
   release-build:
     name: Release build

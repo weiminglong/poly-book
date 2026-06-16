@@ -42,4 +42,9 @@ name = "fuzz_query_guard"
 path = "fuzz_targets/fuzz_query_guard.rs"
 doc = false
 
+[[bin]]
+name = "fuzz_codec_decode"
+path = "fuzz_targets/fuzz_codec_decode.rs"
+doc = false
+
 [workspace]
