@@ -758,6 +758,11 @@ async fn parquet_sink_flushes_on_cancellation() {
     let handle = tokio::spawn(async move { sink.run_with_token(token_clone).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
+    // Model the production shutdown sequence: the upstream drops the sink's sender
+    // (the fanout task ends) AND the token is cancelled. The sink drains to
+    // completion (recv -> None) rather than blocking on a live-but-idle sender,
+    // which would now (correctly) be reported as an incomplete-shutdown error.
+    drop(tx);
     token.cancel();
 
     handle.await.unwrap().unwrap();
@@ -834,7 +839,7 @@ async fn parquet_sink_drains_queued_records_on_shutdown() {
 async fn parquet_sink_empty_channel_no_files() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);
-    let (_tx, rx) = mpsc::channel::<PersistedRecord>(32);
+    let (tx, rx) = mpsc::channel::<PersistedRecord>(32);
     let token = CancellationToken::new();
 
     let sink = ParquetSink::new(rx, store.clone(), "data".into())
@@ -843,6 +848,9 @@ async fn parquet_sink_empty_channel_no_files() {
     let token_clone = token.clone();
     let handle = tokio::spawn(async move { sink.run_with_token(token_clone).await });
 
+    // Drop the sender (production drops it on shutdown) so the drain completes
+    // instead of blocking on a live-but-idle sender.
+    drop(tx);
     token.cancel();
     handle.await.unwrap().unwrap();
 

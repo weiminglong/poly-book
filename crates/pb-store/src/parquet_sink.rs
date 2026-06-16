@@ -60,10 +60,27 @@ impl ParquetSink {
                     // upstream already sent but the sink had not yet received
                     // (audit finding A.153). Bounded so a stuck upstream cannot
                     // block shutdown forever.
-                    self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
+                    let drain_complete =
+                        self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
                     if !buffer.is_empty() {
                         tracing::info!(buffered = buffer.len(), "ParquetSink flushing on shutdown");
                         self.flush(&mut buffer).await?;
+                    }
+                    if !drain_complete {
+                        // The drain hit its deadline with records still queued: an
+                        // incomplete shutdown that abandons data. Surface it as an
+                        // error so the supervisor records the failure instead of a
+                        // clean stop (HFT-review finding; mirrors ClickHouseSink).
+                        // The abandoned records remain durable in the WAL and are
+                        // recoverable via `reconcile`.
+                        let remaining = self.rx.len();
+                        tracing::error!(
+                            remaining,
+                            "ParquetSink drain timed out on shutdown; {remaining} records abandoned (recoverable from WAL via reconcile)"
+                        );
+                        return Err(StoreError::Other(format!(
+                            "ParquetSink shutdown drain timed out with {remaining} records still queued"
+                        )));
                     }
                     tracing::info!("ParquetSink graceful shutdown complete");
                     return Ok(());
@@ -93,7 +110,15 @@ impl ParquetSink {
     /// a deadline. The upstream drops its sender during a coordinated shutdown, so
     /// `recv()` returns `None` once the backlog is drained; the timeout guards
     /// against an upstream that never closes (audit finding A.153).
-    async fn drain_channel(&mut self, buffer: &mut Vec<PersistedRecord>, deadline: Duration) {
+    ///
+    /// Returns `true` if the channel drained to completion (`recv() → None`), or
+    /// `false` if the deadline was hit with records potentially still queued — the
+    /// caller surfaces that as an incomplete-shutdown error (HFT-review finding).
+    async fn drain_channel(
+        &mut self,
+        buffer: &mut Vec<PersistedRecord>,
+        deadline: Duration,
+    ) -> bool {
         let drained = tokio::time::timeout(deadline, async {
             let mut count = 0usize;
             while let Some(record) = self.rx.recv().await {
@@ -104,13 +129,16 @@ impl ParquetSink {
         })
         .await;
         match drained {
-            Ok(count) if count > 0 => {
-                tracing::info!(drained = count, "ParquetSink drained channel backlog on shutdown")
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        drained = count,
+                        "ParquetSink drained channel backlog on shutdown"
+                    );
+                }
+                true
             }
-            Ok(_) => {}
-            Err(_) => tracing::warn!(
-                "ParquetSink channel drain timed out on shutdown; some records may remain in the channel"
-            ),
+            Err(_) => false,
         }
     }
 
