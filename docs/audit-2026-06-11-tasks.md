@@ -432,7 +432,18 @@ analysis is not re-chased:
   `Arc<str>` change across the whole persisted model (WAL codec + Parquet + CH) —
   out of proportion to a per-snapshot cost. **#16 (format! on rare error path) —
   deferred:** low value, non-steady-state.
-- **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** see commit history.
+- **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** the periodic
+  fdatasync and prune (read_dir + metadata + remove_file) are blocking syscalls
+  run on the ingest `select!` loop. Wrapped both in `tokio::task::block_in_place`
+  (ingest + auto-ingest) so a blocking syscall does not tie up a multi-threaded
+  runtime worker / starve co-located tasks, while preserving single-writer flock
+  ownership. **Deferred (attended, durability-path risk):** the architecturally
+  pure HFT fix is to move the WAL writer into its own dedicated task that owns it
+  exclusively and receives append/flush/sync/prune over a channel, fully
+  decoupling the ingest loop's draining from the fsync. That is a substantial
+  refactor of the durability backbone (ordering, error propagation, shutdown
+  drain, recv→durable measurement, checkpoint offset stamping) best done with the
+  user present, not unattended.
 
 ---
 

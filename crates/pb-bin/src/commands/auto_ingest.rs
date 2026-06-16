@@ -116,9 +116,13 @@ pub async fn run(
                 biased;
                 _ = prune_tick.tick() => {
                     // Reclaim WAL segments all consumers have advanced past
-                    // (A.17/A.20/A.47).
+                    // (A.17/A.20/A.47). Blocking FS syscalls (read_dir + metadata +
+                    // remove_file) run via block_in_place so they do not stall the
+                    // runtime worker (HFT-review #9).
                     let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
-                    if let Err(e) = wal_writer.prune_with_backpressure(&consumers) {
+                    if let Err(e) =
+                        tokio::task::block_in_place(|| wal_writer.prune_with_backpressure(&consumers))
+                    {
                         tracing::warn!(error = %e, "WAL prune failed");
                     }
                     continue;
@@ -137,7 +141,9 @@ pub async fn run(
                 }
                 _ = sync_tick.tick() => {
                     if wal_unsynced {
-                        if let Err(e) = wal_writer.sync() {
+                        // fdatasync is a blocking syscall; block_in_place keeps it
+                        // off the runtime's task-scheduling path (HFT-review #8).
+                        if let Err(e) = tokio::task::block_in_place(|| wal_writer.sync()) {
                             tracing::error!(error = %e, "WAL sync failed — aborting ingest");
                             drain_wal_failed.store(true, Ordering::SeqCst);
                             drain_shutdown.cancel();

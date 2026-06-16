@@ -210,7 +210,13 @@ pub async fn run(
             }
             _ = sync_tick.tick() => {
                 if wal_unsynced {
-                    wal_writer.sync()
+                    // fdatasync is a blocking syscall (ms-scale, worse on busy
+                    // disks/EFS). block_in_place tells the multi-threaded runtime to
+                    // relocate other tasks off this worker for the syscall's
+                    // duration so it does not tie up a runtime thread (HFT-review
+                    // #8). The single-writer flock invariant is preserved — the
+                    // writer is still owned solely by this task.
+                    tokio::task::block_in_place(|| wal_writer.sync())
                         .map_err(|e| anyhow::anyhow!("WAL sync failed: {e}"))?;
                     wal_unsynced = false;
                     wal_unflushed = false;
@@ -219,7 +225,12 @@ pub async fn run(
             }
             _ = prune_tick.tick() => {
                 let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
-                if let Err(e) = wal_writer.prune_with_backpressure(&consumers) {
+                // prune does read_dir + per-segment metadata + remove_file (blocking
+                // FS syscalls); run it via block_in_place so it does not stall the
+                // runtime worker (HFT-review #9).
+                if let Err(e) =
+                    tokio::task::block_in_place(|| wal_writer.prune_with_backpressure(&consumers))
+                {
                     tracing::warn!(error = %e, "WAL prune failed");
                 }
                 continue;
