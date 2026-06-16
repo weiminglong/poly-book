@@ -454,6 +454,9 @@ impl LiveState {
             slug: None,
             sequence: state.book.sequence.raw(),
             last_update_us: state.book.last_update_us,
+            // True totals, not the depth-capped array lengths (HFT-review #4).
+            bid_depth: state.book.bid_depth(),
+            ask_depth: state.book.ask_depth(),
             bids: state
                 .book
                 .top_bids(depth)

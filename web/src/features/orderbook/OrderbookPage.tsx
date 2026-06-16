@@ -49,8 +49,10 @@ export default function OrderbookPage() {
             best_ask: wsSnapshot.asks[0] ?? null,
             mid_price: wsSnapshot.mid_price,
             spread: wsSnapshot.spread,
-            bid_depth: wsSnapshot.bids.length,
-            ask_depth: wsSnapshot.asks.length,
+            // True totals from the WS message, not the depth-capped array lengths
+            // (HFT-review #4).
+            bid_depth: wsSnapshot.bid_depth,
+            ask_depth: wsSnapshot.ask_depth,
             bids: wsSnapshot.bids,
             asks: wsSnapshot.asks,
             stale: httpSnapshot?.stale ?? false,
