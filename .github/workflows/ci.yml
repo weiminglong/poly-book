@@ -97,6 +97,24 @@ jobs:
       - name: Test alert rules (simulated incidents)
         run: promtool test rules monitoring/alerts_test.yml
 
+  bench:
+    name: Benchmarks (compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: ./.github/actions/setup-protobuf
+      # Compile every Criterion benchmark so the HFT latency harness (fixed-point,
+      # wire deser, book ops, WAL append, dispatcher normalize, read model,
+      # cross-backend) cannot silently rot. We do NOT run them to completion here:
+      # statistical regression gating needs stable, dedicated hardware, not a
+      # shared CI runner where noise produces false failures. Run `cargo bench`
+      # locally against a committed baseline for perf-regression checks.
+      - run: cargo bench --workspace --no-run
+
   web:
     name: Web (lint, typecheck, test, build)
     runs-on: ubuntu-latest

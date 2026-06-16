@@ -213,6 +213,9 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
   validation and offline incident unit tests (`monitoring` job)
+- `cargo bench --workspace --no-run` — compiles every Criterion benchmark so the
+  latency harness can't rot (`bench` job; statistical regression gating is
+  local-only, since shared runners are too noisy)
 - Web CI — `eslint`, `tsc -b`, `vitest run`, `vite build` in `web/`
 - Fuzz smoke test — `fuzz_wal_corruption` and `fuzz_book_delta` (30s each, nightly)
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book

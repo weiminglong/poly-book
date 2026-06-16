@@ -130,6 +130,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `fmt` — `cargo fmt --all -- --check`
 - `audit` — rustsec dependency vulnerability scan
 - `monitoring` — `promtool check rules` + `promtool test rules` (alert-rule syntax + offline incident unit tests)
+- `bench` — `cargo bench --workspace --no-run` (compiles every Criterion benchmark so the latency harness can't rot; statistical regression gating is local-only, not on shared runners)
 - `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
 - `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta); additional local target `fuzz_query_guard`
