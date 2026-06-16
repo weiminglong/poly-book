@@ -486,13 +486,23 @@ PriceLadder maxSize. **Skipped (documented):** #17/#18 (display-only parseFloat
 precision, only beyond realistic venue magnitudes) and #23 (schema-browser
 re-render — low/crit-0, non-hot static data). web: biome + tsc + 136 vitest green.
 
-**Remaining (next tick):**
-- **Wire-contract reconciliation (#4/#5/#14/#15):** HTTP DTO ↔ gRPC proto ↔ web
-  Zod schema field/type divergence (WS `bid_depth`/`ask_depth`, `total_count`
-  u32-vs-u64, `IntegritySummary` field names, `completeness` value domain). Needs
-  proto regen + DTO + web schema together.
-- **#9 unknown config keys** (strict validation) and **#25 metrics label alloc**
-  (micro-opt).
+**Wire-contract reconciliation (fixed):** #5/#14 gRPC `total_count` +
+`*_event_count` widened uint32→uint64 (were truncating; varint-compatible);
+#15 gRPC `completeness` now emits the HTTP two-value domain (complete/best_effort);
+#4 WS `BookUpdateMessage` now carries true `bid_depth`/`ask_depth` (DTO + populate
++ web schema + OrderbookPage uses them instead of capped array lengths). #25
+metrics route label: clone the `MatchedPath` (Arc bump) instead of per-request
+`String`. **Left as-is:** the HTTP-vs-gRPC IntegritySummary field-NAME divergence
+(`total_book_events` vs `book_event_count`) — renaming an established surface for
+cosmetic consistency is a breaking change and the only active consumer (SPA) uses
+HTTP.
+
+**Deferred (attended): #9 unknown-config-key validation.** A typo'd config key is
+silently ignored. The robust fix is a typed-config struct with
+`#[serde(deny_unknown_fields)]`, but the code reads config ad-hoc via `get_int`,
+so a validation struct must mirror every key exactly or it breaks startup; a
+partial whitelist is fragile/false-positive-prone. Substantial + risky for
+unattended execution — do with the user present.
 
 - **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** the periodic
   fdatasync and prune (read_dir + metadata + remove_file) are blocking syscalls
