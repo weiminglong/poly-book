@@ -52,6 +52,24 @@ jobs:
           echo "Pinned image: $IMAGE_DIGEST"
           echo "image=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
+      # Canary gate: before rolling the image out to the fleet, prove the exact
+      # pushed artifact actually boots and its CLI is wired (catches the
+      # broken-image class — unbuildable binary, missing runtime lib, bad entry
+      # point — that the audit flagged, A.51/P3-CHG-1). A failure here stops the
+      # deploy before any ECS task is touched. The ECS deployment circuit breaker
+      # (infra/ecs.tf) is the second, runtime safety net that auto-rolls-back a
+      # revision whose tasks fail to stabilize.
+      #
+      # NOTE: full shadow/canary traffic-diffing (mirror live feed to the new
+      # revision and diff its reconstructed books against stable before promotion)
+      # needs a live staging environment and is not performed here.
+      - name: Smoke-test the pushed image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" --config /etc/poly-book/default.toml replay --help
+
       - name: Deploy to ECS
         env:
           IMAGE: ${{ steps.build.outputs.image }}
