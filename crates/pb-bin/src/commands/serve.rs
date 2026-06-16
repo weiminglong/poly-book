@@ -121,6 +121,12 @@ pub async fn run(
             stale_after_secs,
             query_max_rows,
             query_timeout_secs,
+            http_request_timeout_secs: pipeline::cfg_int_min(
+                &settings,
+                "api.http_request_timeout_secs",
+                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
+                1,
+            ) as u64,
             // Optional bearer-token auth (A.158/P2-SEC-2); empty/unset = open.
             auth_token: settings
                 .get_string("api.auth_token")

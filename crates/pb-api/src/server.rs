@@ -35,6 +35,11 @@ pub struct ApiConfig {
     pub stale_after_secs: u64,
     pub query_max_rows: usize,
     pub query_timeout_secs: u64,
+    /// Per-request wall-clock timeout for request/response HTTP routes, in
+    /// seconds. Production defaults to `DEFAULT_HTTP_REQUEST_TIMEOUT_SECS` (30);
+    /// tests set a large value so the timeout is not load-sensitive under the
+    /// parallel workspace test run (HFT-review: replay-test CI flake).
+    pub http_request_timeout_secs: u64,
     /// Optional bearer token. When `Some`, every API/stream route requires
     /// `Authorization: Bearer <token>`; health probes stay open. `None` (default)
     /// keeps the read-only workstation open on its loopback bind (audit P2-SEC-2:
@@ -119,9 +124,10 @@ fn resolve_asset_id(state: &AppState, input: &str) -> String {
     }
 }
 
-/// Per-request timeout for the (request/response) HTTP API routes. Not applied
+/// Default per-request timeout (seconds) for request/response HTTP API routes,
+/// used when config does not override `api.http_request_timeout_secs`. Not applied
 /// to the long-lived WebSocket route, which must outlive any request timeout.
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Max in-flight HTTP API requests; excess requests wait for a slot. Bounds the
 /// blast radius of expensive historical/replay queries (A.92).
 const MAX_INFLIGHT_HTTP_REQUESTS: usize = 256;
@@ -152,7 +158,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/query/datasets", get(query_datasets))
         .route("/api/v1/query/sql", post(query_sql))
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
-        .layer(middleware::from_fn(http_request_timeout))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            http_request_timeout,
+        ))
         .layer(middleware::from_fn(http_concurrency_guard));
 
     // Liveness/readiness stay open (orchestrator probes must not need a token).
@@ -220,8 +229,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Reject a request that exceeds `HTTP_REQUEST_TIMEOUT` with 504 instead of
 /// letting an expensive query run unbounded (A.92).
-async fn http_request_timeout(req: Request<axum::body::Body>, next: Next) -> Response {
-    match tokio::time::timeout(HTTP_REQUEST_TIMEOUT, next.run(req)).await {
+async fn http_request_timeout(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let timeout = Duration::from_secs(state.config.http_request_timeout_secs);
+    match tokio::time::timeout(timeout, next.run(req)).await {
         Ok(resp) => resp,
         Err(_) => (
             StatusCode::GATEWAY_TIMEOUT,
@@ -718,6 +732,11 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                // Large in tests so the per-request timeout is not load-sensitive
+                // under the parallel workspace run (the replay tests do real
+                // Parquet reads and could exceed a 30s wall clock when the CPU is
+                // saturated by other crates' test binaries).
+                http_request_timeout_secs: 600,
                 auth_token: None,
             },
             broadcast: None,
@@ -1911,6 +1930,7 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                http_request_timeout_secs: 600,
                 auth_token: None,
             },
             broadcast: None,

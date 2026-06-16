@@ -54,6 +54,10 @@ historical_backend = "parquet"
 query_workbench_enabled = false
 query_max_rows = 10000
 query_timeout_secs = 30
+# Per-request wall-clock timeout (seconds) for request/response HTTP routes
+# (replay, integrity, etc.); an over-running request is rejected with 504. Does
+# not apply to the long-lived WebSocket stream.
+http_request_timeout_secs = 30
 # Optional bearer token. When set (non-empty), every API and WebSocket route
 # requires `Authorization: Bearer <token>`; health probes stay open. Leave unset
 # for the default loopback-only, no-auth workstation. Set this before exposing the

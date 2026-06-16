@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 /// `min` (e.g. a `0` flush interval that would busy-loop, or a `0` segment size)
 /// is equally pathological. This clamps to `min` and warns rather than letting a
 /// hostile/typo'd config produce undefined behavior (HFT-review: config bounds).
-fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
+pub(crate) fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
     let v = settings.get_int(key).unwrap_or(default);
     if v < min {
         tracing::warn!(
