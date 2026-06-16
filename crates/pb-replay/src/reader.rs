@@ -78,6 +78,13 @@ fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
 const PARQUET_READ_CONCURRENCY: usize = 8;
 const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
 
+/// Hard backstop on rows returned by a single unbounded ClickHouse read
+/// (ingest/execution events). Applied via `max_result_rows` +
+/// `result_overflow_mode = 'throw'` so a pathological window ERRORS loudly
+/// instead of silently truncating or OOM-ing the serve process (HFT-review
+/// finding). Far above any legitimate window's row count.
+const MAX_READ_ROWS: u64 = 5_000_000;
+
 impl ParquetReader {
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -1115,6 +1122,16 @@ impl ClickHouseReader {
         Self { client }
     }
 
+    /// A client clone that caps the result set at `MAX_READ_ROWS` and throws on
+    /// overflow, so an unbounded read errors loudly instead of materializing
+    /// millions of rows and OOM-ing the serve process (HFT-review finding).
+    fn bounded_client(&self) -> clickhouse::Client {
+        self.client
+            .clone()
+            .with_setting("max_result_rows", MAX_READ_ROWS.to_string())
+            .with_setting("result_overflow_mode", "throw")
+    }
+
     /// Compute integrity-summary counts entirely server-side.
     ///
     /// Issues two small aggregate queries (book-event `count()`, and validation
@@ -1172,7 +1189,7 @@ impl ClickHouseReader {
     ) -> Result<Vec<IngestEvent>, ReplayError> {
         let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us";
         let rows: Vec<IngestEventRow> = self
-            .client
+            .bounded_client()
             .query(ingest_query)
             .bind(start_us)
             .bind(end_us)
@@ -1548,7 +1565,11 @@ impl EventReader for ClickHouseReader {
             format!("{base_query} ORDER BY event_timestamp_us, order_id, event_kind")
         };
 
-        let mut request = self.client.query(&query).bind(start_us).bind(end_us);
+        let mut request = self
+            .bounded_client()
+            .query(&query)
+            .bind(start_us)
+            .bind(end_us);
         if let Some(order_id) = order_id {
             request = request.bind(order_id);
         }

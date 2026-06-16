@@ -18,6 +18,11 @@ use pb_service::{
 use pb_types::event::ReplayMode;
 use proto::workstation_service_server::{WorkstationService, WorkstationServiceServer};
 
+/// Maximum gRPC message size (encode + decode). Bounds response serialization so
+/// a wide query cannot OOM the serve process (HFT-review finding); large enough
+/// for legitimate reconstruct/timeline responses.
+const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
@@ -254,8 +259,15 @@ pub async fn start_grpc_server(
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let service = GrpcWorkstationService::new(replay, integrity, execution);
-    let server =
-        tonic::transport::Server::builder().add_service(WorkstationServiceServer::new(service));
+    // Bound the response encode size. The default permits multi-GB messages, so a
+    // wide reconstruct/timeline query against a busy asset could try to serialize
+    // an enormous response and OOM the serve process (HFT-review finding). 16 MiB
+    // comfortably holds legitimate responses while capping a runaway one; it pairs
+    // with the per-read LIMITs pushed into the ClickHouse reader.
+    let workstation = WorkstationServiceServer::new(service)
+        .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+        .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES);
+    let server = tonic::transport::Server::builder().add_service(workstation);
 
     // Bind up front so a bind failure (e.g. port in use) is returned to the
     // caller instead of being swallowed inside the spawned task while we log

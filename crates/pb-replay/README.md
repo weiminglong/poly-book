@@ -60,6 +60,11 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   (audit A.42); the two aggregate queries run concurrently via `try_join!`. The
   returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
   `validation_match_count`.
+- Unbounded ClickHouse reads (`read_ingest_events`, `read_execution_events`) go
+  through `bounded_client()`, which sets `max_result_rows = MAX_READ_ROWS` (5M) +
+  `result_overflow_mode = 'throw'`, so a pathological window ERRORS loudly instead
+  of materializing millions of rows and OOM-ing the serve process (HFT-review
+  finding). Verified against a live server (TOO_MANY_ROWS_OR_BYTES on overflow).
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
