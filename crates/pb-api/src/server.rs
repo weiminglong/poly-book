@@ -667,18 +667,22 @@ fn level_view(
 
 async fn track_request_metrics(req: Request<axum::body::Body>, next: Next) -> Response {
     let method = req.method().clone();
-    let route = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map(MatchedPath::as_str)
-        .unwrap_or("<unmatched>")
-        .to_string();
+    // Clone the MatchedPath (a cheap Arc<str> refcount bump) rather than
+    // allocating a fresh String per request via to_string(): MatchedPath::as_str
+    // borrows from `req`, which `next.run` consumes, so we must own the route
+    // before the call — but the Arc clone avoids the per-request heap allocation
+    // on the API hot path (HFT-review #25).
+    let matched = req.extensions().get::<MatchedPath>().cloned();
     let start = Instant::now();
     let response = next.run(req).await;
 
+    let route = matched
+        .as_ref()
+        .map(MatchedPath::as_str)
+        .unwrap_or("<unmatched>");
     pb_metrics::record_api_request_duration_ms(
         method.as_str(),
-        &route,
+        route,
         response.status().as_u16(),
         start.elapsed().as_secs_f64() * 1_000.0,
     );
