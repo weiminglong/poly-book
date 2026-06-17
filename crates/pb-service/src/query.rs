@@ -303,13 +303,17 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
 
 /// Inject LIMIT clause if not present and max_rows is set.
 fn inject_limit(sql: &str, max_rows: usize) -> String {
-    // Strip trailing content after the last unquoted semicolon using the
-    // sanitized form to identify semicolons in Normal state. This prevents
-    // trailing quoted identifiers (e.g. `SHOW;\`foo\``) from interfering
-    // with LIMIT injection.
+    // Strip everything from the FIRST unquoted semicolon onward, using the
+    // sanitized form to identify semicolons in Normal state. `validate_read_only`
+    // has already rejected anything with a non-empty trailing statement, so past
+    // the first unquoted `;` there is only whitespace and further `;` — cutting
+    // there yields the single real statement. (Using the *last* semicolon would
+    // keep an intermediate one, e.g. `SELECT 1;;` -> `SELECT 1;`, and appending
+    // LIMIT after it would re-introduce a second statement.) This also drops
+    // trailing quoted identifiers (e.g. `SHOW;\`foo\``) before LIMIT injection.
     let trimmed = sql.trim_end();
     let sanitized_full = sanitize_sql(trimmed);
-    let base = if let Some(pos) = sanitized_full.sql.rfind(';') {
+    let base = if let Some(pos) = sanitized_full.sql.find(';') {
         trimmed[..pos].trim_end()
     } else {
         trimmed
@@ -811,6 +815,75 @@ mod tests {
         let first = guard_sql(sql, &guard).unwrap();
         let second = guard_sql(&first, &guard).unwrap();
         assert_eq!(first, second, "LIMIT injection must be idempotent");
+    }
+
+    /// Property test for the invariant `fuzz_query_guard` enforces: whenever the
+    /// first guard pass accepts an input, its output must itself be guard-valid
+    /// (a stable, non-empty, single statement). This deterministically sweeps
+    /// short strings built from the parser-significant alphabet (semicolons,
+    /// quotes, comment markers, newlines, multi-byte chars) crossed with the
+    /// boundary `max_rows` values, so a regression is caught in CI without
+    /// relying on the stochastic fuzzer. Covers the `SELECT 1;;` (last- vs
+    /// first-semicolon) and multi-byte-offset cases that previously crashed.
+    #[test]
+    fn guard_output_is_always_guard_valid() {
+        let prefixes = [
+            "SELECT 1",
+            "SELECT 1 ",
+            "SHOW",
+            "SELECT",
+            "SELECT '",
+            "SELECT \"",
+            "SELECT `",
+            "DESCRIBE x",
+            "SELECT '1'",
+            "SELECT /*",
+            "SELECT --",
+            "SELECT '€'",
+        ];
+        let alpha = [
+            ' ', ';', '\'', '"', '`', '-', '/', '*', '\n', '(', ')', 'x', '1', '€',
+        ];
+        for p in prefixes {
+            for max_rows in [0usize, 1, 100] {
+                let guard = QueryGuard {
+                    max_rows,
+                    timeout_secs: 1,
+                };
+                let n = alpha.len();
+                for len in 0..=3usize {
+                    for idx in 0..n.pow(len as u32) {
+                        let mut sql = String::from(p);
+                        let mut k = idx;
+                        for _ in 0..len {
+                            sql.push(alpha[k % n]);
+                            k /= n;
+                        }
+                        // Only inputs the first pass accepts exercise the property.
+                        let Ok(first) = guard_sql(&sql, &guard) else {
+                            continue;
+                        };
+                        assert!(
+                            !first.trim().is_empty(),
+                            "guarded SQL must not be empty: {sql:?} -> {first:?}",
+                        );
+                        assert!(
+                            !first.trim_end().ends_with(';'),
+                            "guarded SQL must not keep a trailing semicolon: {sql:?} -> {first:?}",
+                        );
+                        let second = guard_sql(&first, &guard).unwrap_or_else(|e| {
+                            panic!(
+                                "re-guarding accepted output failed: {sql:?} -> {first:?}: {e:?}"
+                            )
+                        });
+                        assert_eq!(
+                            first, second,
+                            "guard must be idempotent: {sql:?} -> {first:?} != {second:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Regression: a multi-byte char inside a quote or comment must not shift
