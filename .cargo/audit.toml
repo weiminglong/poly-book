@@ -1,16 +1,14 @@
-# Advisories to ignore until upstream fixes are available.
+# Advisories handled outside the audit allowlist.
+#
+# The astral-tokio-tar advisories (RUSTSEC-2026-0066/0112/0113 on 0.5.6 and
+# RUSTSEC-2026-0145 on 0.6.1) are resolved by pinning that test-only crate
+# (pulled transitively by the testcontainers dev dependency) to >=0.6.2 in
+# Cargo.lock, so no ignore is required.
+#
+# `bincode` 1.3.3 (RUSTSEC-2025-0141) and a few transitive crates surface as
+# *informational* "unmaintained"/"unsound" warnings; cargo-audit does not fail
+# the build on those (only on vulnerabilities), so they are left visible here
+# rather than suppressed. cargo-deny's stricter policy ignores the intentionally
+# -frozen bincode advisory in deny.toml with justification.
 [advisories]
-ignore = [
-    # astral-tokio-tar 0.5.6: low-severity PAX extension validation issue.
-    # Transitive dev dependency via testcontainers 0.27.1.
-    # Remove once testcontainers updates to astral-tokio-tar >=0.6.0.
-    "RUSTSEC-2026-0066",
-    # astral-tokio-tar 0.5.6: PAX header desynchronization (file smuggling).
-    # Transitive dev dependency via testcontainers 0.27.1. Patched in 0.6.1.
-    # Remove once testcontainers updates to astral-tokio-tar >=0.6.1.
-    "RUSTSEC-2026-0112",
-    # astral-tokio-tar 0.5.6: unpack_in can chmod directories via symlinks.
-    # Transitive dev dependency via testcontainers 0.27.1. Patched in 0.6.1.
-    # Remove once testcontainers updates to astral-tokio-tar >=0.6.1.
-    "RUSTSEC-2026-0113",
-]
+ignore = []
