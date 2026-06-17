@@ -74,9 +74,12 @@ fn sample_records() -> Vec<PersistedRecord> {
 #[test]
 fn split_schemas_have_expected_fields() {
     let book_schema = book_event_schema();
-    assert_eq!(book_schema.fields().len(), 11);
+    // 12 fields: the 11 original columns plus `ingest_ordinal`, the monotonic
+    // arrival-order tiebreaker added for replay determinism (A.116).
+    assert_eq!(book_schema.fields().len(), 12);
     assert!(book_schema.field_with_name("event_kind").is_ok());
     assert!(book_schema.field_with_name("source").is_ok());
+    assert!(book_schema.field_with_name("ingest_ordinal").is_ok());
 
     let trade_schema = trade_event_schema();
     assert_eq!(trade_schema.fields().len(), 12);
