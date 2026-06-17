@@ -114,6 +114,23 @@ fn escape_ch_string_literal(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
+/// Push a byte-length-preserving blank for a masked char so the sanitized
+/// string stays byte-aligned with the original. A newline is kept verbatim (it
+/// terminates line comments and is itself a single byte); any other char is
+/// replaced by `len_utf8()` spaces. Without this, a multi-byte char inside a
+/// quote or comment would collapse to one byte, shifting every later index and
+/// making callers that slice the *original* by a sanitized-derived offset (e.g.
+/// `inject_limit`) panic on a non-char-boundary.
+fn push_blanked(out: &mut String, ch: char) {
+    if ch == '\n' {
+        out.push('\n');
+    } else {
+        for _ in 0..ch.len_utf8() {
+            out.push(' ');
+        }
+    }
+}
+
 fn sanitize_sql(sql: &str) -> SanitizeResult {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
@@ -159,7 +176,7 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 _ => sanitized.push(ch),
             },
             State::SingleQuote => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '\'' {
                     if chars.peek() == Some(&'\'') {
                         sanitized.push(' ');
@@ -170,7 +187,7 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::DoubleQuote => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '"' {
                     if chars.peek() == Some(&'"') {
                         sanitized.push(' ');
@@ -181,19 +198,19 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::Backtick => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '`' {
                     state = State::Normal;
                 }
             }
             State::LineComment => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '\n' {
                     state = State::Normal;
                 }
             }
             State::BlockComment => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '*' && chars.peek() == Some(&'/') {
                     sanitized.push(' ');
                     chars.next();
@@ -794,5 +811,38 @@ mod tests {
         let first = guard_sql(sql, &guard).unwrap();
         let second = guard_sql(&first, &guard).unwrap();
         assert_eq!(first, second, "LIMIT injection must be idempotent");
+    }
+
+    /// Regression: a multi-byte char inside a quote or comment must not shift
+    /// the byte offsets `inject_limit` uses to slice the original SQL. Before
+    /// `sanitize_sql` became byte-length-preserving, the sanitized string was
+    /// shorter than the original (each multi-byte char collapsed to one byte),
+    /// so `trimmed[..pos]` either panicked on a non-char-boundary or sliced
+    /// mid-quote and produced an unbalanced statement that failed re-guarding.
+    #[test]
+    fn guard_sql_multibyte_in_quote_is_balanced_and_idempotent() {
+        let guard = QueryGuard {
+            max_rows: 100,
+            timeout_secs: 1,
+        };
+        // Each of these passes the first guard pass; the result must itself be
+        // guard-valid (the property the fuzz target `fuzz_query_guard` checks).
+        for sql in [
+            "SELECT \"€\" ;",
+            "SELECT 'π' ;",
+            "SELECT 1 /* € */ ;",
+            "SELECT 1 --€\n;",
+            "SELECT `名` ;",
+        ] {
+            let first = guard_sql(sql, &guard)
+                .unwrap_or_else(|e| panic!("first guard pass failed for {sql:?}: {e:?}"));
+            let second = guard_sql(&first, &guard)
+                .unwrap_or_else(|e| panic!("second guard pass failed for {sql:?}: {e:?}"));
+            assert_eq!(first, second, "guard must be idempotent for {sql:?}");
+            assert!(
+                !first.trim_end().ends_with(';'),
+                "guarded SQL must not keep a trailing semicolon for {sql:?}",
+            );
+        }
     }
 }
