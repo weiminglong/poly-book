@@ -311,9 +311,12 @@ mod tests {
             ..WsConfig::default()
         };
         let result = backoff_ms(&config, 0);
-        // base=100, jitter up to 25 -> result in [100, 125)
-        assert!(result >= 100);
-        assert!(result < 125);
+        // capped=100, jitter = fastrand_jitter(100/4 + 1) is in [0, 25], so the
+        // result is in the inclusive band [100, 125]. The upper bound must be
+        // inclusive: asserting `< 125` flaked ~1/26 of the time when jitter hit
+        // exactly 25.
+        assert!(result >= 100, "below base: {result}");
+        assert!(result <= 125, "above jitter band: {result}");
     }
 
     #[test]
