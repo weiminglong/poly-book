@@ -75,10 +75,14 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - A liveness watchdog forces a reconnect if no frame (data or pong) arrives within
   ~3× the ping interval, so a half-open TCP connection cannot silently stall the
   feed for many minutes.
-- On reconnect success, the dispatcher clears per-asset sequence and stale
-  snapshot tracking before emitting `SourceReset`, so downstream replay does not
-  stitch state across feed sessions or reject the first fresh post-reconnect
-  snapshot as stale.
+- On reconnect success, the dispatcher clears per-asset sequence, stale snapshot
+  tracking, shadow validation books, and the asset-id interning cache before
+  emitting `SourceReset`, so downstream replay does not stitch state across feed
+  sessions or reject the first fresh post-reconnect snapshot as stale. Clearing the
+  interning cache also bounds its memory on a long-lived process with continuous
+  5-min market rollover (it would otherwise retain one `Arc<str>` per asset ever
+  seen). The per-asset sequence counter uses `wrapping_add` to stay panic-free under
+  `overflow-checks`, matching `L2Book`/`Sequence`.
 - Snapshot staleness: only *strictly older* snapshots (`exchange_ts < last_ts`)
   are skipped. Polymarket emits one `book` per trade at millisecond resolution,
   so two trades in the same millisecond produce equal-timestamp snapshots whose

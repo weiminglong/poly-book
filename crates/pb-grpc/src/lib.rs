@@ -90,6 +90,9 @@ pub struct GrpcWorkstationService {
     replay: AnyReplayService,
     integrity: AnyIntegrityService,
     execution: AnyExecutionService,
+    /// Upper bound on requested reconstruct depth, mirroring the HTTP API's
+    /// `api.max_depth` so both surfaces reject the same oversized requests.
+    max_depth: usize,
 }
 
 impl GrpcWorkstationService {
@@ -97,11 +100,13 @@ impl GrpcWorkstationService {
         replay: AnyReplayService,
         integrity: AnyIntegrityService,
         execution: AnyExecutionService,
+        max_depth: usize,
     ) -> Self {
         Self {
             replay,
             integrity,
             execution,
+            max_depth,
         }
     }
 }
@@ -121,7 +126,20 @@ impl WorkstationService for GrpcWorkstationService {
             Some(0) => {
                 return Err(Status::invalid_argument("depth must be greater than zero"));
             }
-            Some(d) => Some(d as usize),
+            Some(d) => {
+                // Mirror the HTTP guard's upper bound (api.max_depth): without it the
+                // gRPC surface would return more levels than HTTP allows for the same
+                // query. The result is book-bounded and the response is size-capped, so
+                // this is a contract-consistency guard rather than a DoS fix.
+                let d = d as usize;
+                if d > self.max_depth {
+                    return Err(Status::invalid_argument(format!(
+                        "depth {d} exceeds max_depth {}",
+                        self.max_depth
+                    )));
+                }
+                Some(d)
+            }
             None => None,
         };
 
@@ -269,9 +287,10 @@ pub async fn start_grpc_server(
     replay: AnyReplayService,
     integrity: AnyIntegrityService,
     execution: AnyExecutionService,
+    max_depth: usize,
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
-    let service = GrpcWorkstationService::new(replay, integrity, execution);
+    let service = GrpcWorkstationService::new(replay, integrity, execution, max_depth);
     // Bound the response encode size. The default permits multi-GB messages, so a
     // wide reconstruct/timeline query against a busy asset could try to serialize
     // an enormous response and OOM the serve process (HFT-review finding). 16 MiB
@@ -399,9 +418,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         // Give the server a moment to bind.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -440,9 +466,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -477,9 +510,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -519,9 +559,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -671,9 +718,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -701,6 +755,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reconstruct_rejects_depth_above_max() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        write_test_data(base).await;
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        // max_depth = 5 mirrors the HTTP api.max_depth guard.
+        let handle = start_grpc_server(addr, replay, integrity, execution, 5, shutdown.clone())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let status = client
+            .reconstruct(proto::ReconstructRequest {
+                asset_id: "test-asset".into(),
+                at_us: 1_700_000_000_000_000 + 1,
+                mode: "recv_time".into(),
+                depth: Some(6),
+            })
+            .await
+            .expect_err("depth above max_depth must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("max_depth"),
+            "unexpected message: {}",
+            status.message()
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
     async fn test_reconstruct_not_found_for_missing_asset() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().to_str().unwrap();
@@ -711,9 +807,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -749,9 +852,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -788,9 +898,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -830,9 +947,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -871,9 +995,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (replay, integrity, execution) = build_test_services(base);
 
-        let handle = start_grpc_server(addr, replay, integrity, execution, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
