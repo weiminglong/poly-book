@@ -166,6 +166,10 @@ export const bookUpdateMessageSchema = z.object({
   slug: z.string().optional(),
   sequence: z.number(),
   last_update_us: z.number(),
+  // True total book depth (HFT-review #4) — distinct from bids/asks length, which
+  // is capped at the streamed depth.
+  bid_depth: z.number(),
+  ask_depth: z.number(),
   bids: z.array(priceLevelViewSchema),
   asks: z.array(priceLevelViewSchema),
   mid_price: z.number().nullable(),

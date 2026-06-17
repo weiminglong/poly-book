@@ -1,6 +1,8 @@
+use std::time::{Duration, Instant};
+
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message, Connector};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -10,6 +12,10 @@ const DEFAULT_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/mark
 const DEFAULT_PING_INTERVAL_SECS: u64 = 10;
 const DEFAULT_BASE_BACKOFF_MS: u64 = 100;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
+/// A session that stayed connected at least this long is considered stable, and
+/// resets the reconnect backoff so the next disconnect retries quickly instead
+/// of inheriting an ever-growing delay (audit finding A.106).
+const STABLE_SESSION_MS: u64 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct WsConfig {
@@ -60,18 +66,14 @@ pub struct WsClient {
     asset_ids: Vec<String>,
     tx: mpsc::Sender<FeedMessage>,
     config: WsConfig,
-    /// Reused across reconnections for TLS session caching.
-    tls_connector: native_tls::TlsConnector,
 }
 
 impl WsClient {
     pub fn new(asset_ids: Vec<String>, tx: mpsc::Sender<FeedMessage>) -> Result<Self, FeedError> {
-        let tls_connector = native_tls::TlsConnector::new()?;
         Ok(Self {
             asset_ids,
             tx,
             config: WsConfig::default(),
-            tls_connector,
         })
     }
 
@@ -93,6 +95,7 @@ impl WsClient {
             }
 
             let session_id = format!("ws-session-{}", attempt + 1);
+            let session_started = Instant::now();
             match self
                 .connect_and_listen_with_token(&token, &session_id)
                 .await
@@ -108,6 +111,11 @@ impl WsClient {
                     warn!("ws connection error: {e}");
                 }
             }
+            // A session that stayed up long enough is "stable": reset the
+            // backoff so a later disconnect reconnects promptly instead of
+            // inheriting a 30s delay accumulated over the process lifetime.
+            let session_was_stable =
+                session_started.elapsed() >= Duration::from_millis(STABLE_SESSION_MS);
 
             if token.is_cancelled() {
                 info!("ws client shutdown requested");
@@ -125,13 +133,17 @@ impl WsClient {
             let backoff = self.backoff_ms(attempt);
             info!(backoff_ms = backoff, attempt, "reconnecting");
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
+                _ = tokio::time::sleep(Duration::from_millis(backoff)) => {}
                 _ = token.cancelled() => {
                     info!("ws client shutdown during backoff");
                     return Ok(());
                 }
             }
-            attempt = attempt.saturating_add(1);
+            attempt = if session_was_stable {
+                0
+            } else {
+                attempt.saturating_add(1)
+            };
         }
     }
 
@@ -140,9 +152,12 @@ impl WsClient {
         token: &CancellationToken,
         session_id: &str,
     ) -> Result<(), FeedError> {
-        let connector = Connector::NativeTls(self.tls_connector.clone());
+        // Pass no explicit connector: with the `rustls-tls-webpki-roots` feature
+        // tokio-tungstenite builds a default rustls connector using the bundled
+        // Mozilla root store, so we depend only on rustls (no openssl/native-tls
+        // C dependency — audit finding P2-BUILD-3).
         let (ws_stream, _) =
-            connect_async_tls_with_config(&self.config.ws_url, None, true, Some(connector)).await?;
+            connect_async_tls_with_config(&self.config.ws_url, None, true, None).await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, session_id, "ws connected");
 
@@ -156,9 +171,15 @@ impl WsClient {
         sink.send(Message::Text(sub.to_string().into())).await?;
         debug!(assets = ?self.asset_ids, "subscribed");
 
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(
-            self.config.ping_interval_secs,
-        ));
+        let ping_secs = self.config.ping_interval_secs.max(1);
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_secs));
+        // Liveness watchdog: if no frame (data OR pong) arrives within this
+        // window, the TCP connection is likely half-open and would otherwise
+        // stall the feed silently for many minutes. Force a reconnect instead
+        // (audit finding A.107).
+        let read_idle_timeout = Duration::from_secs(ping_secs.saturating_mul(3));
+        let mut watchdog = tokio::time::interval(Duration::from_secs(ping_secs));
+        let mut last_activity = Instant::now();
 
         loop {
             tokio::select! {
@@ -171,7 +192,20 @@ impl WsClient {
                     sink.send(Message::Ping(vec![].into())).await?;
                     debug!("sent ping");
                 }
+                _ = watchdog.tick() => {
+                    let idle = last_activity.elapsed();
+                    if idle >= read_idle_timeout {
+                        warn!(
+                            idle_secs = idle.as_secs(),
+                            timeout_secs = read_idle_timeout.as_secs(),
+                            "ws read-idle timeout; connection appears half-open, forcing reconnect"
+                        );
+                        return Err(FeedError::ConnectionStalled);
+                    }
+                }
                 msg = stream.next() => {
+                    // Any received frame proves the connection is alive.
+                    last_activity = Instant::now();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             let raw = WsRawMessage {
@@ -222,14 +256,24 @@ impl WsClient {
     }
 
     fn backoff_ms(&self, attempt: u32) -> u64 {
-        let exp = self
-            .config
-            .reconnect_base_delay_ms
-            .saturating_mul(1u64 << attempt.min(15));
-        let jitter = fastrand_jitter(exp / 4);
-        exp.saturating_add(jitter)
-            .min(self.config.reconnect_max_delay_ms)
+        backoff_ms(&self.config, attempt)
     }
+}
+
+/// Exponential backoff with jitter. The exponential term is capped to leave
+/// headroom below `reconnect_max_delay_ms` so that jitter still varies the delay
+/// at the cap — otherwise every client reconnects at exactly the max, defeating
+/// jitter precisely when a thundering herd matters most (audit finding A.150).
+fn backoff_ms(config: &WsConfig, attempt: u32) -> u64 {
+    let max = config.reconnect_max_delay_ms;
+    let exp = config
+        .reconnect_base_delay_ms
+        .saturating_mul(1u64 << attempt.min(15));
+    // Cap the exponential part to 3/4 of max, reserving the top quarter for jitter.
+    let ceiling = max.saturating_sub(max / 4);
+    let capped = exp.min(ceiling);
+    let jitter = fastrand_jitter(capped / 4 + 1);
+    capped.saturating_add(jitter).min(max)
 }
 
 fn now_us() -> u64 {
@@ -259,18 +303,6 @@ fn fastrand_jitter(max: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Helper to create a WsClient-like backoff calculator without TLS.
-    /// We replicate the backoff_ms logic directly since WsClient::new requires
-    /// TLS which isn't needed for unit-testing backoff math.
-    fn backoff_ms(config: &WsConfig, attempt: u32) -> u64 {
-        let exp = config
-            .reconnect_base_delay_ms
-            .saturating_mul(1u64 << attempt.min(15));
-        let jitter = fastrand_jitter(exp / 4);
-        exp.saturating_add(jitter)
-            .min(config.reconnect_max_delay_ms)
-    }
-
     #[test]
     fn backoff_attempt_zero_equals_base() {
         let config = WsConfig {
@@ -279,9 +311,12 @@ mod tests {
             ..WsConfig::default()
         };
         let result = backoff_ms(&config, 0);
-        // base=100, jitter up to 25 -> result in [100, 125)
-        assert!(result >= 100);
-        assert!(result < 125);
+        // capped=100, jitter = fastrand_jitter(100/4 + 1) is in [0, 25], so the
+        // result is in the inclusive band [100, 125]. The upper bound must be
+        // inclusive: asserting `< 125` flaked ~1/26 of the time when jitter hit
+        // exactly 25.
+        assert!(result >= 100, "below base: {result}");
+        assert!(result <= 125, "above jitter band: {result}");
     }
 
     #[test]
@@ -318,9 +353,12 @@ mod tests {
             ..WsConfig::default()
         };
 
-        // At attempt 10, base * 2^10 = 102,400 >> max=500.
+        // At attempt 10, base * 2^10 = 102,400 >> max=500. The result must stay
+        // at/below max but still be jittered (not collapsed to exactly max), so
+        // it falls in the reserved top-quarter band [0.75*max, max] (A.150).
         let result = backoff_ms(&config, 10);
-        assert_eq!(result, 500);
+        assert!(result <= 500, "backoff exceeded max: {result}");
+        assert!(result >= 375, "backoff not in jitter band: {result}");
     }
 
     #[test]

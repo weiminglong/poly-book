@@ -3,7 +3,7 @@ use pb_types::event::{
     BookCheckpoint, BookEvent, BookEventKind, IngestEvent, IngestEventKind, MarketDataWindow,
     ReplayMode, ReplayValidation,
 };
-use pb_types::{AssetId, EventProvenance, Sequence, Side};
+use pb_types::{AssetId, DataSource, EventProvenance, Sequence, Side};
 use tracing::debug;
 
 use crate::error::ReplayError;
@@ -109,14 +109,35 @@ impl<R: EventReader> ReplayEngine<R> {
             return Ok(None);
         };
 
-        let replay = self
-            .reconstruct_at(asset_id, reference.checkpoint_timestamp_us, mode)
+        // Reconstruct by seeding from the checkpoint *strictly before* the
+        // reference and replaying deltas forward to the reference timestamp,
+        // then compare against the independent reference checkpoint. The old
+        // code called `reconstruct_at(reference_ts)`, whose inclusive checkpoint
+        // bound re-read the reference checkpoint itself and an empty
+        // `[reference_ts, reference_ts]` window — so the book was seeded from
+        // the very thing it was compared against and `matched` was always true
+        // (audit findings A.8/A.23).
+        let reference_us = reference.checkpoint_timestamp_us;
+        let seed = self
+            .reader
+            .read_latest_checkpoint(asset_id, reference_us.saturating_sub(1))
             .await?;
-        let matched = books_match_checkpoint(&replay.book, &reference);
+        let start_us = seed
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_timestamp_us)
+            .unwrap_or_else(|| reference_us.saturating_sub(self.lookback_us));
+        let window = self
+            .reader
+            .read_market_data(asset_id, start_us, reference_us)
+            .await?;
+        let (book, _continuity_events, _used_checkpoint) =
+            reconstruct_book(asset_id, reference_us, mode, seed, window)?;
+
+        let matched = books_match_checkpoint(&book, &reference);
         let mismatch_summary = if matched {
             None
         } else {
-            Some(render_checkpoint_mismatch(&replay.book, &reference))
+            Some(render_checkpoint_mismatch(&book, &reference))
         };
         let persisted_at_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -175,10 +196,18 @@ fn reconstruct_book(
         );
         apply_checkpoint(&mut book, &checkpoint);
         used_checkpoint = true;
+        // Compare the checkpoint boundary in the SAME clock domain as the events.
+        // `checkpoint_timestamp_us` is an exchange-clock value (backfill sets it to
+        // the venue snapshot time), so comparing it directly against an event's
+        // recv-clock `event_ordering_ts` in RecvTime mode mixed domains and, under
+        // recv-vs-exchange skew, could skip or double-apply deltas straddling the
+        // boundary (audit P1-REPLAY-2). `checkpoint_ordering_ts` projects the
+        // checkpoint into the active replay clock domain.
+        let boundary = checkpoint_ordering_ts(&checkpoint, mode);
         window
             .book_events
             .iter()
-            .position(|event| event_ordering_ts(event, mode) > checkpoint.checkpoint_timestamp_us)
+            .position(|event| event_ordering_ts(event, mode) > boundary)
             .unwrap_or(window.book_events.len())
     } else {
         let snapshot_idx = window
@@ -202,6 +231,16 @@ fn reconstruct_book(
             .filter(|event| {
                 event.kind == BookEventKind::Snapshot
                     && event_ordering_ts(event, mode) == snapshot_time
+                    // Mirror the reset-boundary predicate from the rposition above:
+                    // without it, a *pre-reset* snapshot sharing the same ordering
+                    // timestamp as the chosen post-reset snapshot would be collected
+                    // and applied too, mixing pre/post-reset state into the rebuilt
+                    // book (HFT-review: reset-boundary leak). Most reachable in
+                    // ExchangeTime mode, where the venue can repeat an exchange
+                    // timestamp across a reconnect.
+                    && reset_boundary_us
+                        .map(|reset_ts| event.provenance.recv_timestamp_us >= reset_ts)
+                        .unwrap_or(true)
             })
             .collect();
 
@@ -251,12 +290,16 @@ fn reconstruct_book(
                             source_event_id: event.provenance.source_event_id.clone(),
                             source_session_id: event.provenance.source_session_id.clone(),
                             sequence: event.provenance.sequence,
+                            ingest_ordinal: None,
                         },
                         expected_sequence: Some(book.sequence.raw() + 1),
                         observed_sequence: Some(next_sequence.raw()),
                         details: Some(error.to_string()),
                     });
-                    pb_metrics::record_gap_detected();
+                    // Do NOT touch live metrics here: this is offline replay, and
+                    // incrementing pb_gaps_detected_total polluted live
+                    // observability (A.152). The gap is recorded in
+                    // continuity_events for the replay caller.
                 }
                 book.apply_delta(
                     event.side,
@@ -268,6 +311,27 @@ fn reconstruct_book(
             }
         }
         idx += 1;
+    }
+
+    // Surface a crossed/locked reconstructed book to the replay caller as a
+    // continuity marker (A.53). Offline analysis only — no live metric.
+    if book.check_integrity().is_err() {
+        continuity_events.push(IngestEvent {
+            asset_id: Some(asset_id.clone()),
+            kind: IngestEventKind::SourceReset,
+            provenance: EventProvenance {
+                recv_timestamp_us: book.last_update_us,
+                exchange_timestamp_us: 0,
+                source: DataSource::ReplayValidator,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: Some("crossed/locked book in reconstructed state".to_string()),
+        });
     }
 
     Ok((book, continuity_events, used_checkpoint))
@@ -284,19 +348,69 @@ fn latest_reset_boundary_us(events: &[IngestEvent], target_timestamp_us: u64) ->
         .max()
 }
 
+/// Sort book events into a deterministic total order for replay.
+///
+/// The primary/secondary keys are clock-domain timestamps. Within the same
+/// timestamp the authoritative tiebreaker is `ingest_ordinal` — a process-
+/// monotonic counter stamped at ingest in true arrival order — so a
+/// same-microsecond pre-snapshot delta (lower ordinal) sorts *before* its
+/// snapshot (higher ordinal), which `sequence` could not express because it
+/// resets to 0 on every snapshot (audit finding A.116). Events lacking an
+/// ordinal (legacy data written before A.116) sort after those that have one at
+/// the same timestamp and fall back to `sequence` plus content tiebreakers
+/// (side, price, size, source event id) so the order is still a deterministic
+/// total order regardless of the concurrent, unordered Parquet read order
+/// (`buffer_unordered`) — without which two replays of the same window could
+/// diverge (audit finding A.117).
 fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {
-    events.sort_by_key(|event| match mode {
-        ReplayMode::RecvTime => (
-            event.provenance.recv_timestamp_us,
-            0,
-            event.provenance.sequence.unwrap_or_default().raw(),
-        ),
+    events.sort_by(|a, b| {
+        let (a_primary, a_secondary) = ordering_keys(a, mode);
+        let (b_primary, b_secondary) = ordering_keys(b, mode);
+        a_primary
+            .cmp(&b_primary)
+            .then_with(|| a_secondary.cmp(&b_secondary))
+            // None sorts last (legacy data) via MAX sentinel; when present, the
+            // ordinal alone is a total order within the timestamp.
+            .then_with(|| {
+                a.provenance
+                    .ingest_ordinal
+                    .unwrap_or(u64::MAX)
+                    .cmp(&b.provenance.ingest_ordinal.unwrap_or(u64::MAX))
+            })
+            .then_with(|| {
+                a.provenance
+                    .sequence
+                    .unwrap_or_default()
+                    .raw()
+                    .cmp(&b.provenance.sequence.unwrap_or_default().raw())
+            })
+            .then_with(|| side_rank(a.side).cmp(&side_rank(b.side)))
+            .then_with(|| a.price.raw().cmp(&b.price.raw()))
+            .then_with(|| a.size.raw().cmp(&b.size.raw()))
+            .then_with(|| {
+                a.provenance
+                    .source_event_id
+                    .cmp(&b.provenance.source_event_id)
+            })
+    });
+}
+
+/// Primary and secondary ordering timestamps for the given replay clock domain.
+fn ordering_keys(event: &BookEvent, mode: ReplayMode) -> (u64, u64) {
+    match mode {
+        ReplayMode::RecvTime => (event.provenance.recv_timestamp_us, 0),
         ReplayMode::ExchangeTime => (
             normalized_exchange_ts(event),
             event.provenance.recv_timestamp_us,
-            event.provenance.sequence.unwrap_or_default().raw(),
         ),
-    });
+    }
+}
+
+fn side_rank(side: Side) -> u8 {
+    match side {
+        Side::Bid => 0,
+        Side::Ask => 1,
+    }
 }
 
 fn normalized_exchange_ts(event: &BookEvent) -> u64 {
@@ -311,6 +425,23 @@ fn event_ordering_ts(event: &BookEvent, mode: ReplayMode) -> u64 {
     match mode {
         ReplayMode::RecvTime => event.provenance.recv_timestamp_us,
         ReplayMode::ExchangeTime => normalized_exchange_ts(event),
+    }
+}
+
+/// Project a checkpoint's boundary timestamp into the active replay clock domain
+/// so it can be compared against `event_ordering_ts` without mixing domains.
+/// `checkpoint_timestamp_us` is the exchange-clock venue snapshot time, while the
+/// checkpoint's `provenance.recv_timestamp_us` records when it was received.
+fn checkpoint_ordering_ts(checkpoint: &BookCheckpoint, mode: ReplayMode) -> u64 {
+    match mode {
+        ReplayMode::RecvTime => checkpoint.provenance.recv_timestamp_us,
+        ReplayMode::ExchangeTime => {
+            if checkpoint.provenance.exchange_timestamp_us != 0 {
+                checkpoint.provenance.exchange_timestamp_us
+            } else {
+                checkpoint.checkpoint_timestamp_us
+            }
+        }
     }
 }
 
@@ -375,4 +506,385 @@ fn render_checkpoint_mismatch(book: &L2Book, checkpoint: &BookCheckpoint) -> Str
         book.best_ask(),
         checkpoint.asks.first().map(|level| (level.price, level.size)),
     )
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use pb_types::event::BookEventKind;
+    use pb_types::{FixedPrice, FixedSize};
+
+    fn book_event(
+        kind: BookEventKind,
+        side: Side,
+        price: u32,
+        size: u64,
+        recv_ts: u64,
+        seq: u64,
+        source_event_id: Option<&str>,
+    ) -> BookEvent {
+        BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: recv_ts,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: source_event_id.map(|s| s.to_string()),
+                source_session_id: None,
+                sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: None,
+            },
+        }
+    }
+
+    /// Different read orders of the same multiset of events must produce an
+    /// identical sorted order (deterministic replay — A.117).
+    #[test]
+    fn sort_is_deterministic_across_input_permutations() {
+        // A batch of events that collide on (recv_ts, sequence) so only the
+        // content tiebreakers distinguish them.
+        let base = vec![
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 10, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 6000, 20, 100, 0, Some("b")),
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                5000,
+                30,
+                100,
+                0,
+                Some("c"),
+            ),
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 40, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 5500, 50, 100, 1, None),
+            book_event(BookEventKind::Delta, Side::Bid, 4900, 60, 99, 9, Some("z")),
+        ];
+
+        let mut canonical = base.clone();
+        sort_book_events(&mut canonical, ReplayMode::RecvTime);
+
+        // Several deterministic permutations (reversed, rotated) must all sort to
+        // the same canonical order.
+        let mut reversed: Vec<BookEvent> = base.iter().rev().cloned().collect();
+        sort_book_events(&mut reversed, ReplayMode::RecvTime);
+        assert_eq!(reversed, canonical);
+
+        let mut rotated = base.clone();
+        rotated.rotate_left(3);
+        sort_book_events(&mut rotated, ReplayMode::RecvTime);
+        assert_eq!(rotated, canonical);
+    }
+
+    /// The sort must be a strict total order on the content tiebreakers (no
+    /// adjacent elements compare Equal), otherwise ties could still resolve
+    /// nondeterministically under an unstable read order.
+    #[test]
+    fn sort_breaks_all_ties_deterministically() {
+        let mut events = vec![
+            book_event(BookEventKind::Delta, Side::Bid, 5000, 10, 100, 0, Some("a")),
+            book_event(BookEventKind::Delta, Side::Ask, 6000, 20, 100, 0, Some("b")),
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                7000,
+                30,
+                100,
+                0,
+                Some("c"),
+            ),
+            book_event(BookEventKind::Delta, Side::Ask, 5500, 50, 100, 0, Some("d")),
+        ];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+        for pair in events.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let differs = side_rank(a.side) != side_rank(b.side)
+                || a.price.raw() != b.price.raw()
+                || a.size.raw() != b.size.raw()
+                || a.provenance.source_event_id != b.provenance.source_event_id
+                || a.provenance.sequence != b.provenance.sequence;
+            assert!(
+                differs,
+                "adjacent events are indistinguishable: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    fn with_ordinal(mut event: BookEvent, ordinal: u64) -> BookEvent {
+        event.provenance.ingest_ordinal = Some(ordinal);
+        event
+    }
+
+    /// In RecvTime mode the checkpoint boundary must be compared in the recv
+    /// clock. A delta received *before* the checkpoint arrived (recv-clock) must
+    /// not be applied on top of it, even though its recv timestamp is after the
+    /// checkpoint's exchange-clock `checkpoint_timestamp_us` (audit P1-REPLAY-2).
+    #[test]
+    fn checkpoint_boundary_uses_recv_clock_in_recv_mode() {
+        use pb_types::event::{BookCheckpoint, MarketDataWindow, PriceLevel};
+
+        // Venue snapshot at exchange t=1000, received at recv t=2000.
+        let checkpoint = BookCheckpoint {
+            asset_id: AssetId::new("tok"),
+            checkpoint_timestamp_us: 1000,
+            provenance: EventProvenance {
+                recv_timestamp_us: 2000,
+                exchange_timestamp_us: 1000,
+                source: DataSource::RestSnapshot,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            bids: vec![PriceLevel {
+                price: FixedPrice::new(5000).unwrap(),
+                size: FixedSize::new(100),
+            }],
+            asks: vec![],
+            wal_offset: None,
+        };
+
+        // Delta received at recv t=1500 — after the checkpoint's exchange time
+        // (1000) but before it was received (2000). It predates the checkpoint in
+        // the recv clock, so RecvTime replay must NOT apply it on top.
+        let stale_delta = book_event(BookEventKind::Delta, Side::Bid, 5000, 999, 1500, 1, None);
+        let window = MarketDataWindow {
+            book_events: vec![stale_delta],
+            trade_events: vec![],
+            ingest_events: vec![],
+        };
+
+        let (book, _events, used_cp) = reconstruct_book(
+            &AssetId::new("tok"),
+            3000,
+            ReplayMode::RecvTime,
+            Some(checkpoint),
+            window,
+        )
+        .unwrap();
+
+        assert!(used_cp);
+        // The bid level keeps the checkpoint size (100), proving the pre-checkpoint
+        // delta (999) was excluded. With the old exchange-vs-recv domain mix the
+        // boundary was 1000, the delta sorted after it, and the level became 999.
+        assert_eq!(
+            book.best_bid().map(|(_, size)| size),
+            Some(FixedSize::new(100))
+        );
+    }
+
+    /// A pre-reset snapshot that shares the same ordering timestamp as the chosen
+    /// post-reset snapshot must NOT leak into the reconstructed book. In
+    /// ExchangeTime mode the venue can repeat an exchange timestamp across a
+    /// reconnect, so two snapshots straddling a SourceReset can share
+    /// `snapshot_time` while differing in recv time — the collection filter must
+    /// re-check the reset boundary (HFT-review: reset-boundary leak).
+    #[test]
+    fn reset_boundary_excludes_pre_reset_snapshot_sharing_exchange_ts() {
+        use pb_types::event::{IngestEvent, IngestEventKind, MarketDataWindow};
+
+        // Builder allowing distinct recv/exchange timestamps (book_event hardcodes
+        // exchange_ts = 0).
+        let snap = |price: u32, size: u64, recv: u64, exch: u64| BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind: BookEventKind::Snapshot,
+            side: Side::Bid,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: recv,
+                exchange_timestamp_us: exch,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: Some(Sequence::new(0)),
+                ingest_ordinal: None,
+            },
+        };
+
+        // Two pre-reset levels and one post-reset level, all sharing exchange_ts
+        // 1000 but with recv timestamps straddling a SourceReset at recv = 200.
+        // The 4000 level existed only pre-reset and must not survive.
+        let pre_a = snap(5000, 999, 100, 1000);
+        let pre_b = snap(4000, 50, 100, 1000);
+        let post = snap(5000, 100, 300, 1000);
+
+        let reset = IngestEvent {
+            asset_id: Some(AssetId::new("tok")),
+            kind: IngestEventKind::SourceReset,
+            provenance: EventProvenance {
+                recv_timestamp_us: 200,
+                exchange_timestamp_us: 0,
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: None,
+        };
+
+        let window = MarketDataWindow {
+            book_events: vec![pre_a, pre_b, post],
+            trade_events: vec![],
+            ingest_events: vec![reset],
+        };
+
+        let (book, _events, _used_cp) = reconstruct_book(
+            &AssetId::new("tok"),
+            2000,
+            ReplayMode::ExchangeTime,
+            None,
+            window,
+        )
+        .unwrap();
+
+        // Only the post-reset snapshot seeds the book: bid 5000@100. The pre-reset
+        // -only 4000 level must not leak (with the bug, depth would be 2).
+        assert_eq!(
+            book.bid_depth(),
+            1,
+            "pre-reset snapshot level leaked into reconstruction"
+        );
+        assert_eq!(
+            book.best_bid(),
+            Some((FixedPrice::new(5000).unwrap(), FixedSize::new(100)))
+        );
+    }
+
+    /// ExchangeTime replay mode (the `event_ordering_ts == exchange_timestamp_us`
+    /// branch) had no coverage. When the host and venue clocks are synced
+    /// (recv_ts == exchange_ts), ExchangeTime reconstruction must produce the same
+    /// book as RecvTime (HFT-review coverage gap).
+    #[test]
+    fn exchange_time_and_recv_time_agree_when_clocks_synced() {
+        use pb_types::event::MarketDataWindow;
+
+        let ev = |kind, side, price: u32, size: u64, ts: u64, seq: u64| BookEvent {
+            asset_id: AssetId::new("tok"),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: EventProvenance {
+                recv_timestamp_us: ts,
+                exchange_timestamp_us: ts, // synced clocks
+                source: DataSource::WebSocket,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: Some(seq),
+            },
+        };
+        let events = vec![
+            ev(BookEventKind::Snapshot, Side::Bid, 5000, 100, 1000, 0),
+            ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, 1000, 0),
+            ev(BookEventKind::Delta, Side::Bid, 4900, 50, 1100, 1),
+            ev(BookEventKind::Delta, Side::Ask, 5100, 0, 1200, 2), // remove the ask
+        ];
+        let mk = || MarketDataWindow {
+            book_events: events.clone(),
+            trade_events: vec![],
+            ingest_events: vec![],
+        };
+
+        let (recv_book, _, _) =
+            reconstruct_book(&AssetId::new("tok"), 2000, ReplayMode::RecvTime, None, mk()).unwrap();
+        let (exch_book, _, _) = reconstruct_book(
+            &AssetId::new("tok"),
+            2000,
+            ReplayMode::ExchangeTime,
+            None,
+            mk(),
+        )
+        .unwrap();
+
+        assert_eq!(recv_book.bids_sorted(), exch_book.bids_sorted());
+        assert_eq!(recv_book.asks_sorted(), exch_book.asks_sorted());
+        // Sanity: the bid delta added a level, the ask delta removed the only ask.
+        assert_eq!(exch_book.bid_depth(), 2);
+        assert_eq!(exch_book.ask_depth(), 0);
+    }
+
+    /// A same-microsecond delta that arrived *before* the snapshot (lower ingest
+    /// ordinal) must sort before the snapshot, even though its `sequence` is
+    /// higher than the snapshot's reset-to-0 sequence (audit finding A.116).
+    #[test]
+    fn pre_snapshot_delta_sorts_before_snapshot_via_ingest_ordinal() {
+        // Same recv_ts. Delta arrived first (ordinal 7) with sequence 42; the
+        // snapshot arrived next (ordinal 8) and reset sequence to 0.
+        let delta = with_ordinal(
+            book_event(
+                BookEventKind::Delta,
+                Side::Bid,
+                5000,
+                10,
+                100,
+                42,
+                Some("d"),
+            ),
+            7,
+        );
+        let snapshot = with_ordinal(
+            book_event(
+                BookEventKind::Snapshot,
+                Side::Bid,
+                5000,
+                30,
+                100,
+                0,
+                Some("s"),
+            ),
+            8,
+        );
+
+        // Present the snapshot first to prove ordering is by ordinal, not input.
+        let mut events = vec![snapshot, delta];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+
+        assert_eq!(
+            events[0].kind,
+            BookEventKind::Delta,
+            "delta must sort first"
+        );
+        assert_eq!(events[0].provenance.ingest_ordinal, Some(7));
+        assert_eq!(events[1].kind, BookEventKind::Snapshot);
+        assert_eq!(events[1].provenance.ingest_ordinal, Some(8));
+    }
+
+    /// Without the ingest ordinal (legacy data), the snapshot's reset sequence
+    /// (0) makes the pre-snapshot delta sort AFTER it — the exact A.116 bug. This
+    /// documents why the ordinal is required (it is not a regression: legacy data
+    /// has no better signal).
+    #[test]
+    fn legacy_events_without_ordinal_fall_back_to_sequence() {
+        let delta = book_event(
+            BookEventKind::Delta,
+            Side::Bid,
+            5000,
+            10,
+            100,
+            42,
+            Some("d"),
+        );
+        let snapshot = book_event(
+            BookEventKind::Snapshot,
+            Side::Bid,
+            5000,
+            30,
+            100,
+            0,
+            Some("s"),
+        );
+        let mut events = vec![delta, snapshot];
+        sort_book_events(&mut events, ReplayMode::RecvTime);
+        // Snapshot (seq 0) sorts before delta (seq 42) — the legacy fallback.
+        assert_eq!(events[0].kind, BookEventKind::Snapshot);
+        assert_eq!(events[1].kind, BookEventKind::Delta);
+    }
 }

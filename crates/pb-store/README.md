@@ -43,16 +43,53 @@ PersistedRecord channel
 
 - Storage uses the `object_store` trait for filesystem abstraction, supporting
   local disk, S3, and GCS without code changes.
-- Parquet files are partitioned by event type and time window. The flush interval
-  (5 minutes) balances write amplification against data freshness for replay.
+- Parquet files are partitioned by event type and time window (`YYYY/MM/DD/HH`).
+  The flush interval (5 minutes) balances write amplification against data
+  freshness for replay. Records whose timestamp is outside a wide plausible band
+  (or not representable as a datetime) are routed to a dedicated
+  `invalid_timestamp` partition with a warning, instead of being silently misfiled
+  into the 1970-01-01 partition by `unwrap_or_default()` (audit finding A.123).
+- Parquet object names are `{asset}_{first_ts}_{content_hash}.parquet`. The
+  content-hash suffix means two batches that land in the same (asset, hour) bucket
+  with the same first-record timestamp cannot silently overwrite each other;
+  identical content maps to the same name (idempotent retry). Readers list by the
+  `{asset}_` prefix, so multiple files per bucket are read transparently.
+- `write_batch_replacing` rebuilds partitions authoritatively from a record
+  stream (WAL replay) for crash recovery (A.27): for each `(dataset, asset, hour)`
+  group it deletes the existing `{asset}_*` files and writes the complete group,
+  so the source stream is authoritative and re-running is idempotent. It is the
+  storage half of the `reconcile` command and is meant for offline use (ingest
+  stopped) to avoid racing live-sink writes to the same partitions.
 - Parquet encoding uses explicit Zstd compression at level 3 and `DELTA_BINARY_PACKED`
   encoding on timestamp, price, size, and sequence columns for better compression ratios.
 - A pre-allocated 256 KB byte buffer avoids repeated heap allocation during Parquet writes.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime` for efficiency.
 - ClickHouse uses `MergeTree` engine with date partitioning and composite ORDER BY
   keys for efficient range queries. Tables are created via `ensure_tables()`.
+- ClickHouse inserts carry a per-batch content-derived `insert_deduplication_token`
+  and the tables set `non_replicated_deduplication_window`, so an identical
+  re-insert (retry / partial-failure re-send) is deduplicated server-side instead
+  of double-counting (A.60/A.124). `async_insert=1` + `wait_for_async_insert=1`
+  coalesce tiny quiet-asset parts while staying durable (A.40). High-repetition
+  string columns (`source`, `fidelity`, `mode`, `event_kind`) are
+  `LowCardinality(String)` (A.39). All verified by round-trip tests against a real
+  ClickHouse server (`PB_TEST_CLICKHOUSE_URL`).
+- ClickHouse `Enum8` columns (`event_kind`, `side`) are inserted and read as their
+  `i8` discriminant over RowBinary — sending a Rust `String` is rejected by the
+  server. Sorting keys contain no `Nullable` columns (`book_events.sequence` is a
+  non-nullable `UInt64`; `trade_id`/`source_session_id` were removed from their
+  ORDER BY), so DDL succeeds on a stock server without `allow_nullable_key`.
+  (End-to-end verification requires the testcontainers round-trip running in CI.)
 - ClickHouse insert handles are created conditionally — only for record types that
   actually have data in the current batch, avoiding empty inserts.
+- Both sinks flush with bounded exponential-backoff retries (5 attempts), keeping
+  the buffer intact across retries, so a single transient insert/write failure no
+  longer drops the batch or instantly tears down the ingest pipeline.
+- On graceful shutdown (cancellation) both sinks drain any records still queued in
+  their mpsc channel — bounded by a 10s deadline — before the final flush, so a
+  clean stop does not abandon records the upstream already enqueued (A.153).
+- WAL→storage reconciliation (rebuilding a crash-lost Parquet window from the WAL)
+  is provided by `write_batch_replacing` / the `reconcile` command (A.27).
 
 ## Docs to Update After Changes
 

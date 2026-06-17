@@ -22,18 +22,21 @@ pub struct SlugMapping {
     pub label: Option<String>,
 }
 
+// Saturate to 0 on a pre-epoch clock rather than panic (matches
+// pipeline::now_micros), so a transient clock fault cannot crash the always-on
+// discovery/backfill paths (HFT-review).
 pub fn current_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_secs()
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_micros() as u64
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// Extract token IDs and slug mappings from Gamma API events.

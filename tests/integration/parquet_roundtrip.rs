@@ -20,6 +20,7 @@ fn make_records(asset_id: &str, base_timestamp: u64) -> Vec<PersistedRecord> {
         source_event_id: None,
         source_session_id: Some("session-1".to_string()),
         sequence: Some(Sequence::new(sequence)),
+        ingest_ordinal: None,
     };
 
     vec![
@@ -58,6 +59,7 @@ fn make_records(asset_id: &str, base_timestamp: u64) -> Vec<PersistedRecord> {
                 source_event_id: None,
                 source_session_id: Some("session-2".to_string()),
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,
@@ -73,6 +75,7 @@ fn make_records(asset_id: &str, base_timestamp: u64) -> Vec<PersistedRecord> {
                 source_event_id: Some("checkpoint-1".to_string()),
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             wal_offset: None,
             bids: vec![PriceLevel {

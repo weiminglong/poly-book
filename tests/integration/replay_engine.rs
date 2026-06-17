@@ -31,6 +31,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
                 source_event_id: Some("snapshot-1".to_string()),
                 source_session_id: Some("session-1".to_string()),
                 sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: None,
             },
         }));
         seq += 1;
@@ -49,6 +50,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
                 source_event_id: Some("snapshot-1".to_string()),
                 source_session_id: Some("session-1".to_string()),
                 sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: None,
             },
         }));
         seq += 1;
@@ -67,6 +69,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
             source_event_id: Some("delta-1".to_string()),
             source_session_id: Some("session-1".to_string()),
             sequence: Some(Sequence::new(seq)),
+            ingest_ordinal: None,
         },
     }));
     seq += 1;
@@ -83,6 +86,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
             source_event_id: Some("delta-2".to_string()),
             source_session_id: Some("session-1".to_string()),
             sequence: Some(Sequence::new(seq)),
+            ingest_ordinal: None,
         },
     }));
 
@@ -96,6 +100,7 @@ fn make_replay_records(asset_id: &str, base_ts: u64) -> Vec<PersistedRecord> {
             source_event_id: Some("checkpoint-1".to_string()),
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         wal_offset: None,
         bids: vec![

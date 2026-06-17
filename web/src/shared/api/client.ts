@@ -26,7 +26,7 @@ export async function fetchAndValidate<T>(
   const timeoutId = window.setTimeout(() => {
     timedOut = true
     timeoutController.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, options?.timeoutMs ?? REQUEST_TIMEOUT_MS)
 
   const abortHandler = () => timeoutController.abort()
   options?.signal?.addEventListener('abort', abortHandler, { once: true })
@@ -41,8 +41,10 @@ export async function fetchAndValidate<T>(
         if (typeof body?.error === 'string') {
           message = body.error
         }
-      } catch {
-        // fall back to HTTP status message
+      } catch (err) {
+        // Keep the diagnostic trail instead of silently swallowing it; fall back
+        // to the HTTP status message for the user-facing error (HFT-review #16).
+        console.warn('Failed to parse API error response body:', err)
       }
       throw new Error(message)
     }
@@ -51,7 +53,7 @@ export async function fetchAndValidate<T>(
     return schema.parse(json)
   } catch (error) {
     if (timedOut) {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`)
+      throw new Error(`Request timed out after ${options?.timeoutMs ?? REQUEST_TIMEOUT_MS}ms`)
     }
     throw error
   } finally {
@@ -71,7 +73,7 @@ export async function postAndValidate<T>(
   const timeoutId = window.setTimeout(() => {
     timedOut = true
     timeoutController.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, options?.timeoutMs ?? REQUEST_TIMEOUT_MS)
 
   const abortHandler = () => timeoutController.abort()
   options?.signal?.addEventListener('abort', abortHandler, { once: true })
@@ -91,8 +93,9 @@ export async function postAndValidate<T>(
         if (typeof json?.error === 'string') {
           message = json.error
         }
-      } catch {
-        // fall back
+      } catch (err) {
+        // Keep the diagnostic trail instead of silently swallowing it (HFT-review #16).
+        console.warn('Failed to parse API error response body:', err)
       }
       throw new Error(message)
     }
@@ -101,7 +104,7 @@ export async function postAndValidate<T>(
     return schema.parse(json)
   } catch (error) {
     if (timedOut) {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`)
+      throw new Error(`Request timed out after ${options?.timeoutMs ?? REQUEST_TIMEOUT_MS}ms`)
     }
     throw error
   } finally {

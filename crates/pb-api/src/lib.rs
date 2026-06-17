@@ -16,5 +16,5 @@ pub use dto::{
 };
 pub use error::ApiError;
 pub use live_state::{LiveReadModel, SnapshotLookupError};
-pub use server::{router, serve, ApiConfig, AppState};
+pub use server::{router, serve, ApiConfig, AppState, DEFAULT_HTTP_REQUEST_TIMEOUT_SECS};
 pub use streaming::{BookBroadcast, PerAssetBroadcast};

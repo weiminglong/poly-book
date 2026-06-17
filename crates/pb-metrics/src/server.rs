@@ -1,15 +1,62 @@
 use axum::{routing::get, Router};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crate::error::MetricsError;
 
-/// Install the Prometheus metrics recorder globally.
-/// Must be called before `register_metrics()` or any `record_*` functions.
+/// Explicit histogram buckets for microsecond-resolution latency metrics
+/// (`*_us`). Without explicit buckets the exporter emits rolling summaries whose
+/// quantiles cannot be aggregated across processes (audit finding A.114).
+const US_BUCKETS: &[f64] = &[
+    10.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1_000.0,
+    2_500.0,
+    5_000.0,
+    10_000.0,
+    50_000.0,
+    100_000.0,
+    500_000.0,
+    1_000_000.0,
+];
+
+/// Explicit histogram buckets for millisecond-resolution latency metrics
+/// (`*_ms`).
+const MS_BUCKETS: &[f64] = &[
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 5_000.0, 30_000.0,
+];
+
+/// Install the Prometheus metrics recorder globally, with explicit, unit-aware
+/// histogram buckets so latency quantiles are real Prometheus histograms
+/// (cross-process aggregatable) rather than per-process rolling summaries
+/// (audit finding A.114). Must be called before `register_metrics()` or any
+/// `record_*` functions.
 pub fn install_recorder() -> Result<PrometheusHandle, MetricsError> {
     PrometheusBuilder::new()
+        .set_buckets_for_metric(Matcher::Suffix("_us".to_string()), US_BUCKETS)
+        .map_err(|e| MetricsError::RecorderInstall(e.to_string()))?
+        .set_buckets_for_metric(Matcher::Suffix("_ms".to_string()), MS_BUCKETS)
+        .map_err(|e| MetricsError::RecorderInstall(e.to_string()))?
         .install_recorder()
         .map_err(|e| MetricsError::RecorderInstall(e.to_string()))
+}
+
+/// Spawn a background task that calls `run_upkeep` on a fixed interval so idle
+/// histogram/summary state is drained and bucket memory cannot grow unbounded if
+/// scraping stalls (audit finding A.115). Returns the task handle.
+pub fn spawn_upkeep(handle: PrometheusHandle, interval: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            handle.run_upkeep();
+        }
+    })
 }
 
 fn build_router(handle: PrometheusHandle, endpoint: &str) -> Router {
@@ -77,6 +124,30 @@ mod tests {
 
     fn test_handle() -> PrometheusHandle {
         PrometheusBuilder::new().build_recorder().handle()
+    }
+
+    #[test]
+    fn us_suffix_metrics_render_as_bucketed_histograms() {
+        // A `*_us` histogram must render as a real Prometheus histogram with
+        // `_bucket{le=...}` series (cross-process aggregatable), not a summary
+        // (audit finding A.114).
+        let recorder = PrometheusBuilder::new()
+            .set_buckets_for_metric(Matcher::Suffix("_us".to_string()), US_BUCKETS)
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            metrics::histogram!("pb_demo_latency_us").record(150.0);
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("pb_demo_latency_us_bucket"),
+            "expected bucketed histogram, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("le=\"250\""),
+            "expected the 250us bucket boundary, got:\n{rendered}"
+        );
     }
 
     // --- build_router ---

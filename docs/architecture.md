@@ -163,11 +163,13 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │                  serve-api process                   │
 │                                                     │
 │  WsClient ──▶ Dispatcher ──▶ LiveReadModel          │
-│                    │              │                  │
-│                    ▼              ├─▶ REST handlers  │
-│              ParquetSink          └─▶ WS streaming   │
+│                                   │                  │
+│                                   ├─▶ REST handlers  │
+│                                   └─▶ WS streaming   │
+│  (in-memory only — no WAL, no storage sinks)        │
 │                                                     │
 │  pb-service ──▶ ReplayEngine ──▶ replay handlers    │
+│  (reads historical Parquet/ClickHouse for replay)   │
 │                                                     │
 │  Metrics server on :9090                            │
 │  API server on :3000                                │
@@ -184,6 +186,29 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │  proxies /api → :3000    │
 └──────────────────────────┘
 ```
+
+## Flow Control & Backpressure
+
+Components communicate over bounded `tokio::mpsc` channels, so the policy for what
+happens when a consumer falls behind is explicit (audit finding A.79):
+
+- **The WAL is the only unconditionally-blocking consumer.** The ingest loop
+  awaits each `event_rx.recv()` and appends to the WAL before fan-out; if the WAL
+  cannot keep up the whole pipeline blocks (and ultimately applies backpressure to
+  the feed). This is deliberate: durability is never sacrificed for throughput.
+- **Storage sinks may lag.** Sinks consume from their own bounded fan-out
+  channels and flush with bounded-retry. A sink falling behind does not block
+  ingest indefinitely; sustained failure surfaces as `pb_sink_flush_failures_total`
+  (alerted) and the WAL remains the source of truth — a lost storage window is
+  rebuildable with `reconcile`.
+- **Channel depth is observable.** The ingest event-channel depth is exported as
+  `pb_channel_depth{channel="ingest_events"}`; rising depth is the leading
+  indicator of a downstream stall, before latency (`pb_recv_to_durable_us`)
+  degrades.
+- **Capacities** are currently fixed (event/raw channels 2048, sink fan-out
+  10000). They should be sized from measured rotation-burst depth using the depth
+  gauge above; multi-replica writer leasing / feed redundancy (HA failover) is a
+  separate, deferred phase (P3-HA-1).
 
 ## Key Design Decisions
 

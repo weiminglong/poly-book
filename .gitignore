@@ -1,5 +1,11 @@
 # Build
 /target/
+# cargo-fuzz: build artifacts, generated corpus, and crash artifacts are all
+# regenerated locally and must never be committed (the root /target/ rule is
+# anchored and does not cover the nested fuzz/ workspace).
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
 
 # Data
 /data/

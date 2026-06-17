@@ -56,8 +56,34 @@ pub struct ParquetReader {
     base_path: PathBuf,
 }
 
+/// The on-disk Parquet schema version this reader understands. Files written by
+/// `pb_store` carry it in their schema metadata (`pb_store::schema::PB_SCHEMA_VERSION`).
+const EXPECTED_PARQUET_SCHEMA_VERSION: &str = "2";
+
+/// Validate a Parquet file's `pb_schema_version`. A pre-split (unversioned) or
+/// future-versioned file is a typed error rather than a silent empty/mis-mapped
+/// read (audit findings P1-TEST-1 / A.137).
+fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
+    match version {
+        Some(v) if v == EXPECTED_PARQUET_SCHEMA_VERSION => Ok(()),
+        Some(other) => Err(ReplayError::Other(format!(
+            "schema version {other}, expected {EXPECTED_PARQUET_SCHEMA_VERSION}; migrate it"
+        ))),
+        None => Err(ReplayError::Other(
+            "no pb_schema_version (pre-split/legacy layout); migrate, do not read as empty".into(),
+        )),
+    }
+}
+
 const PARQUET_READ_CONCURRENCY: usize = 8;
 const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
+
+/// Hard backstop on rows returned by a single unbounded ClickHouse read
+/// (ingest/execution events). Applied via `max_result_rows` +
+/// `result_overflow_mode = 'throw'` so a pathological window ERRORS loudly
+/// instead of silently truncating or OOM-ing the serve process (HFT-review
+/// finding). Far above any legitimate window's row count.
+const MAX_READ_ROWS: u64 = 5_000_000;
 
 impl ParquetReader {
     pub fn new(base_path: impl Into<PathBuf>) -> Self {
@@ -151,6 +177,18 @@ impl ParquetReader {
     {
         let file = File::open(path).await?;
         let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
+
+        // Reject an incompatible on-disk layout instead of silently yielding
+        // empty or mis-mapped rows (audit findings P1-TEST-1 / A.137).
+        check_schema_version(
+            builder
+                .schema()
+                .metadata()
+                .get("pb_schema_version")
+                .map(String::as_str),
+        )
+        .map_err(|e| ReplayError::Other(format!("Parquet file {path:?}: {e}")))?;
+
         let mut stream = builder.build()?;
         let mut rows = Vec::new();
 
@@ -175,6 +213,10 @@ impl ParquetReader {
             + Send
             + Sync,
     {
+        // Files are read concurrently and may complete out of order. This is safe
+        // for determinism because the replay engine sorts the merged events into a
+        // total order (engine::sort_book_events) before applying them, so the
+        // unordered read order cannot affect reconstruction output (A.117).
         let batches = stream::iter(paths.into_iter().map(|path| {
             let extractor = extractor.clone();
             async move { self.read_parquet_file(&path, extractor).await }
@@ -246,17 +288,30 @@ fn parse_side_value(value: u8) -> Result<Side, ReplayError> {
     }
 }
 
-fn parse_optional_side(value: Option<&str>) -> Result<Option<Side>, ReplayError> {
+/// ClickHouse stores `event_kind`/`side` as `Enum8`, which RowBinary returns as
+/// the i8 discriminant. These mirror the writer's `book_kind_to_i8`/`side_to_i8`.
+fn book_kind_from_i8(value: i8) -> Result<BookEventKind, ReplayError> {
     match value {
-        Some("Bid") => Ok(Some(Side::Bid)),
-        Some("Ask") => Ok(Some(Side::Ask)),
-        Some("bid") => Ok(Some(Side::Bid)),
-        Some("ask") => Ok(Some(Side::Ask)),
-        Some(other) => Err(ReplayError::InvalidSide {
+        1 => Ok(BookEventKind::Snapshot),
+        2 => Ok(BookEventKind::Delta),
+        other => Err(ReplayError::InvalidEventType {
             raw: other.to_string(),
         }),
-        None => Ok(None),
     }
+}
+
+fn side_from_i8(value: i8) -> Result<Side, ReplayError> {
+    match value {
+        1 => Ok(Side::Bid),
+        2 => Ok(Side::Ask),
+        other => Err(ReplayError::InvalidSide {
+            raw: other.to_string(),
+        }),
+    }
+}
+
+fn opt_side_from_i8(value: Option<i8>) -> Result<Option<Side>, ReplayError> {
+    value.map(side_from_i8).transpose()
 }
 
 fn parse_trade_fidelity(value: &str) -> Result<TradeFidelity, ReplayError> {
@@ -276,6 +331,7 @@ fn parse_ingest_kind(value: &str) -> Result<IngestEventKind, ReplayError> {
         "sequence_gap" => Ok(IngestEventKind::SequenceGap),
         "stale_snapshot_skip" => Ok(IngestEventKind::StaleSnapshotSkip),
         "source_reset" => Ok(IngestEventKind::SourceReset),
+        "book_mismatch" => Ok(IngestEventKind::BookMismatch),
         other => Err(ReplayError::Other(format!(
             "invalid ingest event kind: {other}"
         ))),
@@ -356,6 +412,12 @@ fn extract_book_events(
         .column_by_name("source_session_id")
         .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
+    // Optional for backward compatibility: Parquet files written before A.116 do
+    // not have this column. When absent, ingest_ordinal stays None and replay
+    // falls back to the sequence/content tiebreakers (A.117).
+    let ingest_ordinal_col = batch
+        .column_by_name("ingest_ordinal")
+        .map(|c| c.as_primitive::<UInt64Type>());
 
     let mut rows = Vec::new();
     for i in 0..batch.num_rows() {
@@ -391,6 +453,9 @@ fn extract_book_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: ingest_ordinal_col
+                    .filter(|c| !c.is_null(i))
+                    .map(|c| c.value(i)),
             },
         });
     }
@@ -500,6 +565,7 @@ fn extract_trade_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: None,
             },
         });
     }
@@ -595,6 +661,7 @@ fn extract_ingest_events(
                 } else {
                     Some(Sequence::new(sequence_col.value(i)))
                 },
+                ingest_ordinal: None,
             },
             expected_sequence: if expected_col.is_null(i) {
                 None
@@ -686,6 +753,7 @@ fn extract_checkpoints(
                     Some(source_session_id_col.value(i).to_string())
                 },
                 sequence: None,
+                ingest_ordinal: None,
             },
             bids: serde_json::from_str::<Vec<PriceLevel>>(bids_col.value(i))?,
             asks: serde_json::from_str::<Vec<PriceLevel>>(asks_col.value(i))?,
@@ -1017,13 +1085,33 @@ impl EventReader for ParquetReader {
                 extract_execution_events(batch, order_id, start_us, end_us)
             })
             .await?;
-        events.sort_by_key(|event| event.event_timestamp_us);
+        // Deterministic tie-break matching the ClickHouse reader's
+        // `ORDER BY event_timestamp_us, order_id, event_kind`, so equal-timestamp
+        // events are stable and the two backends agree (audit finding A.63).
+        events.sort_by(|a, b| {
+            a.event_timestamp_us
+                .cmp(&b.event_timestamp_us)
+                .then_with(|| a.order_id.cmp(&b.order_id))
+                .then_with(|| a.kind.to_string().cmp(&b.kind.to_string()))
+        });
         Ok(events)
     }
 }
 
 pub struct ClickHouseReader {
     client: clickhouse::Client,
+}
+
+/// Server-side aggregate counts for an integrity summary window.
+///
+/// These are computed with ClickHouse `count()`/`countIf()` so the summary never
+/// transfers full book/trade rows over the wire just to count them (audit A.42 /
+/// `query-mv-incremental`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IntegrityAggregates {
+    pub book_event_count: u64,
+    pub validation_count: u64,
+    pub validation_match_count: u64,
 }
 
 impl ClickHouseReader {
@@ -1033,6 +1121,123 @@ impl ClickHouseReader {
             .with_database(database);
         Self { client }
     }
+
+    /// A client clone that caps the result set at `MAX_READ_ROWS` and throws on
+    /// overflow, so an unbounded read errors loudly instead of materializing
+    /// millions of rows and OOM-ing the serve process (HFT-review finding).
+    fn bounded_client(&self) -> clickhouse::Client {
+        self.client
+            .clone()
+            .with_setting("max_result_rows", MAX_READ_ROWS.to_string())
+            .with_setting("result_overflow_mode", "throw")
+    }
+
+    /// Compute integrity-summary counts entirely server-side.
+    ///
+    /// Issues two small aggregate queries (book-event `count()`, and validation
+    /// `count()`/`countIf(matched)`) instead of materializing every book and
+    /// trade row in the window only to call `.len()` on the client. The two
+    /// queries run concurrently.
+    pub async fn read_integrity_aggregates(
+        &self,
+        asset_id: &AssetId,
+        start_us: u64,
+        end_us: u64,
+    ) -> Result<IntegrityAggregates, ReplayError> {
+        let book_query = "SELECT count() AS c FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ?";
+        let validation_query = "SELECT count() AS total, countIf(matched = 1) AS matched FROM replay_validations WHERE asset_id = ? AND persisted_at_us >= ? AND persisted_at_us <= ?";
+
+        let (book, validation) = tokio::try_join!(
+            async {
+                self.client
+                    .query(book_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_one::<CountRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+            async {
+                self.client
+                    .query(validation_query)
+                    .bind(asset_id.as_str())
+                    .bind(start_us)
+                    .bind(end_us)
+                    .fetch_one::<ValidationAggRow>()
+                    .await
+                    .map_err(ReplayError::from)
+            },
+        )?;
+
+        Ok(IntegrityAggregates {
+            book_event_count: book.c,
+            validation_count: validation.total,
+            validation_match_count: validation.matched,
+        })
+    }
+
+    /// Read only the ingest events for a window (reconnects, gaps, stale-snapshot
+    /// skips). These are bounded in practice and are needed both for the
+    /// `continuity_events` list and the per-kind counts, so unlike book/trade
+    /// rows they are materialized rather than counted server-side.
+    pub async fn read_ingest_events(
+        &self,
+        asset_id: &AssetId,
+        start_us: u64,
+        end_us: u64,
+    ) -> Result<Vec<IngestEvent>, ReplayError> {
+        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us, event_kind, sequence";
+        let rows: Vec<IngestEventRow> = self
+            .bounded_client()
+            .query(ingest_query)
+            .bind(start_us)
+            .bind(end_us)
+            .bind(asset_id.as_str())
+            .fetch_all()
+            .await?;
+        let mut events = rows
+            .into_iter()
+            .map(ingest_row_to_event)
+            .collect::<Result<Vec<_>, ReplayError>>()?;
+        events.sort_by_key(|event| {
+            (
+                event.provenance.recv_timestamp_us,
+                event.provenance.sequence.unwrap_or_default().raw(),
+            )
+        });
+        Ok(events)
+    }
+}
+
+fn ingest_row_to_event(row: IngestEventRow) -> Result<IngestEvent, ReplayError> {
+    Ok(IngestEvent {
+        asset_id: row.asset_id.map(AssetId::new),
+        kind: parse_ingest_kind(&row.event_kind)?,
+        provenance: EventProvenance {
+            recv_timestamp_us: row.recv_timestamp_us,
+            exchange_timestamp_us: row.exchange_timestamp_us,
+            source: parse_source(&row.source)?,
+            source_event_id: row.source_event_id,
+            source_session_id: row.source_session_id,
+            sequence: row.sequence.map(Sequence::new),
+            ingest_ordinal: None,
+        },
+        expected_sequence: row.expected_sequence,
+        observed_sequence: row.observed_sequence,
+        details: row.details,
+    })
+}
+
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct CountRow {
+    c: u64,
+}
+
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct ValidationAggRow {
+    total: u64,
+    matched: u64,
 }
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1040,14 +1245,15 @@ struct BookEventRow {
     recv_timestamp_us: u64,
     exchange_timestamp_us: u64,
     asset_id: String,
-    event_kind: String,
-    side: String,
+    event_kind: i8,
+    side: i8,
     price: u32,
     size: u64,
-    sequence: Option<u64>,
+    sequence: u64,
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
+    ingest_ordinal: Option<u64>,
 }
 
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1057,7 +1263,7 @@ struct TradeEventRow {
     asset_id: String,
     price: u32,
     size: Option<u64>,
-    side: Option<String>,
+    side: Option<i8>,
     trade_id: Option<String>,
     fidelity: String,
     sequence: Option<u64>,
@@ -1114,7 +1320,7 @@ struct ExecutionEventRow {
     client_order_id: Option<String>,
     venue_order_id: Option<String>,
     event_kind: String,
-    side: Option<String>,
+    side: Option<i8>,
     price: Option<u32>,
     size: Option<u64>,
     status: Option<String>,
@@ -1129,9 +1335,9 @@ impl EventReader for ClickHouseReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
-        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
+        let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id, ingest_ordinal FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
         let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, trade_id";
-        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us";
+        let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us, event_kind, sequence";
 
         let (book_rows, trade_rows, ingest_rows) = tokio::try_join!(
             async {
@@ -1171,16 +1377,8 @@ impl EventReader for ClickHouseReader {
             .map(|row| {
                 Ok(BookEvent {
                     asset_id: AssetId::new(row.asset_id),
-                    kind: match row.event_kind.as_str() {
-                        "Snapshot" => BookEventKind::Snapshot,
-                        "Delta" => BookEventKind::Delta,
-                        other => {
-                            return Err(ReplayError::InvalidEventType {
-                                raw: other.to_string(),
-                            })
-                        }
-                    },
-                    side: parse_optional_side(Some(row.side.as_str()))?.unwrap(),
+                    kind: book_kind_from_i8(row.event_kind)?,
+                    side: side_from_i8(row.side)?,
                     price: FixedPrice::new(row.price)?,
                     size: FixedSize::new(row.size),
                     provenance: EventProvenance {
@@ -1189,7 +1387,8 @@ impl EventReader for ClickHouseReader {
                         source: parse_source(&row.source)?,
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
-                        sequence: row.sequence.map(Sequence::new),
+                        sequence: Some(Sequence::new(row.sequence)),
+                        ingest_ordinal: row.ingest_ordinal,
                     },
                 })
             })
@@ -1208,7 +1407,7 @@ impl EventReader for ClickHouseReader {
                     asset_id: AssetId::new(row.asset_id),
                     price: FixedPrice::new(row.price)?,
                     size: row.size.map(FixedSize::new),
-                    side: parse_optional_side(row.side.as_deref())?,
+                    side: opt_side_from_i8(row.side)?,
                     trade_id: row.trade_id,
                     fidelity: parse_trade_fidelity(&row.fidelity)?,
                     provenance: EventProvenance {
@@ -1218,6 +1417,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: row.sequence.map(Sequence::new),
+                        ingest_ordinal: None,
                     },
                 })
             })
@@ -1231,23 +1431,7 @@ impl EventReader for ClickHouseReader {
 
         let mut ingest_events = ingest_rows
             .into_iter()
-            .map(|row| {
-                Ok(IngestEvent {
-                    asset_id: row.asset_id.map(AssetId::new),
-                    kind: parse_ingest_kind(&row.event_kind)?,
-                    provenance: EventProvenance {
-                        recv_timestamp_us: row.recv_timestamp_us,
-                        exchange_timestamp_us: row.exchange_timestamp_us,
-                        source: parse_source(&row.source)?,
-                        source_event_id: row.source_event_id,
-                        source_session_id: row.source_session_id,
-                        sequence: row.sequence.map(Sequence::new),
-                    },
-                    expected_sequence: row.expected_sequence,
-                    observed_sequence: row.observed_sequence,
-                    details: row.details,
-                })
-            })
+            .map(ingest_row_to_event)
             .collect::<Result<Vec<_>, ReplayError>>()?;
         ingest_events.sort_by_key(|event| {
             (
@@ -1269,7 +1453,7 @@ impl EventReader for ClickHouseReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<Vec<BookCheckpoint>, ReplayError> {
-        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us >= ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us";
+        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us >= ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us, wal_offset";
         let rows: Vec<CheckpointRow> = self
             .client
             .query(query)
@@ -1290,6 +1474,7 @@ impl EventReader for ClickHouseReader {
                         source_event_id: row.source_event_id,
                         source_session_id: row.source_session_id,
                         sequence: None,
+                        ingest_ordinal: None,
                     },
                     bids: serde_json::from_str(&row.bids_json)?,
                     asks: serde_json::from_str(&row.asks_json)?,
@@ -1304,7 +1489,7 @@ impl EventReader for ClickHouseReader {
         asset_id: &AssetId,
         at_us: u64,
     ) -> Result<Option<BookCheckpoint>, ReplayError> {
-        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us DESC LIMIT 1";
+        let query = "SELECT checkpoint_timestamp_us, recv_timestamp_us, exchange_timestamp_us, asset_id, source, source_event_id, source_session_id, bids_json, asks_json, wal_offset FROM book_checkpoints WHERE asset_id = ? AND checkpoint_timestamp_us <= ? ORDER BY checkpoint_timestamp_us DESC, wal_offset DESC LIMIT 1";
         let row: Option<CheckpointRow> = self
             .client
             .query(query)
@@ -1323,6 +1508,7 @@ impl EventReader for ClickHouseReader {
                     source_event_id: row.source_event_id,
                     source_session_id: row.source_session_id,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 bids: serde_json::from_str(&row.bids_json)?,
                 asks: serde_json::from_str(&row.asks_json)?,
@@ -1369,13 +1555,21 @@ impl EventReader for ClickHouseReader {
         end_us: u64,
     ) -> Result<Vec<ExecutionEvent>, ReplayError> {
         let base_query = "SELECT event_timestamp_us, asset_id, order_id, client_order_id, venue_order_id, event_kind, side, price, size, status, reason, latency_json FROM execution_events WHERE event_timestamp_us >= ? AND event_timestamp_us <= ?";
+        // Deterministic tie-break (event_timestamp_us, order_id, event_kind) so
+        // equal-timestamp events are stable and match the Parquet reader (A.63).
         let query = if order_id.is_some() {
-            format!("{base_query} AND order_id = ? ORDER BY event_timestamp_us")
+            format!(
+                "{base_query} AND order_id = ? ORDER BY event_timestamp_us, order_id, event_kind"
+            )
         } else {
-            format!("{base_query} ORDER BY event_timestamp_us")
+            format!("{base_query} ORDER BY event_timestamp_us, order_id, event_kind")
         };
 
-        let mut request = self.client.query(&query).bind(start_us).bind(end_us);
+        let mut request = self
+            .bounded_client()
+            .query(&query)
+            .bind(start_us)
+            .bind(end_us);
         if let Some(order_id) = order_id {
             request = request.bind(order_id);
         }
@@ -1389,7 +1583,7 @@ impl EventReader for ClickHouseReader {
                     client_order_id: row.client_order_id,
                     venue_order_id: row.venue_order_id,
                     kind: parse_execution_kind(&row.event_kind)?,
-                    side: parse_optional_side(row.side.as_deref())?,
+                    side: opt_side_from_i8(row.side)?,
                     price: row.price.map(FixedPrice::new).transpose()?,
                     size: row.size.map(FixedSize::new),
                     status: row.status,
@@ -1398,5 +1592,27 @@ impl EventReader for ClickHouseReader {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_current_version() {
+        assert!(check_schema_version(Some("2")).is_ok());
+    }
+
+    #[test]
+    fn rejects_old_version() {
+        let err = check_schema_version(Some("1")).unwrap_err();
+        assert!(err.to_string().contains("migrate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_version() {
+        let err = check_schema_version(None).unwrap_err();
+        assert!(err.to_string().contains("legacy"), "{err}");
     }
 }

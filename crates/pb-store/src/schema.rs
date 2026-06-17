@@ -11,8 +11,21 @@ use pb_types::event::{
 
 use crate::error::StoreError;
 
+/// On-disk Parquet schema version, written into every file's schema metadata so
+/// the reader can reject an incompatible (pre-split, or future) layout instead of
+/// silently returning empty rows (audit findings P1-TEST-1 / A.137).
+pub const PB_SCHEMA_VERSION: &str = "2";
+
+/// Attach the schema-version marker to a set of fields.
+fn versioned(fields: Vec<Field>) -> Schema {
+    Schema::new(fields).with_metadata(std::collections::HashMap::from([(
+        "pb_schema_version".to_string(),
+        PB_SCHEMA_VERSION.to_string(),
+    )]))
+}
+
 pub fn book_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, false),
@@ -24,11 +37,14 @@ pub fn book_event_schema() -> Schema {
         Field::new("source", DataType::Utf8, false),
         Field::new("source_event_id", DataType::Utf8, true),
         Field::new("source_session_id", DataType::Utf8, true),
+        // Monotonic ingest ordinal — replay's authoritative arrival-order
+        // tiebreaker (A.116). Nullable for rows written before this column.
+        Field::new("ingest_ordinal", DataType::UInt64, true),
     ])
 }
 
 pub fn trade_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, false),
@@ -45,7 +61,7 @@ pub fn trade_event_schema() -> Schema {
 }
 
 pub fn ingest_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, true),
@@ -61,7 +77,7 @@ pub fn ingest_event_schema() -> Schema {
 }
 
 pub fn checkpoint_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("checkpoint_timestamp_us", DataType::UInt64, false),
         Field::new("recv_timestamp_us", DataType::UInt64, false),
         Field::new("exchange_timestamp_us", DataType::UInt64, false),
@@ -76,7 +92,7 @@ pub fn checkpoint_schema() -> Schema {
 }
 
 pub fn replay_validation_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("asset_id", DataType::Utf8, false),
         Field::new("mode", DataType::Utf8, false),
         Field::new("replay_timestamp_us", DataType::UInt64, false),
@@ -88,7 +104,7 @@ pub fn replay_validation_schema() -> Schema {
 }
 
 pub fn execution_event_schema() -> Schema {
-    Schema::new(vec![
+    versioned(vec![
         Field::new("event_timestamp_us", DataType::UInt64, false),
         Field::new("asset_id", DataType::Utf8, true),
         Field::new("order_id", DataType::Utf8, false),
@@ -261,6 +277,12 @@ pub fn book_event_refs_to_record_batch(events: &[&BookEvent]) -> Result<RecordBa
             .map(|e| e.provenance.source_session_id.as_deref())
             .collect::<Vec<_>>(),
     ));
+    let ingest_ordinals: ArrayRef = Arc::new(UInt64Array::from(
+        events
+            .iter()
+            .map(|e| e.provenance.ingest_ordinal)
+            .collect::<Vec<_>>(),
+    ));
 
     RecordBatch::try_new(
         schema,
@@ -276,6 +298,7 @@ pub fn book_event_refs_to_record_batch(events: &[&BookEvent]) -> Result<RecordBa
             sources,
             source_event_ids,
             source_session_ids,
+            ingest_ordinals,
         ],
     )
     .map_err(StoreError::from)

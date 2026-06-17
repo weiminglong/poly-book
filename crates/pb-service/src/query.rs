@@ -53,6 +53,50 @@ const WRITE_KEYWORDS: &[&str] = &[
 
 const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"];
 
+/// Identifiers that must never appear in a workbench query. These are ClickHouse
+/// table functions that perform I/O — an unauthenticated SSRF / arbitrary
+/// file-read primitive (`file`, `url`, `s3`, `remote`, ...) — plus the `system`
+/// database (credential/metadata disclosure) and the file-exfiltration clauses
+/// (`INTO OUTFILE`, `SETTINGS`). A SELECT-rooted query with no write keyword
+/// otherwise reaches all of these (audit findings A.24/A.130). This blocklist
+/// is defense-in-depth alongside the server-side `readonly=2` enforcement.
+const FORBIDDEN_IDENTIFIERS: &[&str] = &[
+    // I/O table functions.
+    "FILE",
+    "URL",
+    "URLCLUSTER",
+    "S3",
+    "S3CLUSTER",
+    "REMOTE",
+    "REMOTESECURE",
+    "HDFS",
+    "HDFSCLUSTER",
+    "MYSQL",
+    "POSTGRESQL",
+    "JDBC",
+    "ODBC",
+    "MONGODB",
+    "REDIS",
+    "SQLITE",
+    "EXECUTABLE",
+    "AZUREBLOBSTORAGE",
+    "DELTALAKE",
+    "ICEBERG",
+    "GCS",
+    "INPUT",
+    // Cross-table / cluster / dictionary readers.
+    "REMOTE_SECURE",
+    "CLUSTER",
+    "CLUSTERALLREPLICAS",
+    "MERGE",
+    "DICTIONARY",
+    // Info-disclosure database and exfiltration clauses.
+    "SYSTEM",
+    "OUTFILE",
+    "INFILE",
+    "SETTINGS",
+];
+
 /// Sanitize result: the normalized SQL text and whether the input ended in a
 /// balanced state (i.e. no unclosed quotes, strings, or comments).
 struct SanitizeResult {
@@ -60,6 +104,31 @@ struct SanitizeResult {
     balanced: bool,
     /// True when the input ends inside a line comment (--...).
     ends_in_line_comment: bool,
+}
+
+/// Escape a string for embedding in a single-quoted ClickHouse string literal.
+/// ClickHouse uses C-style escaping inside `'...'`, so backslash must be escaped
+/// first, then the single quote, to neutralize injection via config-sourced
+/// values (e.g. the database name in `list_datasets`).
+fn escape_ch_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Push a byte-length-preserving blank for a masked char so the sanitized
+/// string stays byte-aligned with the original. A newline is kept verbatim (it
+/// terminates line comments and is itself a single byte); any other char is
+/// replaced by `len_utf8()` spaces. Without this, a multi-byte char inside a
+/// quote or comment would collapse to one byte, shifting every later index and
+/// making callers that slice the *original* by a sanitized-derived offset (e.g.
+/// `inject_limit`) panic on a non-char-boundary.
+fn push_blanked(out: &mut String, ch: char) {
+    if ch == '\n' {
+        out.push('\n');
+    } else {
+        for _ in 0..ch.len_utf8() {
+            out.push(' ');
+        }
+    }
 }
 
 fn sanitize_sql(sql: &str) -> SanitizeResult {
@@ -107,7 +176,7 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 _ => sanitized.push(ch),
             },
             State::SingleQuote => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '\'' {
                     if chars.peek() == Some(&'\'') {
                         sanitized.push(' ');
@@ -118,7 +187,7 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::DoubleQuote => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '"' {
                     if chars.peek() == Some(&'"') {
                         sanitized.push(' ');
@@ -129,19 +198,19 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::Backtick => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '`' {
                     state = State::Normal;
                 }
             }
             State::LineComment => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '\n' {
                     state = State::Normal;
                 }
             }
             State::BlockComment => {
-                sanitized.push(if ch == '\n' { '\n' } else { ' ' });
+                push_blanked(&mut sanitized, ch);
                 if ch == '*' && chars.peek() == Some(&'/') {
                     sanitized.push(' ');
                     chars.next();
@@ -216,6 +285,13 @@ fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
             )));
         }
     }
+    for ident in FORBIDDEN_IDENTIFIERS {
+        if tokens.iter().any(|token| token == ident) {
+            return Err(ServiceError::InvalidParams(format!(
+                "identifier is not allowed: {ident}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -227,13 +303,17 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
 
 /// Inject LIMIT clause if not present and max_rows is set.
 fn inject_limit(sql: &str, max_rows: usize) -> String {
-    // Strip trailing content after the last unquoted semicolon using the
-    // sanitized form to identify semicolons in Normal state. This prevents
-    // trailing quoted identifiers (e.g. `SHOW;\`foo\``) from interfering
-    // with LIMIT injection.
+    // Strip everything from the FIRST unquoted semicolon onward, using the
+    // sanitized form to identify semicolons in Normal state. `validate_read_only`
+    // has already rejected anything with a non-empty trailing statement, so past
+    // the first unquoted `;` there is only whitespace and further `;` — cutting
+    // there yields the single real statement. (Using the *last* semicolon would
+    // keep an intermediate one, e.g. `SELECT 1;;` -> `SELECT 1;`, and appending
+    // LIMIT after it would re-introduce a second statement.) This also drops
+    // trailing quoted identifiers (e.g. `SHOW;\`foo\``) before LIMIT injection.
     let trimmed = sql.trim_end();
     let sanitized_full = sanitize_sql(trimmed);
-    let base = if let Some(pos) = sanitized_full.sql.rfind(';') {
+    let base = if let Some(pos) = sanitized_full.sql.find(';') {
         trimmed[..pos].trim_end()
     } else {
         trimmed
@@ -323,25 +403,45 @@ impl QueryService for ClickHouseQueryService {
     ) -> Result<QueryResult, ServiceError> {
         let guarded_sql = guard_sql(sql, guard)?;
 
+        // Server-side enforcement (defense-in-depth beyond the guard), passed as
+        // ClickHouse HTTP settings appended to the query URL (which already
+        // carries `?database=...`):
+        //  - readonly=2 forbids any write/DDL and cannot be downgraded mid-query;
+        //  - max_result_rows + result_overflow_mode=break cap returned rows
+        //    regardless of any LIMIT the user did or didn't write (A.83/A.120);
+        //  - max_execution_time bounds server-side runtime (A.121).
+        let url = format!(
+            "{}&readonly=2&max_result_rows={}&result_overflow_mode=break\
+             &max_execution_time={}&cancel_http_readonly_queries_on_client_close=1",
+            self.query_url, guard.max_rows, guard.timeout_secs
+        );
+
         let start = Instant::now();
-        let resp: reqwest::Response = tokio::time::timeout(
-            std::time::Duration::from_secs(guard.timeout_secs),
-            self.client.post(&self.query_url).body(guarded_sql).send(),
+        let request = self.client.post(&url).body(guarded_sql);
+
+        // Wrap send AND body download in one timeout, so a slow body stream
+        // can't bypass the deadline by trickling after headers arrive (A.121).
+        let exec = async {
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ServiceError::Internal(format!(
+                    "ClickHouse query error: {body}"
+                )));
+            }
+            resp.json::<ClickHouseJsonCompact>().await.map_err(|e| {
+                ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
+            })
+        };
+        let result: ClickHouseJsonCompact = tokio::time::timeout(
+            std::time::Duration::from_secs(guard.timeout_secs.saturating_add(2)),
+            exec,
         )
         .await
-        .map_err(|_| ServiceError::Internal("query timed out".to_string()))?
-        .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ServiceError::Internal(format!(
-                "ClickHouse query error: {body}"
-            )));
-        }
-
-        let result: ClickHouseJsonCompact = resp.json().await.map_err(|e| {
-            ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
-        })?;
+        .map_err(|_| ServiceError::Internal("query timed out".to_string()))??;
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
         let row_count = result.data.len();
@@ -364,12 +464,16 @@ impl QueryService for ClickHouseQueryService {
     }
 
     async fn list_datasets(&self) -> Result<Vec<DatasetSchema>, ServiceError> {
+        // Escape the database name for a single-quoted ClickHouse string literal.
+        // It comes from config (PB__STORAGE__CLICKHOUSE_DATABASE), not request
+        // input, but interpolating it raw would let a compromised/malformed config
+        // value inject SQL here — defense-in-depth (HFT-review finding).
+        let escaped_db = escape_ch_string_literal(&self.database);
         let sql = format!(
             "SELECT table_name, column_name, data_type \
              FROM information_schema.columns \
-             WHERE table_schema = '{}' \
-             ORDER BY table_name, ordinal_position",
-            self.database
+             WHERE table_schema = '{escaped_db}' \
+             ORDER BY table_name, ordinal_position"
         );
 
         let resp: reqwest::Response = self
@@ -462,6 +566,23 @@ impl QueryService for AnyQueryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_ch_string_literal_neutralizes_injection() {
+        // A benign db name is unchanged.
+        assert_eq!(escape_ch_string_literal("poly_book"), "poly_book");
+        // A single quote that would close the literal is escaped.
+        assert_eq!(escape_ch_string_literal("a'b"), "a\\'b");
+        // A classic injection payload cannot break out of the literal.
+        let injected = escape_ch_string_literal("x' OR '1'='1");
+        assert_eq!(injected, "x\\' OR \\'1\\'=\\'1");
+        assert!(
+            !injected.contains("' OR '"),
+            "quote must not stay unescaped"
+        );
+        // Backslash is escaped first so it cannot re-enable a following quote.
+        assert_eq!(escape_ch_string_literal("a\\'b"), "a\\\\\\'b");
+    }
 
     #[test]
     fn validate_read_only_rejects_write_sql() {
@@ -608,6 +729,35 @@ mod tests {
     }
 
     #[test]
+    fn guard_rejects_io_table_functions_and_system() {
+        // SELECT-rooted SSRF / file-read / info-disclosure attempts must all be
+        // rejected by the identifier blocklist (A.24/A.130).
+        let guard = QueryGuard::default();
+        let attacks = [
+            "SELECT * FROM file('/etc/passwd', 'CSV')",
+            "SELECT * FROM url('http://169.254.169.254/latest/meta-data', 'CSV')",
+            "SELECT * FROM s3('https://bucket/key', 'CSV')",
+            "SELECT * FROM remote('1.2.3.4:9000', default, t)",
+            "SELECT * FROM system.users",
+            "SELECT name FROM mysql('host:3306', 'db', 't', 'u', 'p')",
+            "SELECT 1 INTO OUTFILE '/tmp/x'",
+            "WITH x AS (SELECT * FROM file('/etc/passwd')) SELECT * FROM x",
+        ];
+        for sql in attacks {
+            assert!(
+                guard_sql(sql, &guard).is_err(),
+                "guard must reject dangerous query: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_allows_legitimate_dataset_query() {
+        let guard = QueryGuard::default();
+        assert!(guard_sql("SELECT asset_id, price FROM book_events", &guard).is_ok());
+    }
+
+    #[test]
     fn validate_read_only_empty_string() {
         assert!(validate_read_only("").is_err());
     }
@@ -665,5 +815,110 @@ mod tests {
         let first = guard_sql(sql, &guard).unwrap();
         let second = guard_sql(&first, &guard).unwrap();
         assert_eq!(first, second, "LIMIT injection must be idempotent");
+    }
+
+    /// Property test for the invariant `fuzz_query_guard` enforces: whenever the
+    /// first guard pass accepts an input, its output must itself be guard-valid
+    /// (a stable, non-empty, single statement). This deterministically sweeps
+    /// short strings built from the parser-significant alphabet (semicolons,
+    /// quotes, comment markers, newlines, multi-byte chars) crossed with the
+    /// boundary `max_rows` values, so a regression is caught in CI without
+    /// relying on the stochastic fuzzer. Covers the `SELECT 1;;` (last- vs
+    /// first-semicolon) and multi-byte-offset cases that previously crashed.
+    #[test]
+    fn guard_output_is_always_guard_valid() {
+        let prefixes = [
+            "SELECT 1",
+            "SELECT 1 ",
+            "SHOW",
+            "SELECT",
+            "SELECT '",
+            "SELECT \"",
+            "SELECT `",
+            "DESCRIBE x",
+            "SELECT '1'",
+            "SELECT /*",
+            "SELECT --",
+            "SELECT '€'",
+            "SELECT 1 LIMIT 5",
+            "SELECT 1 LIMIT 5 -",
+            "SELECT 1 LIMIT 5 --",
+        ];
+        let alpha = [
+            ' ', ';', '\'', '"', '`', '-', '/', '*', '\n', '(', ')', 'x', '1', '€',
+        ];
+        for p in prefixes {
+            for max_rows in [0usize, 1, 100] {
+                let guard = QueryGuard {
+                    max_rows,
+                    timeout_secs: 1,
+                };
+                let n = alpha.len();
+                for len in 0..=3usize {
+                    for idx in 0..n.pow(len as u32) {
+                        let mut sql = String::from(p);
+                        let mut k = idx;
+                        for _ in 0..len {
+                            sql.push(alpha[k % n]);
+                            k /= n;
+                        }
+                        // Only inputs the first pass accepts exercise the property.
+                        let Ok(first) = guard_sql(&sql, &guard) else {
+                            continue;
+                        };
+                        assert!(
+                            !first.trim().is_empty(),
+                            "guarded SQL must not be empty: {sql:?} -> {first:?}",
+                        );
+                        // Idempotence (below) is the meaningful invariant: a
+                        // trailing *unquoted* semicolon would be stripped on the
+                        // second pass, breaking equality. A `;` inside a trailing
+                        // comment/string is harmless and intentionally retained.
+                        let second = guard_sql(&first, &guard).unwrap_or_else(|e| {
+                            panic!(
+                                "re-guarding accepted output failed: {sql:?} -> {first:?}: {e:?}"
+                            )
+                        });
+                        assert_eq!(
+                            first, second,
+                            "guard must be idempotent: {sql:?} -> {first:?} != {second:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression: a multi-byte char inside a quote or comment must not shift
+    /// the byte offsets `inject_limit` uses to slice the original SQL. Before
+    /// `sanitize_sql` became byte-length-preserving, the sanitized string was
+    /// shorter than the original (each multi-byte char collapsed to one byte),
+    /// so `trimmed[..pos]` either panicked on a non-char-boundary or sliced
+    /// mid-quote and produced an unbalanced statement that failed re-guarding.
+    #[test]
+    fn guard_sql_multibyte_in_quote_is_balanced_and_idempotent() {
+        let guard = QueryGuard {
+            max_rows: 100,
+            timeout_secs: 1,
+        };
+        // Each of these passes the first guard pass; the result must itself be
+        // guard-valid (the property the fuzz target `fuzz_query_guard` checks).
+        for sql in [
+            "SELECT \"€\" ;",
+            "SELECT 'π' ;",
+            "SELECT 1 /* € */ ;",
+            "SELECT 1 --€\n;",
+            "SELECT `名` ;",
+        ] {
+            let first = guard_sql(sql, &guard)
+                .unwrap_or_else(|e| panic!("first guard pass failed for {sql:?}: {e:?}"));
+            let second = guard_sql(&first, &guard)
+                .unwrap_or_else(|e| panic!("second guard pass failed for {sql:?}: {e:?}"));
+            assert_eq!(first, second, "guard must be idempotent for {sql:?}");
+            assert!(
+                !first.trim_end().ends_with(';'),
+                "guarded SQL must not keep a trailing semicolon for {sql:?}",
+            );
+        }
     }
 }

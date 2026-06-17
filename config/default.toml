@@ -19,8 +19,13 @@ clickhouse_database = "poly_book"
 clickhouse_batch_interval_secs = 1
 clickhouse_batch_size = 10000
 
+# Trust boundary: these services have NO authentication. They default to
+# loopback (127.0.0.1) so nothing is exposed off-host out of the box. To serve
+# other hosts, put an authenticating reverse proxy in front and only then change
+# the bind address (e.g. PB__API__LISTEN_ADDR=0.0.0.0:3000). Never bind the
+# metrics or SQL-workbench surfaces to a public interface.
 [metrics]
-listen_addr = "0.0.0.0:9090"
+listen_addr = "127.0.0.1:9090"
 endpoint = "/metrics"
 
 [wal]
@@ -30,9 +35,16 @@ max_segments = 16
 max_consumer_lag_bytes = 268435456  # 256 MB
 # How often separated `serve` durably commits its live WAL reader position.
 position_commit_interval_ms = 1000
+# How often the ingest writer flushes buffered records to the OS page cache so a
+# tailing `serve` reader sees them promptly (records are read from disk).
+flush_interval_ms = 20
+# How often the ingest writer issues fdatasync. Bounds the data-loss window on
+# OS crash / power loss to roughly this interval's worth of records.
+sync_interval_ms = 200
 
 [api]
-listen_addr = "0.0.0.0:3000"
+# Loopback by default — see the trust-boundary note above the [metrics] section.
+listen_addr = "127.0.0.1:3000"
 default_depth = 20
 max_depth = 200
 stale_after_secs = 15
@@ -42,11 +54,23 @@ historical_backend = "parquet"
 query_workbench_enabled = false
 query_max_rows = 10000
 query_timeout_secs = 30
+# Per-request wall-clock timeout (seconds) for request/response HTTP routes
+# (replay, integrity, etc.); an over-running request is rejected with 504. Does
+# not apply to the long-lived WebSocket stream.
+http_request_timeout_secs = 30
+# Optional bearer token. When set (non-empty), every API and WebSocket route
+# requires `Authorization: Bearer <token>`; health probes stay open. Leave unset
+# for the default loopback-only, no-auth workstation. Set this before exposing the
+# API on any non-loopback interface (audit P2-SEC-2). Override: PB__API__AUTH_TOKEN.
+# auth_token = ""
 
 [grpc]
 enabled = false
-listen_addr = "0.0.0.0:50051"
+# Loopback by default — see the trust-boundary note above the [metrics] section.
+listen_addr = "127.0.0.1:50051"
 
 [logging]
 level = "info"
+# "json" emits structured JSON logs; any other value (e.g. "pretty") uses the
+# human-readable text formatter.
 format = "pretty"

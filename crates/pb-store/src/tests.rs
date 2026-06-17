@@ -35,6 +35,7 @@ fn test_provenance(recv_ts: u64) -> EventProvenance {
         source_event_id: Some("evt-1".into()),
         source_session_id: Some("sess-1".into()),
         sequence: Some(Sequence::new(1)),
+        ingest_ordinal: None,
     }
 }
 
@@ -143,13 +144,15 @@ const FIXED_TS_US: u64 = 1_750_000_200_000_000;
 #[test]
 fn book_event_schema_has_correct_fields() {
     let schema = book_event_schema();
-    assert_eq!(schema.fields().len(), 11);
+    assert_eq!(schema.fields().len(), 12);
     assert_eq!(schema.field(0).name(), "recv_timestamp_us");
     assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
     assert!(!schema.field(0).is_nullable());
     assert_eq!(schema.field(3).name(), "event_kind");
     assert_eq!(schema.field(3).data_type(), &DataType::UInt8);
     assert!(schema.field(7).is_nullable()); // sequence
+    assert_eq!(schema.field(11).name(), "ingest_ordinal");
+    assert!(schema.field(11).is_nullable());
 }
 
 #[test]
@@ -201,7 +204,7 @@ fn execution_event_schema_has_correct_fields() {
 #[test]
 fn schema_for_record_dispatches_correctly() {
     let book = PersistedRecord::Book(make_book_event(FIXED_TS_US));
-    assert_eq!(schema_for_record(&book).fields().len(), 11);
+    assert_eq!(schema_for_record(&book).fields().len(), 12);
 
     let trade = PersistedRecord::Trade(make_trade_event(FIXED_TS_US));
     assert_eq!(schema_for_record(&trade).fields().len(), 12);
@@ -228,7 +231,7 @@ fn book_event_record_batch_roundtrip() {
     let record = PersistedRecord::Book(make_book_event(FIXED_TS_US));
     let batch = records_to_record_batch(&[&record]).unwrap();
     assert_eq!(batch.num_rows(), 1);
-    assert_eq!(batch.num_columns(), 11);
+    assert_eq!(batch.num_columns(), 12);
 }
 
 #[test]
@@ -338,6 +341,43 @@ async fn writer_single_book_event_creates_file() {
 }
 
 #[tokio::test]
+async fn writer_different_content_same_timestamp_does_not_overwrite() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    // Two book events at the same timestamp (so same asset/hour/first_ts) but
+    // different content must produce two distinct files, not silently overwrite
+    // each other (A.122).
+    let mut ev_a = make_book_event(FIXED_TS_US);
+    ev_a.price = FixedPrice::new(5000).unwrap();
+    let mut ev_b = make_book_event(FIXED_TS_US);
+    ev_b.price = FixedPrice::new(6000).unwrap();
+
+    writer
+        .write_record(PersistedRecord::Book(ev_a))
+        .await
+        .unwrap();
+    writer
+        .write_record(PersistedRecord::Book(ev_b))
+        .await
+        .unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "different content at the same timestamp must not overwrite"
+    );
+}
+
+#[tokio::test]
 async fn writer_path_includes_date_partition() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);
@@ -361,6 +401,59 @@ async fn writer_path_includes_date_partition() {
     assert!(
         path.contains("BTC-5M-YES"),
         "path should contain asset: {path}"
+    );
+}
+
+#[test]
+fn partition_hour_key_formats_valid_timestamp() {
+    // FIXED_TS_US is mid-2025; the key must be a real YYYY/MM/DD/HH path.
+    let key = crate::writer::partition_hour_key(FIXED_TS_US);
+    assert!(
+        key.starts_with("2025/"),
+        "expected 2025 partition, got {key}"
+    );
+    assert_ne!(key, "invalid_timestamp");
+}
+
+#[test]
+fn partition_hour_key_quarantines_out_of_range_timestamps() {
+    // Zero / unstamped and absurd far-future values must NOT silently land in the
+    // 1970 partition (A.123) — they go to a dedicated quarantine partition.
+    assert_eq!(crate::writer::partition_hour_key(0), "invalid_timestamp");
+    assert_eq!(crate::writer::partition_hour_key(1), "invalid_timestamp");
+    assert_eq!(
+        crate::writer::partition_hour_key(u64::MAX),
+        "invalid_timestamp"
+    );
+}
+
+#[tokio::test]
+async fn writer_routes_invalid_timestamp_to_quarantine_partition() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    // A book event with an unstamped (zero) partition timestamp.
+    writer
+        .write_record(PersistedRecord::Book(make_book_event(0)))
+        .await
+        .unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    let path = entries[0].location.as_ref();
+    assert!(
+        path.contains("invalid_timestamp"),
+        "out-of-range timestamp should be quarantined, got {path}"
+    );
+    assert!(
+        !path.contains("1970"),
+        "must not be misfiled into the 1970 partition: {path}"
     );
 }
 
@@ -442,6 +535,47 @@ async fn writer_multiple_flushes_produce_separate_files() {
         .filter_map(|r| r.ok())
         .collect();
     assert_eq!(entries.len(), 2, "two flushes should produce two files");
+}
+
+#[tokio::test]
+async fn reconcile_replaces_hour_partitions_idempotently() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    async fn count_files(store: &Arc<dyn ObjectStore>) -> usize {
+        store
+            .list(None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .count()
+    }
+
+    // Two separate live flushes for the same (asset, hour) produce two files
+    // that, read together, would double-count the window (the A.27 hazard).
+    let r1 = PersistedRecord::Book(make_book_event(FIXED_TS_US));
+    let r2 = PersistedRecord::Book(make_book_event(FIXED_TS_US + 1_000_000));
+    writer.write_record(r1.clone()).await.unwrap();
+    writer.write_record(r2.clone()).await.unwrap();
+    assert_eq!(count_files(&store).await, 2);
+
+    // Reconciling from the authoritative WAL stream rebuilds the hour as one
+    // complete file, replacing the fragmented live-sink files.
+    writer
+        .write_batch_replacing(&[r1.clone(), r2.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        count_files(&store).await,
+        1,
+        "reconcile should collapse the hour to a single authoritative file"
+    );
+
+    // Re-running is idempotent: the same single file, no duplication.
+    writer.write_batch_replacing(&[r1, r2]).await.unwrap();
+    assert_eq!(count_files(&store).await, 1, "reconcile must be idempotent");
 }
 
 #[tokio::test]
@@ -624,6 +758,11 @@ async fn parquet_sink_flushes_on_cancellation() {
     let handle = tokio::spawn(async move { sink.run_with_token(token_clone).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
+    // Model the production shutdown sequence: the upstream drops the sink's sender
+    // (the fanout task ends) AND the token is cancelled. The sink drains to
+    // completion (recv -> None) rather than blocking on a live-but-idle sender,
+    // which would now (correctly) be reported as an incomplete-shutdown error.
+    drop(tx);
     token.cancel();
 
     handle.await.unwrap().unwrap();
@@ -643,10 +782,64 @@ async fn parquet_sink_flushes_on_cancellation() {
 }
 
 #[tokio::test]
+async fn parquet_sink_drains_queued_records_on_shutdown() {
+    // Records sitting in the channel when shutdown is requested must be drained
+    // and flushed, not abandoned (audit finding A.153).
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let (tx, rx) = mpsc::channel::<PersistedRecord>(32);
+
+    // Enqueue several same-hour records, then close the sender (upstream stopping)
+    // and pre-cancel so the sink takes its shutdown path with a non-empty channel.
+    for i in 0..5u64 {
+        tx.send(PersistedRecord::Book(make_book_event(
+            FIXED_TS_US + i * 1_000_000,
+        )))
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let sink = ParquetSink::new(rx, store.clone(), "data".into())
+        .with_flush_interval(Duration::from_secs(300));
+    sink.run_with_token(token).await.unwrap();
+
+    let entries: Vec<_> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "queued records must be flushed on shutdown, not abandoned"
+    );
+
+    let mut total_rows = 0i64;
+    for entry in &entries {
+        let data = store
+            .get(&entry.location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let reader =
+            parquet::file::reader::SerializedFileReader::new(bytes::Bytes::from(data.to_vec()))
+                .unwrap();
+        total_rows += reader.metadata().file_metadata().num_rows();
+    }
+    assert_eq!(total_rows, 5, "all queued records must be persisted");
+}
+
+#[tokio::test]
 async fn parquet_sink_empty_channel_no_files() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);
-    let (_tx, rx) = mpsc::channel::<PersistedRecord>(32);
+    let (tx, rx) = mpsc::channel::<PersistedRecord>(32);
     let token = CancellationToken::new();
 
     let sink = ParquetSink::new(rx, store.clone(), "data".into())
@@ -655,6 +848,9 @@ async fn parquet_sink_empty_channel_no_files() {
     let token_clone = token.clone();
     let handle = tokio::spawn(async move { sink.run_with_token(token_clone).await });
 
+    // Drop the sender (production drops it on shutdown) so the drain completes
+    // instead of blocking on a live-but-idle sender.
+    drop(tx);
     token.cancel();
     handle.await.unwrap().unwrap();
 

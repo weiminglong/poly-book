@@ -14,7 +14,13 @@ use pb_types::event::PersistedRecord;
 use crate::WalError;
 
 /// Current serialization version.
-const CURRENT_VERSION: u8 = 1;
+///
+/// v2 added `EventProvenance.ingest_ordinal` (audit A.116). bincode is not
+/// self-describing, so a v1 payload (6 provenance fields) cannot be safely
+/// decoded into the v2 struct (7 fields) — the trailing read would consume
+/// unrelated bytes. We therefore reject v1 explicitly rather than risk silent
+/// corruption; operators must drain the WAL before upgrading across this bump.
+const CURRENT_VERSION: u8 = 2;
 
 /// Encode a `PersistedRecord` into a versioned byte buffer.
 ///
@@ -36,7 +42,10 @@ pub fn decode(data: &[u8]) -> Result<PersistedRecord, WalError> {
     }
     let version = data[0];
     match version {
-        1 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
+        2 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
+        1 => Err(WalError::Codec(
+            "record written by a pre-A.116 binary (v1); drain the WAL before upgrading".to_string(),
+        )),
         other => Err(WalError::Codec(format!(
             "unsupported record version: {other}"
         ))),
@@ -53,6 +62,40 @@ mod tests {
 
     use super::*;
 
+    /// A fully-fixed record (no f64, no None-vs-Some ambiguity) for the golden
+    /// byte fixture. bincode is positional, so any field reorder/insert in the
+    /// persisted types silently changes this layout — the golden test catches it
+    /// (audit finding P1-TEST-1).
+    fn golden_book_record() -> PersistedRecord {
+        PersistedRecord::Book(BookEvent {
+            asset_id: AssetId::new("tok1"),
+            kind: BookEventKind::Delta,
+            side: Side::Bid,
+            price: FixedPrice::new(5000).unwrap(),
+            size: FixedSize::new(100_000_000),
+            provenance: EventProvenance {
+                recv_timestamp_us: 1_700_000_000_000_000,
+                exchange_timestamp_us: 1_699_999_999_000_000,
+                source: DataSource::WebSocket,
+                source_event_id: Some("evt-1".to_string()),
+                source_session_id: None,
+                sequence: Some(Sequence::new(42)),
+                ingest_ordinal: Some(7),
+            },
+        })
+    }
+
+    #[test]
+    fn golden_codec_book_v2_bytes_are_stable() {
+        let encoded = encode(&golden_book_record()).unwrap();
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        // Frozen v2 on-disk layout. If a persisted-type field is reordered/added,
+        // this fails — forcing a deliberate codec version bump + migration rather
+        // than a silent format change (P1-TEST-1).
+        const GOLDEN_V2_HEX: &str = "02000000000400000000000000746f6b3101000000000000000600000000000000302e353030300a000000000000003130302e30303030303000401e18240a0600c0fd0e18240a0600000000000105000000000000006576742d3100012a00000000000000010700000000000000";
+        assert_eq!(hex, GOLDEN_V2_HEX, "WAL codec v2 layout changed");
+    }
+
     fn test_book_record() -> PersistedRecord {
         PersistedRecord::Book(BookEvent {
             asset_id: AssetId::new("tok1"),
@@ -67,6 +110,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: Some("ws-1".to_string()),
                 sequence: Some(Sequence::new(42)),
+                ingest_ordinal: None,
             },
         })
     }
@@ -82,6 +126,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: Some(5),
             observed_sequence: Some(8),
@@ -127,7 +172,19 @@ mod tests {
     fn version_byte_is_first() {
         let encoded = encode(&test_book_record()).unwrap();
         assert!(encoded.len() > 1);
-        assert_eq!(encoded[0], 1);
+        assert_eq!(encoded[0], CURRENT_VERSION);
+    }
+
+    #[test]
+    fn decode_v1_payload_is_rejected_with_drain_hint() {
+        // A v1-tagged payload must be rejected (not silently misparsed into the
+        // v2 struct that gained ingest_ordinal) so operators drain before upgrade.
+        let mut encoded = encode(&test_book_record()).unwrap();
+        encoded[0] = 1;
+        match decode(&encoded).unwrap_err() {
+            WalError::Codec(msg) => assert!(msg.contains("drain"), "unexpected msg: {msg}"),
+            other => panic!("expected Codec error, got: {other:?}"),
+        }
     }
 
     // ---- Codec round-trip for all PersistedRecord variants ----
@@ -148,6 +205,7 @@ mod tests {
                 source_event_id: Some("hash-1".to_string()),
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
         })
     }
@@ -164,6 +222,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             bids: vec![PriceLevel {
                 price: FixedPrice::new(5000).unwrap(),

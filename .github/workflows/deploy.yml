@@ -23,30 +23,56 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
       - name: Build and push Docker image
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/poly-book:$IMAGE_TAG .
           docker push $ECR_REGISTRY/poly-book:$IMAGE_TAG
+          # Resolve the immutable content digest of the image we just pushed and
+          # deploy by digest (repo@sha256:...) instead of the mutable :sha tag, so
+          # the running task is pinned to exact bytes that cannot be overwritten
+          # by a later push to the same tag (audit A.51).
+          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "$ECR_REGISTRY/poly-book:$IMAGE_TAG")
+          echo "Pinned image: $IMAGE_DIGEST"
+          echo "image=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+
+      # Canary gate: before rolling the image out to the fleet, prove the exact
+      # pushed artifact actually boots and its CLI is wired (catches the
+      # broken-image class — unbuildable binary, missing runtime lib, bad entry
+      # point — that the audit flagged, A.51/P3-CHG-1). A failure here stops the
+      # deploy before any ECS task is touched. The ECS deployment circuit breaker
+      # (infra/ecs.tf) is the second, runtime safety net that auto-rolls-back a
+      # revision whose tasks fail to stabilize.
+      #
+      # NOTE: full shadow/canary traffic-diffing (mirror live feed to the new
+      # revision and diff its reconstructed books against stable before promotion)
+      # needs a live staging environment and is not performed here.
+      - name: Smoke-test the pushed image
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" --config /etc/poly-book/default.toml replay --help
 
       - name: Deploy to ECS
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE: ${{ steps.build.outputs.image }}
         run: |
           # Get current task definition
           TASK_DEF=$(aws ecs describe-task-definition \
@@ -54,9 +80,9 @@ jobs:
             --query 'taskDefinition' \
             --output json)
 
-          # Update image in container definition
+          # Pin the container to the immutable image digest resolved above.
           NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
-            --arg IMAGE "$ECR_REGISTRY/poly-book:$IMAGE_TAG" \
+            --arg IMAGE "$IMAGE" \
             '.containerDefinitions[0].image = $IMAGE |
              del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
 

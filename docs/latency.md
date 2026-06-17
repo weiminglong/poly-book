@@ -16,10 +16,14 @@ WebSocket frame arrival
     │   └─ Price change delta     ~0.5 µs
     │   └─ Last trade price       ~0.3 µs
     │
-    ├─ Dispatcher normalize       ~1–3 µs     (parse + intern + sequence)
+    ├─ Dispatcher normalize       ~480 ns/entry (measured, full async pipeline)
     │   └─ FixedPrice::try_from   ~30 ns
     │   └─ FxHashMap lookup       ~10 ns
+    │   └─ shadow-book apply +    ~included    (A.74 cross-check vs venue
+    │      best_bid/ask mismatch                best_bid/ask per price_change entry)
     │   └─ Channel send           ~50–100 ns
+    │   (`cargo bench -p pb-feed`: ~2.1M price_change entries/s incl. JSON parse,
+    │    normalize, shadow-book cross-check, and channel handoff)
     │
     ├─ Book update                ~50–200 ns  (BTreeMap insert/remove)
     │   └─ apply_delta            ~50 ns
@@ -28,6 +32,13 @@ WebSocket frame arrival
     │   └─ weighted_mid_price     ~10 ns
     │   └─ check_integrity        ~10 ns
     │   └─ top_bids/asks(5)       ~20 ns
+    │
+    ├─ WAL append (durability)    ~340 ns     (encode + framed buffered append)
+    │   └─ codec::encode          ~80 ns      (bincode + version byte)
+    │   └─ append + flush         ~260 ns/rec (CRC + length-prefix + BufWriter)
+    │   └─ fdatasync              batched on sync_interval_ms, NOT per record
+    │       (a per-record fdatasync is ms-scale — ~10⁴× the amortized append —
+    │        which is why the WAL batches it; see `cargo bench -p pb-wal`)
     │
     ├─ Storage flush              async, off hot path
     │   └─ Parquet row group      ~10–50 ms  (buffered, 5-min interval)
@@ -60,6 +71,7 @@ WebSocket frame arrival
 cargo bench                      # all benchmarks
 cargo bench -p pb-types          # fixed-point and wire deser
 cargo bench -p pb-book           # book operations, depth, and analytics
+cargo bench -p pb-wal            # WAL durability hot path (encode, append, fsync)
 ```
 
 ### Prometheus Metrics

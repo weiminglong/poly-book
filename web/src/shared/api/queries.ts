@@ -47,7 +47,16 @@ export const queryKeys = {
   replay: (req: ReplayRequest) => ['replay', req.assetId, req.atUs, req.mode, req.depth] as const,
   integrity: (req: IntegrityRequest) => ['integrity', req.assetId, req.startUs, req.endUs] as const,
   execution: (req: ExecutionRequest) =>
-    ['execution', req.orderId, req.assetId, req.startUs, req.endUs, req.limit] as const,
+    [
+      'execution',
+      req.orderId,
+      req.assetId,
+      req.startUs,
+      req.endUs,
+      req.limit,
+      req.offset,
+      req.order,
+    ] as const,
   datasets: ['datasets'] as const,
 }
 
@@ -58,7 +67,7 @@ export function useFeedStatus(opts?: Partial<UseQueryOptions<FeedStatusResponse>
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.feedStatus,
+    queryKey: [sourceMode, ...queryKeys.feedStatus],
     queryFn: isDemo
       ? () => getDemoFeedStatus()
       : ({ signal }) =>
@@ -76,7 +85,7 @@ export function useActiveAssets(opts?: Partial<UseQueryOptions<ActiveAssetSummar
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.activeAssets,
+    queryKey: [sourceMode, ...queryKeys.activeAssets],
     queryFn: isDemo
       ? () => getDemoActiveAssets()
       : ({ signal }) =>
@@ -98,7 +107,7 @@ export function useOrderBookSnapshot(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.orderbook(assetId, depth),
+    queryKey: [sourceMode, ...queryKeys.orderbook(assetId, depth)],
     queryFn: isDemo
       ? () => getDemoSnapshot(assetId, depth)
       : ({ signal }) =>
@@ -124,7 +133,7 @@ export function useReplayReconstruction(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.replay(request) : ['replay-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.replay(request) : ['replay-disabled'])],
     queryFn: isDemo
       ? () => {
           if (!request) throw new Error('No replay request')
@@ -141,7 +150,9 @@ export function useReplayReconstruction(
               source: 'parquet',
               depth: String(request.depth),
             }),
-            { signal },
+            // Historical reconstruction can scan a wide window; the default 4s
+            // timeout aborts legitimate queries (HFT-review #11).
+            { signal, timeoutMs: 30_000 },
           )
         },
     enabled: Boolean(request),
@@ -158,7 +169,7 @@ export function useIntegritySummary(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.integrity(request) : ['integrity-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.integrity(request) : ['integrity-disabled'])],
     queryFn: isDemo
       ? () => getDemoIntegrity()
       : ({ signal }) => {
@@ -170,7 +181,8 @@ export function useIntegritySummary(
               start_us: String(request.startUs),
               end_us: String(request.endUs),
             }),
-            { signal },
+            // Integrity over a wide window can exceed the default 4s (HFT-review #11).
+            { signal, timeoutMs: 30_000 },
           )
         },
     enabled: isDemo || Boolean(request),
@@ -187,7 +199,7 @@ export function useExecutionTimeline(
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: request ? queryKeys.execution(request) : ['execution-disabled'],
+    queryKey: [sourceMode, ...(request ? queryKeys.execution(request) : ['execution-disabled'])],
     queryFn: isDemo
       ? () => getDemoExecution()
       : ({ signal }) => {
@@ -199,6 +211,8 @@ export function useExecutionTimeline(
           if (request.orderId) params.order_id = request.orderId
           if (request.assetId) params.asset_id = request.assetId
           if (request.limit !== undefined) params.limit = String(request.limit)
+          if (request.offset !== undefined) params.offset = String(request.offset)
+          if (request.order !== undefined) params.order = request.order
           return fetchAndValidate(
             executionTimelineResponseSchema,
             buildUrl(base, '/api/v1/execution/orders', params),
@@ -216,7 +230,7 @@ export function useDatasets(opts?: Partial<UseQueryOptions<DatasetSchemaResponse
   const base = getApiBaseUrl()
   const isDemo = sourceMode === 'demo'
   return useQuery({
-    queryKey: queryKeys.datasets,
+    queryKey: [sourceMode, ...queryKeys.datasets],
     queryFn: isDemo
       ? () => getDemoDatasets()
       : ({ signal }) =>
@@ -234,9 +248,16 @@ export function useQuerySql() {
 
   return useMutation({
     mutationFn: async (sql: string) => {
-      return postAndValidate(queryResultResponseSchema, buildUrl(base, '/api/v1/query/sql'), {
-        sql,
-      })
+      // The SQL workbench runs analytic queries that can legitimately take
+      // longer than the default snappy-read timeout. Allow up to just above the
+      // server-side query timeout so valid queries are not aborted client-side
+      // (A.73).
+      return postAndValidate(
+        queryResultResponseSchema,
+        buildUrl(base, '/api/v1/query/sql'),
+        { sql },
+        { timeoutMs: 35_000 },
+      )
     },
     onSuccess: (data) => {
       queryClient.setQueryData(['query-result'], data)

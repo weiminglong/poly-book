@@ -229,6 +229,12 @@ pub struct BookUpdateMessage {
     pub slug: Option<String>,
     pub sequence: u64,
     pub last_update_us: u64,
+    // True total book depth, distinct from `bids.len()`/`asks.len()` which are
+    // capped at the streamed depth. Carrying them lets the client report the real
+    // depth instead of under-reporting it from the truncated arrays (HFT-review
+    // #4; matches the HTTP snapshot which already exposes these).
+    pub bid_depth: usize,
+    pub ask_depth: usize,
     pub bids: Vec<PriceLevelView>,
     pub asks: Vec<PriceLevelView>,
     pub mid_price: Option<f64>,

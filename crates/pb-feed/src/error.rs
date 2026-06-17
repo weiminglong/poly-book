@@ -23,11 +23,11 @@ pub enum FeedError {
     #[error("output channel closed — downstream consumer stopped")]
     ChannelSend,
 
+    #[error("websocket connection stalled — no data within the read-idle timeout")]
+    ConnectionStalled,
+
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
-
-    #[error("TLS handshake error: {0}")]
-    Tls(#[from] native_tls::Error),
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for FeedError {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from 'react'
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { Badge, Button, CardSkeleton } from '../shared/components'
 import { CommandPalette } from '../shared/components/command-palette'
 import { ShortcutHelp } from '../shared/components/shortcut-help'
@@ -59,6 +59,7 @@ function AppShell() {
   const { theme, toggleTheme, density, setDensity } = useTheme()
   const { sourceMode, setSourceMode } = useSourceMode()
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
+  const location = useLocation()
   useFocusOnNavigate()
   useKeyboardShortcut({
     key: '?',
@@ -100,7 +101,7 @@ function AppShell() {
         </nav>
 
         <main id="main-content">
-          <ErrorBoundary level="route">
+          <ErrorBoundary level="route" resetKeys={[location.pathname]}>
             <Suspense fallback={<RouteLoadingSkeleton />}>
               <Routes>
                 <Route path="/" element={<Navigate replace to="/live-feed" />} />

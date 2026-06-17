@@ -5,6 +5,7 @@ pub mod event;
 pub mod fixed;
 pub mod newtype;
 pub mod slug;
+pub mod time;
 pub mod wire;
 
 pub use error::TypesError;

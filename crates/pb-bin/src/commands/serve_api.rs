@@ -32,10 +32,13 @@ pub async fn run(
 
     let api_listen_addr: SocketAddr = settings
         .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()?;
-    let default_depth = settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
+    // Clamp default_depth to max_depth: a default above the max would request more
+    // levels than any query is allowed to return (HFT-review: config invariant).
+    let default_depth =
+        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
     let stale_after_secs = settings
         .get_int("api.stale_after_secs")
         .unwrap_or(15)
@@ -112,6 +115,17 @@ pub async fn run(
             stale_after_secs,
             query_max_rows,
             query_timeout_secs,
+            http_request_timeout_secs: pipeline::cfg_int_min(
+                &settings,
+                "api.http_request_timeout_secs",
+                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
+                1,
+            ) as u64,
+            // Optional bearer-token auth (A.158/P2-SEC-2); empty/unset = open.
+            auth_token: settings
+                .get_string("api.auth_token")
+                .ok()
+                .filter(|t| !t.is_empty()),
         },
         broadcast: Some(broadcast.clone()),
         slug_registry,
@@ -218,7 +232,13 @@ fn spawn_auto_rotate_runtime(
                 .get_string("feed.gamma_url")
                 .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
         };
-        let rest = pb_feed::RestClient::new(rate_limiter).with_config(rest_config);
+        let rest = match pb_feed::RestClient::new(rate_limiter) {
+            Ok(c) => c.with_config(rest_config),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to build REST client; auto-rotate cannot start");
+                return;
+            }
+        };
         let ws_config = pipeline::ws_config_from_settings(&settings);
 
         let mut front_token: Option<CancellationToken> = None;

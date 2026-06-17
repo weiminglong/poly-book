@@ -26,6 +26,7 @@ fn provenance(
         source_event_id: None,
         source_session_id: Some("session-1".to_string()),
         sequence: sequence.map(Sequence::new),
+        ingest_ordinal: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn checkpoint_and_validation_records(asset_id: &str, base_ts: u64) -> Vec<Persis
                 source_event_id: Some("checkpoint-1".to_string()),
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             wal_offset: None,
             bids: vec![PriceLevel {
@@ -153,14 +155,21 @@ fn execution_records(asset_id: &str, order_id: &str, base_ts: u64) -> Vec<Persis
 }
 
 async fn setup_clickhouse() -> (
-    testcontainers::ContainerAsync<ClickHouse>,
+    Option<testcontainers::ContainerAsync<ClickHouse>>,
     clickhouse::Client,
     String,
     String,
 ) {
-    let container = ClickHouse::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(8123).await.unwrap();
-    let url = format!("http://127.0.0.1:{port}");
+    // Use an externally-provided ClickHouse if PB_TEST_CLICKHOUSE_URL is set
+    // (e.g. a locally-running server), otherwise spin one up via testcontainers.
+    let (container, url) = match std::env::var("PB_TEST_CLICKHOUSE_URL") {
+        Ok(external) => (None, external),
+        Err(_) => {
+            let c = ClickHouse::default().start().await.unwrap();
+            let port = c.get_host_port_ipv4(8123).await.unwrap();
+            (Some(c), format!("http://127.0.0.1:{port}"))
+        }
+    };
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -193,6 +202,44 @@ async fn count_rows(client: &clickhouse::Client, table: &str) -> u64 {
     let query = format!("SELECT count() AS count FROM {table}");
     let row: CountRow = client.query(&query).fetch_one().await.unwrap();
     row.count
+}
+
+#[tokio::test]
+#[ignore]
+async fn clickhouse_rewriting_identical_batch_is_deduplicated() {
+    // Re-inserting the identical batch (an operator retry, or a partial-failure
+    // re-send) must NOT double-count rows — the at-least-once-without-duplicates
+    // property from the dedup token + non_replicated_deduplication_window
+    // (A.60/A.124). Verified against a real ClickHouse server.
+    let (_container, client, _url, _db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_000_000_000;
+    let asset_id = AssetId::new("clickhouse-dedup");
+    let records = market_data_records(asset_id.as_str(), base_ts);
+
+    // First write.
+    write_records(client.clone(), &records).await;
+    let book_after_first = count_rows(&client, "book_events").await;
+    let trade_after_first = count_rows(&client, "trade_events").await;
+    assert_eq!(book_after_first, 2);
+    assert_eq!(trade_after_first, 1);
+
+    // Identical re-write — the dedup token matches, so the server drops it.
+    write_records(client.clone(), &records).await;
+    assert_eq!(
+        count_rows(&client, "book_events").await,
+        book_after_first,
+        "identical re-insert must be deduplicated, not doubled"
+    );
+    assert_eq!(count_rows(&client, "trade_events").await, trade_after_first);
+
+    // A genuinely different batch (later timestamp) is NOT deduplicated.
+    let later = market_data_records(asset_id.as_str(), base_ts + 1_000_000);
+    write_records(client.clone(), &later).await;
+    assert_eq!(
+        count_rows(&client, "book_events").await,
+        book_after_first + 2,
+        "a distinct batch must still be inserted"
+    );
 }
 
 #[tokio::test]
@@ -246,6 +293,69 @@ async fn clickhouse_checkpoint_and_validation_roundtrip() {
         .unwrap();
     assert_eq!(validations.len(), 1);
     assert!(validations[0].matched);
+}
+
+#[tokio::test]
+#[ignore]
+async fn clickhouse_integrity_summary_counts_server_side() {
+    // Audit A.42: the integrity summary must compute book-event and validation
+    // counts with server-side count()/countIf() rather than streaming every row
+    // back to count it client-side. This asserts the server-side aggregate
+    // reader and the full summary path agree with directly-counted rows.
+    use pb_service::{CompletenessLevel, IntegrityService};
+
+    let (_container, client, url, db_name) = setup_clickhouse().await;
+    let base_ts = 1_700_000_300_000_000;
+    let asset_id = AssetId::new("clickhouse-integrity");
+    let mut records = market_data_records(asset_id.as_str(), base_ts);
+    // Add a validation row (matched) so validation counts are exercised.
+    records.push(PersistedRecord::Validation(ReplayValidation {
+        asset_id: asset_id.clone(),
+        mode: ReplayMode::RecvTime,
+        replay_timestamp_us: base_ts,
+        reference_timestamp_us: base_ts + 5_000,
+        matched: true,
+        mismatch_summary: None,
+        persisted_at_us: base_ts + 6_000,
+    }));
+
+    write_records(client.clone(), &records).await;
+
+    let window_end = base_ts + 20_000;
+    let reader = ClickHouseReader::new(&url, &db_name);
+
+    // The server-side aggregate reader returns the same counts as direct SQL.
+    let aggregates = reader
+        .read_integrity_aggregates(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(aggregates.book_event_count, 2);
+    assert_eq!(aggregates.validation_count, 1);
+    assert_eq!(aggregates.validation_match_count, 1);
+
+    // Only the bounded ingest events are materialized.
+    let ingest = reader
+        .read_ingest_events(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(ingest.len(), 1);
+    assert_eq!(ingest[0].kind, IngestEventKind::ReconnectSuccess);
+
+    // The full service path assembles a summary from those server-side counts.
+    let service = pb_service::ClickHouseIntegrityService::new(&url, &db_name);
+    let summary = service
+        .summary(&asset_id, base_ts, window_end)
+        .await
+        .unwrap();
+    assert_eq!(summary.book_event_count, 2);
+    assert_eq!(summary.ingest_event_count, 1);
+    assert_eq!(summary.reconnect_count, 1);
+    assert_eq!(summary.gap_count, 0);
+    assert_eq!(summary.validation_count, 1);
+    assert_eq!(summary.validation_match_count, 1);
+    // A reconnect is a continuity boundary, so the window is Partial, not Full.
+    assert_eq!(summary.completeness, CompletenessLevel::Partial);
+    assert_eq!(summary.continuity_events.len(), 1);
 }
 
 #[tokio::test]

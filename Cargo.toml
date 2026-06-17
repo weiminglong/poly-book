@@ -40,10 +40,18 @@ pb-grpc = { path = "crates/pb-grpc" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+# rustls (no openssl/native-tls C dependency) — audit finding P2-BUILD-3.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
-# HTTP
-reqwest = { version = "0.13", features = ["json"] }
+# HTTP — rustls instead of the default native-tls; keep the other defaults
+# (charset, http2, system-proxy) that `default-features = false` would drop.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "charset",
+    "http2",
+    "system-proxy",
+    "rustls",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
@@ -104,8 +112,16 @@ governor = "0.10"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+# Keep line-table debug info and do not strip, so a production crash produces a
+# symbolizable file:line backtrace instead of raw addresses. Triageability beats
+# binary size for a system whose bar is correctness under failure (A.35).
+# See docs/adr/0007-release-profile.md.
+strip = "none"
+debug = "line-tables-only"
 panic = "abort"
+# Trap integer overflow in release too. For a fixed-point orderbook system a
+# silent wrap is data corruption, not a performance win worth taking (A.140).
+overflow-checks = true
 
 [profile.release-full]
 inherits = "release"
@@ -114,3 +130,4 @@ lto = "fat"
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+overflow-checks = true

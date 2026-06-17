@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
+url = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
 clickhouse = { workspace = true }
@@ -60,3 +61,7 @@ path = "checkpoint_wal_hydration.rs"
 [[test]]
 name = "cross_backend_service"
 path = "cross_backend_service.rs"
+
+[[test]]
+name = "s3_minio_roundtrip"
+path = "s3_minio_roundtrip.rs"

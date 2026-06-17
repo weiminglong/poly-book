@@ -50,3 +50,39 @@ variable "app_env_vars" {
   type        = map(string)
   default     = {}
 }
+
+variable "ingest_on_demand_base" {
+  description = "Number of ingest tasks pinned to on-demand FARGATE (immune to Spot reclaim); Spot is used only above this base"
+  type        = number
+  default     = 1
+}
+
+variable "serve_desired_count" {
+  description = "Number of read-only `serve` API tasks (0 disables the serve service)"
+  type        = number
+  default     = 1
+}
+
+variable "serve_tokens" {
+  description = "Comma-separated token IDs (or slugs) the serve API follows. Must be set for serve to start."
+  type        = string
+  default     = ""
+}
+
+variable "enable_clickhouse_service" {
+  description = "Provision a single-node ClickHouse service on ECS+EFS. For production prefer managed ClickHouse and point PB__STORAGE__CLICKHOUSE_URL at it."
+  type        = bool
+  default     = false
+}
+
+variable "clickhouse_cpu" {
+  description = "ClickHouse task CPU units"
+  type        = number
+  default     = 1024
+}
+
+variable "clickhouse_memory" {
+  description = "ClickHouse task memory in MiB"
+  type        = number
+  default     = 4096
+}

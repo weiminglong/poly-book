@@ -14,6 +14,7 @@ fn provenance(seq: u64) -> EventProvenance {
         source_event_id: None,
         source_session_id: None,
         sequence: Some(Sequence::new(seq)),
+        ingest_ordinal: None,
     }
 }
 

@@ -9,6 +9,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
+mod config_validation;
 
 #[derive(Parser)]
 #[command(
@@ -45,15 +46,19 @@ enum Commands {
         /// Comma-separated token IDs to subscribe to
         #[arg(long)]
         tokens: Option<String>,
-        /// Enable Parquet storage
-        #[arg(long, default_value_t = true)]
+        /// Enable Parquet storage (use --parquet=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
-        /// Enable ClickHouse storage
-        #[arg(long, default_value_t = false)]
+        /// Enable ClickHouse storage (use --clickhouse=true to enable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
         clickhouse: bool,
-        /// Enable metrics server
-        #[arg(long, default_value_t = true)]
+        /// Enable metrics server (use --metrics=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
+        /// Start as a hot standby: wait for the active writer's WAL lock and
+        /// auto-promote when it is released (writer failover; audit P3-HA-1).
+        #[arg(long, default_value_t = false)]
+        standby: bool,
     },
     /// Replay historical orderbook state at a specific timestamp
     Replay {
@@ -104,14 +109,14 @@ enum Commands {
     },
     /// Continuously discover and ingest BTC 5-min markets, rotating automatically
     AutoIngest {
-        /// Enable Parquet storage
-        #[arg(long, default_value_t = true)]
+        /// Enable Parquet storage (use --parquet=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
-        /// Enable ClickHouse storage
-        #[arg(long, default_value_t = false)]
+        /// Enable ClickHouse storage (use --clickhouse=true to enable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
         clickhouse: bool,
-        /// Enable metrics server
-        #[arg(long, default_value_t = true)]
+        /// Enable metrics server (use --metrics=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
     /// Start the read-only API server with a live feed and replay access
@@ -122,8 +127,8 @@ enum Commands {
         /// Automatically rotate to the live BTC 5-minute market
         #[arg(long, default_value_t = false)]
         auto_rotate: bool,
-        /// Enable metrics server
-        #[arg(long, default_value_t = true)]
+        /// Enable metrics server (use --metrics=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
     /// Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS)
@@ -131,21 +136,33 @@ enum Commands {
         /// Comma-separated token IDs to serve
         #[arg(long)]
         tokens: String,
-        /// Enable metrics server
-        #[arg(long, default_value_t = true)]
+        /// Enable metrics server (use --metrics=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
+    /// Rebuild Parquet storage partitions from the durable WAL (offline recovery)
+    Reconcile,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load config first so we can use logging settings
+    // Load config first so we can use logging settings. An explicitly-passed
+    // config path that does not exist is a hard error — silently falling back to
+    // all-defaults (the old `required(false)` behavior) hides misconfiguration
+    // in production (audit finding A.102). The repo default path is allowed to be
+    // absent so the binary still runs from an arbitrary CWD.
+    const DEFAULT_CONFIG_PATH: &str = "config/default.toml";
+    let config_is_default = cli.config == DEFAULT_CONFIG_PATH;
+    if !config_is_default && !std::path::Path::new(&cli.config).exists() {
+        anyhow::bail!("config file not found: {}", cli.config);
+    }
     let settings = config::Config::builder()
-        .add_source(config::File::with_name(&cli.config).required(false))
+        .add_source(config::File::with_name(&cli.config).required(!config_is_default))
         .add_source(config::Environment::with_prefix("PB").separator("__"))
-        .build()?;
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to load config from {}: {e}", cli.config))?;
 
     // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level > "info"
     let log_level = if std::env::var("RUST_LOG").is_ok() {
@@ -163,7 +180,22 @@ async fn main() -> Result<()> {
         None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         Some(level) => EnvFilter::new(&level),
     };
-    fmt().with_env_filter(filter).init();
+    // Honor `logging.format = "json"` so structured logging is actually possible
+    // (previously the key was dead config — audit finding A.87).
+    let log_format = settings
+        .get_string("logging.format")
+        .unwrap_or_else(|_| "text".to_string());
+    let builder = fmt().with_env_filter(filter);
+    if log_format.eq_ignore_ascii_case("json") {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
+
+    // Surface typo'd / removed config keys now that tracing is up, so a silently
+    // ignored setting is visible instead of leaving the operator's intent lost
+    // (audit/HFT-review #9).
+    config_validation::warn_unknown_config_keys(&settings);
 
     // Create shared slug registry
     let slug_registry = pb_types::SlugRegistry::new();
@@ -171,14 +203,21 @@ async fn main() -> Result<()> {
     // Create shutdown token
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
+    // Register the SIGTERM handler synchronously BEFORE spawning, so a failed
+    // registration is a clean startup error (non-zero exit) rather than a panic
+    // buried in a detached task that would silently break all shutdown signaling
+    // (HFT-review). The registered Signal is then moved into the listener task.
+    #[cfg(unix)]
+    let mut sigterm = {
+        use tokio::signal::unix::{signal, SignalKind};
+        signal(SignalKind::terminate())
+            .map_err(|e| anyhow::anyhow!("failed to register SIGTERM handler: {e}"))?
+    };
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
 
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm =
-                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
             tokio::select! {
                 result = ctrl_c => {
                     if let Err(e) = result {
@@ -214,6 +253,7 @@ async fn main() -> Result<()> {
             parquet,
             clickhouse,
             metrics,
+            standby,
         } => {
             commands::ingest::run(
                 settings,
@@ -221,6 +261,7 @@ async fn main() -> Result<()> {
                 parquet,
                 clickhouse,
                 metrics,
+                standby,
                 shutdown,
                 slug_registry,
             )
@@ -294,6 +335,9 @@ async fn main() -> Result<()> {
         Commands::Serve { tokens, metrics } => {
             commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
         }
+        Commands::Reconcile => {
+            commands::reconcile::run(settings).await?;
+        }
     }
 
     Ok(())
@@ -342,12 +386,23 @@ mod tests {
                 parquet,
                 clickhouse,
                 metrics,
+                standby,
             } => {
                 assert!(tokens.is_none());
                 assert!(parquet);
                 assert!(!clickhouse);
                 assert!(metrics);
+                assert!(!standby);
             }
+            _ => panic!("expected Ingest"),
+        }
+    }
+
+    #[test]
+    fn parse_ingest_standby_flag() {
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--standby"]).unwrap();
+        match cli.command {
+            Commands::Ingest { standby, .. } => assert!(standby),
             _ => panic!("expected Ingest"),
         }
     }
@@ -368,6 +423,35 @@ mod tests {
             } => {
                 assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
                 assert!(clickhouse);
+            }
+            _ => panic!("expected Ingest"),
+        }
+    }
+
+    #[test]
+    fn ingest_toggles_can_be_disabled_and_presence_still_enables() {
+        // Default-true toggles must be disable-able with `=false` (A.103), while a
+        // bare `--clickhouse` still enables via default_missing_value.
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "ingest",
+            "--tokens",
+            "tok1",
+            "--metrics=false",
+            "--parquet=false",
+            "--clickhouse",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Ingest {
+                metrics,
+                parquet,
+                clickhouse,
+                ..
+            } => {
+                assert!(!metrics, "--metrics=false should disable metrics");
+                assert!(!parquet, "--parquet=false should disable parquet");
+                assert!(clickhouse, "bare --clickhouse should enable clickhouse");
             }
             _ => panic!("expected Ingest"),
         }
@@ -506,6 +590,12 @@ mod tests {
             }
             _ => panic!("expected Serve"),
         }
+    }
+
+    #[test]
+    fn parse_reconcile() {
+        let cli = Cli::try_parse_from(["poly-book", "reconcile"]).unwrap();
+        assert!(matches!(cli.command, Commands::Reconcile));
     }
 
     // --- CLI parsing: invalid / missing args ---

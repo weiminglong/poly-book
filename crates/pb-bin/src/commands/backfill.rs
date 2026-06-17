@@ -1,7 +1,6 @@
 use anyhow::Result;
 use config::Config;
 use pb_types::SlugRegistry;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run(
@@ -35,16 +34,18 @@ pub async fn run(
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
 
-    // Start Parquet sink for backfilled data
-    let base_path = settings
+    // Start Parquet sink for backfilled data. build_object_store canonicalizes a
+    // local base path (fixing the relative-path bug A.28 where the raw "./data"
+    // was percent-encoded by object_store and every flush failed) and wires an
+    // s3:// path to a real S3 store (A.1).
+    let configured = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());
+    let (store, base_path) = super::pipeline::build_object_store(&configured)?;
     let flush_secs = settings
         .get_int("storage.parquet_flush_interval_secs")
         .unwrap_or(300) as u64;
 
-    let store: Arc<dyn object_store::ObjectStore> =
-        Arc::new(object_store::local::LocalFileSystem::new());
     let sink = pb_store::ParquetSink::new(event_rx, store, base_path)
         .with_flush_interval(std::time::Duration::from_secs(flush_secs));
     let sink_token = shutdown.child_token();

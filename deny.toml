@@ -2,18 +2,22 @@
 exclude-unpublished = true
 
 [advisories]
-unmaintained = "none"
-yanked = "warn"
-# astral-tokio-tar 0.5.6 advisories in the testcontainers dev dependency.
-# Waiting for testcontainers to release with astral-tokio-tar >=0.6.1.
-# - RUSTSEC-2026-0066: low-severity PAX extension validation issue.
-# - RUSTSEC-2026-0112: PAX header desynchronization (file smuggling).
-# - RUSTSEC-2026-0113: unpack_in can chmod directories via symlinks.
+# Detect unmaintained crates in the workspace and its direct dependencies
+# (audit finding A.36); transitive-only unmaintained crates are not failed on to
+# avoid breaking CI on upstreams we cannot control.
+unmaintained = "workspace"
+yanked = "deny"
 ignore = [
-    "RUSTSEC-2026-0066",
-    "RUSTSEC-2026-0112",
-    "RUSTSEC-2026-0113",
+    # bincode 1.3.3 is intentionally frozen: the maintainers consider it a
+    # complete release needing no further updates, so RUSTSEC-2025-0141 is an
+    # "unmaintained" notice, NOT a vulnerability. It is a direct dependency of
+    # pb-wal's WAL frame codec; moving to bincode 2.x / postcard would change the
+    # on-disk WAL format. Revisit if an actual security issue is reported.
+    "RUSTSEC-2025-0141",
 ]
+# The astral-tokio-tar advisories (0.5.6: RUSTSEC-2026-0066/0112/0113; 0.6.1:
+# RUSTSEC-2026-0145) are resolved by pinning that test-only crate (pulled by the
+# testcontainers dev dependency) to >=0.6.2 in Cargo.lock, so no ignore is needed.
 
 [licenses]
 private = { ignore = true }
@@ -33,7 +37,9 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "allow"
+# Surface duplicate transitive versions rather than allowing them unbounded
+# (audit finding A.141); warn keeps it visible without failing CI.
+multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]

@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
-use axum::extract::{MatchedPath, Path, Query, State};
-use axum::http::Request;
+use axum::extract::{DefaultBodyLimit, MatchedPath, Path, Query, State};
+use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use pb_service::{
@@ -15,6 +15,7 @@ use pb_service::{
 use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
@@ -34,6 +35,16 @@ pub struct ApiConfig {
     pub stale_after_secs: u64,
     pub query_max_rows: usize,
     pub query_timeout_secs: u64,
+    /// Per-request wall-clock timeout for request/response HTTP routes, in
+    /// seconds. Production defaults to `DEFAULT_HTTP_REQUEST_TIMEOUT_SECS` (30);
+    /// tests set a large value so the timeout is not load-sensitive under the
+    /// parallel workspace test run (HFT-review: replay-test CI flake).
+    pub http_request_timeout_secs: u64,
+    /// Optional bearer token. When `Some`, every API/stream route requires
+    /// `Authorization: Bearer <token>`; health probes stay open. `None` (default)
+    /// keeps the read-only workstation open on its loopback bind (audit P2-SEC-2:
+    /// auth before reachable on any non-loopback interface).
+    pub auth_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -80,6 +91,10 @@ struct ExecutionQuery {
     start_us: u64,
     end_us: u64,
     limit: Option<usize>,
+    /// Server-side pagination offset into the ordered result set (A.65).
+    offset: Option<usize>,
+    /// Result ordering: `desc` (default, most recent first) or `asc`.
+    order: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,11 +124,27 @@ fn resolve_asset_id(state: &AppState, input: &str) -> String {
     }
 }
 
+/// Default per-request timeout (seconds) for request/response HTTP API routes,
+/// used when config does not override `api.http_request_timeout_secs`. Not applied
+/// to the long-lived WebSocket route, which must outlive any request timeout.
+pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Max in-flight HTTP API requests; excess requests wait for a slot. Bounds the
+/// blast radius of expensive historical/replay queries (A.92).
+const MAX_INFLIGHT_HTTP_REQUESTS: usize = 256;
+/// Max request body size for HTTP routes (the SQL workbench POST in particular).
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
+
+fn http_concurrency_limiter() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(MAX_INFLIGHT_HTTP_REQUESTS))
+}
+
 pub fn router(state: AppState) -> Router {
     use axum::routing::any;
 
-    Router::new()
-        .route("/health", get(health))
+    // Request/response HTTP API routes: bounded by a per-request timeout, a
+    // global concurrency cap, and a request-body size limit.
+    let api_routes = Router::new()
         .route("/api/v1/feed/status", get(feed_status))
         .route("/api/v1/assets/active", get(active_assets))
         .route(
@@ -126,12 +157,111 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/query/datasets", get(query_datasets))
         .route("/api/v1/query/sql", post(query_sql))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            http_request_timeout,
+        ))
+        .layer(middleware::from_fn(http_concurrency_guard));
+
+    // Liveness/readiness stay open (orchestrator probes must not need a token).
+    // The data routes + the WS stream require auth when a token is configured.
+    let protected = api_routes
         .route(
             "/api/v1/streams/orderbook",
             any(crate::streaming::ws_orderbook),
         )
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
+        .merge(protected)
         .layer(middleware::from_fn(track_request_metrics))
         .with_state(state)
+}
+
+/// Require `Authorization: Bearer <token>` when `api.auth_token` is configured.
+/// A constant-time compare avoids leaking the token via timing. When no token is
+/// configured the workstation stays open on its loopback bind (audit P2-SEC-2).
+async fn require_auth(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(expected) = state.config.auth_token.as_deref() else {
+        return next.run(req).await;
+    };
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let ok = match presented {
+        Some(token) => constant_time_eq(token.as_bytes(), expected.as_bytes()),
+        None => false,
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(crate::dto::ApiErrorResponse {
+                error: "missing or invalid bearer token".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// Length-independent constant-time byte comparison (avoids token-timing leaks).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Reject a request that exceeds `HTTP_REQUEST_TIMEOUT` with 504 instead of
+/// letting an expensive query run unbounded (A.92).
+async fn http_request_timeout(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let timeout = Duration::from_secs(state.config.http_request_timeout_secs);
+    match tokio::time::timeout(timeout, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(crate::dto::ApiErrorResponse {
+                error: "request timed out".to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Cap the number of concurrent in-flight HTTP API requests (A.92).
+async fn http_concurrency_guard(req: Request<axum::body::Body>, next: Next) -> Response {
+    let _permit = match http_concurrency_limiter().try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(crate::dto::ApiErrorResponse {
+                    error: "server at capacity, retry shortly".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    next.run(req).await
 }
 
 pub async fn serve(
@@ -154,16 +284,39 @@ struct HealthResponse {
     needs_resync: bool,
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+fn health_snapshot(state: &AppState) -> HealthResponse {
     let hydrated = state.live.is_hydrated();
     let wal_lag = state.wal_lag_bytes.load(Ordering::Relaxed);
     let needs_resync = state.needs_resync.load(Ordering::Relaxed);
-    Json(HealthResponse {
+    HealthResponse {
         ready: hydrated && !needs_resync,
         hydrated,
         wal_lag_bytes: wal_lag,
         needs_resync,
-    })
+    }
+}
+
+/// Detailed health JSON (always HTTP 200). Kept for human/dashboard use; probes
+/// should target `/health/live` and `/health/ready` for status-code semantics.
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(health_snapshot(&state))
+}
+
+/// Liveness: the process is up and serving. Always 200.
+async fn health_live() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Readiness: 200 only when hydrated and not awaiting resync, otherwise 503, so
+/// status-code-based probes (k8s, load balancers) work correctly (A.96).
+async fn health_ready(State(state): State<AppState>) -> Response {
+    let snapshot = health_snapshot(&state);
+    let status = if snapshot.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(snapshot)).into_response()
 }
 
 async fn feed_status(State(state): State<AppState>) -> Json<FeedStatusResponse> {
@@ -356,6 +509,18 @@ async fn execution_orders(
             "limit must be between 1 and {EXECUTION_MAX_LIMIT}"
         )));
     }
+    let offset = query.offset.unwrap_or(0);
+    // Default to most-recent-first, which is what an execution inspector usually
+    // wants; `order=asc` pages forward from the window start (A.65).
+    let descending = match query.order.as_deref() {
+        None | Some("desc") => true,
+        Some("asc") => false,
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "order must be 'asc' or 'desc', got '{other}'"
+            )));
+        }
+    };
 
     let asset_id = query
         .asset_id
@@ -370,6 +535,8 @@ async fn execution_orders(
             query.start_us,
             query.end_us,
             limit,
+            offset,
+            descending,
         )
         .await?;
 
@@ -443,8 +610,15 @@ async fn query_sql(
         ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
     })?;
 
+    // Clamp the client-supplied row cap to the configured ceiling so a request
+    // cannot raise its own limit above the server policy (A.83/A.91).
+    let ceiling = state.config.query_max_rows.max(1);
+    let max_rows = req
+        .max_rows
+        .map(|requested| requested.clamp(1, ceiling))
+        .unwrap_or(ceiling);
     let guard = pb_service::QueryGuard {
-        max_rows: req.max_rows.unwrap_or(state.config.query_max_rows),
+        max_rows,
         timeout_secs: state.config.query_timeout_secs,
     };
 
@@ -507,18 +681,22 @@ fn level_view(
 
 async fn track_request_metrics(req: Request<axum::body::Body>, next: Next) -> Response {
     let method = req.method().clone();
-    let route = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map(MatchedPath::as_str)
-        .unwrap_or("<unmatched>")
-        .to_string();
+    // Clone the MatchedPath (a cheap Arc<str> refcount bump) rather than
+    // allocating a fresh String per request via to_string(): MatchedPath::as_str
+    // borrows from `req`, which `next.run` consumes, so we must own the route
+    // before the call — but the Arc clone avoids the per-request heap allocation
+    // on the API hot path (HFT-review #25).
+    let matched = req.extensions().get::<MatchedPath>().cloned();
     let start = Instant::now();
     let response = next.run(req).await;
 
+    let route = matched
+        .as_ref()
+        .map(MatchedPath::as_str)
+        .unwrap_or("<unmatched>");
     pb_metrics::record_api_request_duration_ms(
         method.as_str(),
-        &route,
+        route,
         response.status().as_u16(),
         start.elapsed().as_secs_f64() * 1_000.0,
     );
@@ -554,6 +732,12 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                // Large in tests so the per-request timeout is not load-sensitive
+                // under the parallel workspace run (the replay tests do real
+                // Parquet reads and could exceed a 30s wall clock when the CPU is
+                // saturated by other crates' test binaries).
+                http_request_timeout_secs: 600,
+                auth_token: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
@@ -579,6 +763,87 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[test]
+    fn constant_time_eq_matches_only_identical() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"secret", b"sekret"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_allows_requests() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_rejects_missing_and_accepts_valid_token() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.config.auth_token = Some("s3cret".to_string());
+
+        // No token → 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong token → 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .header("Authorization", "Bearer nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct token → not 401.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .header("Authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Health probes stay open even with auth enabled.
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn orderbook_snapshot_returns_404_for_inactive_asset() {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -595,6 +860,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn health_live_is_always_ok() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_ready_reflects_readiness_via_status_code() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+
+        // test_state is hydrated and not awaiting resync → ready → 200.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Force a resync requirement → not ready → 503, so status-code probes
+        // see the change (A.96).
+        state.needs_resync.store(true, Ordering::Relaxed);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -617,6 +930,7 @@ mod tests {
                     source_event_id: Some("snap-1".to_string()),
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: Some(Sequence::new(0)),
+                    ingest_ordinal: None,
                 },
             }))
             .await;
@@ -647,6 +961,7 @@ mod tests {
             source_event_id: Some("snap-1".to_string()),
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(0)),
+            ingest_ordinal: None,
         };
         state
             .live
@@ -685,6 +1000,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -748,6 +1064,7 @@ mod tests {
                         source_event_id: Some("snap-1".to_string()),
                         source_session_id: Some("ws-session-1".to_string()),
                         sequence: Some(Sequence::new(0)),
+                        ingest_ordinal: None,
                     },
                 }),
                 PersistedRecord::Book(BookEvent {
@@ -763,6 +1080,7 @@ mod tests {
                         source_event_id: Some("snap-1".to_string()),
                         source_session_id: Some("ws-session-1".to_string()),
                         sequence: Some(Sequence::new(1)),
+                        ingest_ordinal: None,
                     },
                 }),
             ])
@@ -804,6 +1122,7 @@ mod tests {
             source_event_id: None,
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(seq)),
+            ingest_ordinal: None,
         }
     }
 
@@ -935,11 +1254,12 @@ mod tests {
 
         let app = router(test_state(base_path).await);
         let end_ts = base_ts + 1_000_000;
+        // order=asc to assert chronological ordering explicitly.
         let response = app
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}"
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&order=asc"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -954,6 +1274,93 @@ mod tests {
         assert_eq!(timeline.events[0].order_id, "order-1");
         assert_eq!(timeline.events[0].kind, "submit_intent");
         assert_eq!(timeline.events[1].kind, "exchange_ack");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_defaults_to_most_recent_first_and_paginates() {
+        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().to_string_lossy().to_string();
+        let writer = parquet_writer(&base_path);
+        let base_ts = 1_700_000_000_000_000u64;
+
+        let records: Vec<PersistedRecord> = (0..5)
+            .map(|i| {
+                PersistedRecord::Execution(ExecutionEvent {
+                    event_timestamp_us: base_ts + i * 10,
+                    asset_id: Some(AssetId::new("tok1")),
+                    order_id: format!("order-{i}"),
+                    client_order_id: None,
+                    venue_order_id: None,
+                    kind: ExecutionEventKind::SubmitIntent,
+                    side: Some(Side::Bid),
+                    price: None,
+                    size: None,
+                    status: None,
+                    reason: None,
+                    latency: LatencyTrace::default(),
+                })
+            })
+            .collect();
+        writer.write_batch(&records).await.unwrap();
+
+        let state = test_state(base_path).await;
+        let end_ts = base_ts + 1_000_000;
+
+        // Default order (desc) + limit 2 → the two most recent, newest first.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page1: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(page1.total_count, 5);
+        assert_eq!(page1.events.len(), 2);
+        assert_eq!(page1.events[0].order_id, "order-4");
+        assert_eq!(page1.events[1].order_id, "order-3");
+
+        // Next page via offset=2 → the next two most recent.
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2&offset=2"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page2: crate::dto::ExecutionTimelineResponse = response_json(response).await;
+        assert_eq!(page2.total_count, 5);
+        assert_eq!(page2.events.len(), 2);
+        assert_eq!(page2.events[0].order_id, "order-2");
+        assert_eq!(page2.events[1].order_id, "order-1");
+    }
+
+    #[tokio::test]
+    async fn execution_orders_rejects_invalid_order_param() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/execution/orders?start_us=1&end_us=2&order=sideways")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1114,6 +1521,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1201,6 +1609,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1277,6 +1686,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1520,6 +1930,8 @@ mod tests {
                 stale_after_secs: 60,
                 query_max_rows: 10_000,
                 query_timeout_secs: 30,
+                http_request_timeout_secs: 600,
+                auth_token: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),

@@ -35,10 +35,13 @@ pub async fn run(
 
     let api_listen_addr: SocketAddr = settings
         .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()?;
-    let default_depth = settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
+    // Clamp default_depth to max_depth: a default above the max would request more
+    // levels than any query is allowed to return (HFT-review: config invariant).
+    let default_depth =
+        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
     let stale_after_secs = settings
         .get_int("api.stale_after_secs")
         .unwrap_or(15)
@@ -58,13 +61,8 @@ pub async fn run(
 
     // Hydrate from checkpoints + WAL.
     let reader = pb_replay::ParquetReader::new(&parquet_base_path);
-    let hydration_result = pb_api::hydration::hydrate(
-        &live,
-        Some(&reader),
-        Some(&wal_config.base_path),
-        &token_ids,
-    )
-    .await;
+    let hydration_result =
+        pb_api::hydration::hydrate(&live, Some(&reader), Some(&wal_config), &token_ids).await;
     tracing::info!(
         checkpoints = hydration_result.checkpoints_loaded,
         wal_records = hydration_result.wal_records_replayed,
@@ -81,8 +79,8 @@ pub async fn run(
     let wal_tail_handle = spawn_wal_tailer(
         wal_config,
         live.clone(),
-        broadcast.clone(),
-        default_depth,
+        token_ids.clone(),
+        parquet_base_path.clone(),
         hydration_result.wal_end_position,
         shutdown.child_token(),
         wal_lag_bytes.clone(),
@@ -123,6 +121,17 @@ pub async fn run(
             stale_after_secs,
             query_max_rows,
             query_timeout_secs,
+            http_request_timeout_secs: pipeline::cfg_int_min(
+                &settings,
+                "api.http_request_timeout_secs",
+                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
+                1,
+            ) as u64,
+            // Optional bearer-token auth (A.158/P2-SEC-2); empty/unset = open.
+            auth_token: settings
+                .get_string("api.auth_token")
+                .ok()
+                .filter(|t| !t.is_empty()),
         },
         broadcast: Some(broadcast),
         slug_registry,
@@ -146,15 +155,35 @@ pub async fn run(
     Ok(())
 }
 
-/// Spawn a background task that continuously tails the WAL for new records
-/// and feeds them through the projector. Updates health atomics for the
-/// `/health` endpoint.
+/// Why a single tail session ended, so the supervising recovery loop can decide
+/// whether to reopen, re-hydrate, or stop.
+enum TailOutcome {
+    /// A WAL segment gap was detected (our position was pruned away). The caller
+    /// should re-hydrate from checkpoints + the current WAL and reopen at the
+    /// fresh tail.
+    Resync,
+    /// The live projector channel is closed — reopening cannot help; stop.
+    ProjectorDead,
+    /// Shutdown was requested.
+    Shutdown,
+}
+
+/// Spawn a background task that continuously tails the WAL for new records and
+/// feeds them through the projector. Updates health atomics for `/health/ready`.
+///
+/// The tailer is self-healing: instead of dying permanently on a transient
+/// reader-open failure or a segment-gap resync, it retries the open with
+/// exponential backoff and re-hydrates the read model on a gap, reflecting
+/// not-ready via `needs_resync` while it cannot serve fresh data (audit finding
+/// P2-SUP-1). A closed projector is treated as terminal — reopening cannot
+/// revive it, so the tailer marks not-ready and stops for the process
+/// supervisor to restart serve.
 #[allow(clippy::too_many_arguments)]
 fn spawn_wal_tailer(
     config: pb_wal::WalConfig,
     live: pb_api::LiveReadModel,
-    _broadcast: pb_api::PerAssetBroadcast,
-    _default_depth: usize,
+    token_ids: Vec<String>,
+    parquet_base_path: String,
     start_position: Option<pb_wal::WalPosition>,
     shutdown: CancellationToken,
     lag_bytes_atomic: Arc<AtomicU64>,
@@ -162,88 +191,193 @@ fn spawn_wal_tailer(
     max_consumer_lag_bytes: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let position_commit_interval_ms = config.position_commit_interval_ms;
-        let reader_result = match start_position {
-            Some(position) => pb_wal::WalReader::open_at(config, "serve-live", position),
-            None => pb_wal::WalReader::open(config, "serve-live"),
-        };
-        let mut reader = match reader_result {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to open WAL reader for live tailing");
-                return;
-            }
-        };
+        let mut start_position = start_position;
+        let mut open_backoff = Duration::from_millis(100);
+        let max_open_backoff = Duration::from_secs(5);
 
-        let poll_interval = Duration::from_millis(50);
-        let commit_interval = Duration::from_millis(position_commit_interval_ms);
-        let mut last_commit = Instant::now();
-        let mut dirty_position = false;
-
-        loop {
+        'recovery: loop {
             if shutdown.is_cancelled() {
                 break;
             }
 
-            // Check for segment gap (pruned segments).
-            if reader.needs_resync() {
-                tracing::warn!("WAL segment gap detected, triggering re-hydration");
-                needs_resync_atomic.store(true, Ordering::Relaxed);
-                break;
-            }
-
-            // Update lag tracking.
-            if let Some(lag) = reader.lag_bytes() {
-                lag_bytes_atomic.store(lag, Ordering::Relaxed);
-                if lag > max_consumer_lag_bytes {
-                    tracing::warn!(
-                        lag_bytes = lag,
-                        threshold = max_consumer_lag_bytes,
-                        "WAL consumer lag exceeds threshold"
-                    );
+            // Open (or reopen) the reader, retrying transient failures with
+            // bounded exponential backoff. While we cannot open it, the runtime
+            // is not ready to serve fresh data.
+            let reader = loop {
+                if shutdown.is_cancelled() {
+                    return;
                 }
-            }
-
-            match reader.next() {
-                Ok(Some(payload)) => match pb_wal::codec::decode(&payload) {
-                    Ok(record) => {
-                        live.apply_record(record).await;
-                        dirty_position = true;
+                let reader_result = match start_position {
+                    Some(position) => {
+                        pb_wal::WalReader::open_at(config.clone(), "serve-live", position)
+                    }
+                    None => pb_wal::WalReader::open(config.clone(), "serve-live"),
+                };
+                match reader_result {
+                    Ok(r) => {
+                        needs_resync_atomic.store(false, Ordering::Relaxed);
+                        open_backoff = Duration::from_millis(100);
+                        break r;
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to decode WAL record");
+                        needs_resync_atomic.store(true, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e,
+                            backoff_ms = open_backoff.as_millis() as u64,
+                            "failed to open WAL reader; retrying"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(open_backoff) => {}
+                            _ = shutdown.cancelled() => return,
+                        }
+                        open_backoff = (open_backoff * 2).min(max_open_backoff);
                     }
-                },
-                Ok(None) => {
-                    if dirty_position && last_commit.elapsed() >= commit_interval {
-                        commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
-                    }
-                    // No new records — poll again after a short delay.
+                }
+            };
+
+            let outcome = tail_session(
+                reader,
+                &config,
+                &live,
+                &shutdown,
+                &lag_bytes_atomic,
+                &needs_resync_atomic,
+                max_consumer_lag_bytes,
+            )
+            .await;
+
+            match outcome {
+                TailOutcome::Shutdown => break 'recovery,
+                TailOutcome::ProjectorDead => {
+                    needs_resync_atomic.store(true, Ordering::Relaxed);
+                    tracing::error!("live projector is not accepting records; WAL tailer stopping");
+                    break 'recovery;
+                }
+                TailOutcome::Resync => {
+                    needs_resync_atomic.store(true, Ordering::Relaxed);
+                    tracing::warn!("WAL segment gap detected; re-hydrating live read model");
+                    let parquet_reader = pb_replay::ParquetReader::new(&parquet_base_path);
+                    let hydration = pb_api::hydration::hydrate(
+                        &live,
+                        Some(&parquet_reader),
+                        Some(&config),
+                        &token_ids,
+                    )
+                    .await;
+                    tracing::info!(
+                        checkpoints = hydration.checkpoints_loaded,
+                        wal_records = hydration.wal_records_replayed,
+                        "serve tailer re-hydration complete"
+                    );
+                    start_position = hydration.wal_end_position;
+                    // Brief pause so a persistent gap does not spin re-hydration.
                     tokio::select! {
-                        _ = tokio::time::sleep(poll_interval) => {}
-                        _ = shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                        _ = shutdown.cancelled() => break 'recovery,
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Tail a single open reader until it must be reopened, re-hydrated, or stopped.
+async fn tail_session(
+    mut reader: pb_wal::WalReader,
+    config: &pb_wal::WalConfig,
+    live: &pb_api::LiveReadModel,
+    shutdown: &CancellationToken,
+    lag_bytes_atomic: &Arc<AtomicU64>,
+    needs_resync_atomic: &Arc<AtomicBool>,
+    max_consumer_lag_bytes: u64,
+) -> TailOutcome {
+    let poll_interval = Duration::from_millis(50);
+    let commit_interval = Duration::from_millis(config.position_commit_interval_ms);
+    let mut last_commit = Instant::now();
+    let mut dirty_position = false;
+
+    let outcome = loop {
+        if shutdown.is_cancelled() {
+            break TailOutcome::Shutdown;
+        }
+
+        // Check for segment gap (pruned segments).
+        if reader.needs_resync() {
+            needs_resync_atomic.store(true, Ordering::Relaxed);
+            break TailOutcome::Resync;
+        }
+
+        // Update lag tracking.
+        if let Some(lag) = reader.lag_bytes() {
+            lag_bytes_atomic.store(lag, Ordering::Relaxed);
+            pb_metrics::set_wal_consumer_lag_bytes(lag);
+            if lag > max_consumer_lag_bytes {
+                tracing::warn!(
+                    lag_bytes = lag,
+                    threshold = max_consumer_lag_bytes,
+                    "WAL consumer lag exceeds threshold"
+                );
+            }
+        }
+
+        match reader.next() {
+            Ok(Some(payload)) => match pb_wal::codec::decode(&payload) {
+                Ok(record) => {
+                    if live.apply_record(record).await {
+                        dirty_position = true;
+                    } else {
+                        // The projector is dead. Stop committing positions —
+                        // otherwise we would advance the consumer position past
+                        // records that were never applied (A.45).
+                        break TailOutcome::ProjectorDead;
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "WAL read error during live tailing");
-                    if dirty_position && last_commit.elapsed() >= commit_interval {
-                        commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(poll_interval) => {}
-                        _ = shutdown.cancelled() => break,
-                    }
+                    // A CRC-valid frame that fails to decode means the live read
+                    // model has diverged from the WAL for this record. We skip it
+                    // (rather than break to Resync) to guarantee forward progress —
+                    // re-hydration would replay and re-hit the same poison frame,
+                    // wedging the tailer in an infinite resync loop. But the skip
+                    // must be loud and alertable, not a silent warn (HFT-review
+                    // finding): operators reconcile from the WAL if it recurs.
+                    pb_metrics::record_wal_decode_error();
+                    tracing::error!(
+                        error = %e,
+                        "failed to decode CRC-valid WAL record during live tailing; \
+                         skipping — live read model has diverged for this record"
+                    );
+                }
+            },
+            Ok(None) => {
+                if dirty_position && last_commit.elapsed() >= commit_interval {
+                    commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+                }
+                // No new records — poll again after a short delay.
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown.cancelled() => break TailOutcome::Shutdown,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "WAL read error during live tailing");
+                if dirty_position && last_commit.elapsed() >= commit_interval {
+                    commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown.cancelled() => break TailOutcome::Shutdown,
                 }
             }
         }
+    };
 
-        if dirty_position {
-            commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
-        }
-        if let Err(e) = reader.commit_position() {
-            tracing::warn!(error = %e, "failed to commit WAL reader position on shutdown");
-        }
-    })
+    if dirty_position {
+        commit_reader_position(&reader, &mut dirty_position, &mut last_commit);
+    }
+    if let Err(e) = reader.commit_position() {
+        tracing::warn!(error = %e, "failed to commit WAL reader position");
+    }
+    outcome
 }
 
 fn commit_reader_position(
@@ -292,6 +426,7 @@ mod tests {
                 source_event_id: Some("snap-1".to_string()),
                 source_session_id: Some("ws-session-1".to_string()),
                 sequence: Some(Sequence::new(seq)),
+                ingest_ordinal: None,
             },
         })
     }
@@ -307,6 +442,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: Some("ws-session-1".to_string()),
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,
@@ -344,8 +480,8 @@ mod tests {
         let handle = spawn_wal_tailer(
             config,
             live,
-            broadcast,
-            20,
+            vec!["tok1".to_string()],
+            dir.path().to_string_lossy().to_string(),
             None,
             shutdown.clone(),
             Arc::new(AtomicU64::new(0)),
@@ -363,5 +499,58 @@ mod tests {
 
         shutdown.cancel();
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn tail_session_returns_resync_on_segment_gap() {
+        // A tailer whose committed position has been pruned away must report a
+        // resync (so the recovery loop re-hydrates) rather than dying silently.
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 128, // tiny → many sealed segments
+            max_segments: 100,
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        for i in 0..20u64 {
+            let rec = snapshot_record("tok1", Side::Bid, 5000 + i as u32, 10.0, i);
+            writer
+                .append(&pb_wal::codec::encode(&rec).unwrap())
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        // Consume one record as "serve-live" and commit, leaving the committed
+        // position in an early (soon-to-be-pruned) segment.
+        {
+            let mut reader = pb_wal::WalReader::open(config.clone(), "serve-live").unwrap();
+            reader.next().unwrap();
+            reader.commit_position().unwrap();
+        }
+
+        // Prune ignoring the consumer list → every sealed segment (including the
+        // one the committed position references) is removed, creating a gap.
+        writer.prune(&[]).unwrap();
+
+        let live = pb_api::LiveReadModel::new(pb_api::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let reader = pb_wal::WalReader::open(config.clone(), "serve-live").unwrap();
+        let shutdown = CancellationToken::new();
+        let needs_resync = Arc::new(AtomicBool::new(false));
+        let outcome = tail_session(
+            reader,
+            &config,
+            &live,
+            &shutdown,
+            &Arc::new(AtomicU64::new(0)),
+            &needs_resync,
+            u64::MAX,
+        )
+        .await;
+
+        assert!(matches!(outcome, TailOutcome::Resync));
+        assert!(needs_resync.load(Ordering::Relaxed));
     }
 }

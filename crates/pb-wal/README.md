@@ -27,8 +27,10 @@ consumer_serve-live.pos    ← reader position file
 ```
 
 Each record is framed with a 4-byte little-endian length and a 4-byte CRC32C
-checksum. The reader skips corrupt records (CRC mismatch) and advances to the
-next valid frame.
+checksum. The CRC covers **both the length field and the payload**, so a
+corrupted length is detected as a CRC mismatch rather than being trusted and
+misparsing the rest of the segment. The reader skips corrupt records (CRC
+mismatch) and advances to the next valid frame.
 
 ## Codec
 
@@ -63,8 +65,25 @@ and feeds decoded records into the live read model.
   reducing write syscalls by ~3x.
 - **Efficient framing**: the 8-byte frame header (4-byte length + 4-byte CRC32C)
   is stack-assembled and written in a single call instead of two separate writes.
-- **Explicit durability**: `WalWriter::sync()` calls `fdatasync` to flush buffered
-  data to stable storage on demand.
+- **Steady-state durability cadence**: the `ingest`/`auto-ingest` event loop
+  drives `WalWriter::flush()` on `wal.flush_interval_ms` (default 20 ms, for
+  tail-reader visibility) and `WalWriter::sync()` (`fdatasync`) on
+  `wal.sync_interval_ms` (default 200 ms, bounding the OS-crash data-loss
+  window). A failed open/append/flush/sync is fatal: ingest exits non-zero so a
+  supervisor restarts it, rather than silently running without durability.
+- **Durable rotation**: rotating to a new segment first `fdatasync`s the sealed
+  segment, then `fsync`s the directory so the new segment's directory entry
+  survives a power loss. The directory is also fsynced after the first segment is
+  created.
+- **Crash recovery on reopen**: `WalWriter::open` scans the last segment
+  frame-by-frame and truncates a torn (partial) or zero-filled tail back to the
+  last valid frame before resuming appends, so post-restart records are never
+  desynced or silently lost.
+- **No permanent reader stall**: a `WalReader` opened on an empty directory
+  (serve started before ingest) or racing a prune reloads and recovers instead
+  of returning `None` forever.
+- **Incremental tailing**: a caught-up reader stats the active segment and reads
+  only newly appended bytes, never re-reading the whole segment per poll.
 - **Single-buffer codec encode**: `codec::encode` uses `serialize_into` to write
   directly into the frame buffer, avoiding an intermediate allocation.
 - Segments are fixed-size append-only files. The writer rotates to a new segment
@@ -84,7 +103,19 @@ and feeds decoded records into the live read model.
   consumers have advanced past. The active segment is never pruned.
 - **Backpressure pruning**: `WalWriter::prune_with_backpressure()` retains at
   least `max_consumer_lag_bytes` worth of segments so new replicas have a window
-  to hydrate before old segments disappear.
+  to hydrate before old segments disappear, while also enforcing a hard
+  `max_segments` count cap so the WAL cannot grow without bound when the byte
+  budget is generous. When a lagging consumer blocks pruning below the cap, a
+  needs-resync warning is logged instead of letting the disk fill.
+- **Single-writer mutual exclusion / writer leasing**: `WalWriter::open` acquires
+  an exclusive advisory `flock` on `<base>/.wal.lock`; a second writer on the same
+  directory fails fast with `WalError::WriterLocked` rather than interleaving
+  appends. The lock auto-releases on process exit (crash-safe, no stale lock file).
+  This doubles as the writer-failover mechanism: after the primary exits, a standby
+  acquires the released lease, reads everything the primary durably synced, and
+  resumes appending with no data loss across the handoff
+  (`standby_writer_takes_over_shared_wal_after_primary_exit`). RTO/RPO targets per
+  failure mode are documented in `docs/operations.md` ("Failover & Recovery").
 - **Gap detection**: `WalReader::needs_resync()` returns `true` if the reader's
   committed position references a segment that has been pruned, indicating the
   consumer should re-hydrate from a checkpoint.
@@ -96,8 +127,14 @@ and feeds decoded records into the live read model.
 - The codec version byte allows future record format changes without breaking
   existing segments.
 - `memmap2` dependency removed — all I/O is via standard file operations.
-- 61 tests covering CRC corruption detection, truncated frames, codec round-trips,
-  segment rotation, reader position persistence, and pruner safety.
+- Tests cover CRC/length corruption detection, truncated and zero-filled tail
+  recovery on reopen, incremental tailing, empty-dir reader recovery, codec
+  round-trips, segment rotation, reader position persistence, and pruner safety.
+- **Benchmarks** (`cargo bench -p pb-wal`, `benches/wal_append.rs`) measure the
+  durability hot path: `codec::encode` (~80 ns), steady-state `append+flush`
+  (~260 ns/record, fsync amortized), and per-record `fdatasync` (ms-scale —
+  ~10⁴× the amortized append, which is why fsync is batched on
+  `sync_interval_ms`). See `docs/latency.md` for the full pipeline budget.
 
 ## Docs to Update After Changes
 

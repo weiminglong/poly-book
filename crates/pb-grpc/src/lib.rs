@@ -18,6 +18,11 @@ use pb_service::{
 use pb_types::event::ReplayMode;
 use proto::workstation_service_server::{WorkstationService, WorkstationServiceServer};
 
+/// Maximum gRPC message size (encode + decode). Bounds response serialization so
+/// a wide query cannot OOM the serve process (HFT-review finding); large enough
+/// for legitimate reconstruct/timeline responses.
+const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
@@ -54,12 +59,15 @@ fn continuity_to_proto(event: &pb_service::ContinuityEvent) -> proto::Continuity
     }
 }
 
+/// Map the internal completeness level to the SAME two-value domain the HTTP API
+/// exposes (`complete` / `best_effort`, see pb-api `CompletenessLabel`). The gRPC
+/// surface previously emitted a divergent four-value domain
+/// (full/partial/sparse/empty), so a client could not treat the two surfaces
+/// interchangeably (HFT-review #15).
 fn completeness_to_str(level: CompletenessLevel) -> &'static str {
     match level {
-        CompletenessLevel::Full => "full",
-        CompletenessLevel::Partial => "partial",
-        CompletenessLevel::Sparse => "sparse",
-        CompletenessLevel::Empty => "empty",
+        CompletenessLevel::Full => "complete",
+        _ => "best_effort",
     }
 }
 
@@ -107,7 +115,15 @@ impl WorkstationService for GrpcWorkstationService {
         let req = request.into_inner();
         let mode = parse_replay_mode(&req.mode)?;
         let asset_id = pb_types::AssetId::new(&*req.asset_id);
-        let depth = req.depth.map(|d| d as usize);
+        // Mirror the HTTP guard: an explicit depth of 0 is invalid (it would
+        // request zero levels). None means "service default" (HFT-review #24).
+        let depth = match req.depth {
+            Some(0) => {
+                return Err(Status::invalid_argument("depth must be greater than zero"));
+            }
+            Some(d) => Some(d as usize),
+            None => None,
+        };
 
         let result = self
             .replay
@@ -124,8 +140,10 @@ impl WorkstationService for GrpcWorkstationService {
             best_ask: result.best_ask.map(|(p, s)| price_level_to_proto(p, s)),
             mid_price: result.mid_price,
             spread: result.spread,
-            bid_depth: result.bid_depth as u32,
-            ask_depth: result.ask_depth as u32,
+            // Saturate rather than silently truncate usize->u32 (HFT-review #26);
+            // a depth above u32::MAX is absurd but truncation would corrupt it.
+            bid_depth: u32::try_from(result.bid_depth).unwrap_or(u32::MAX),
+            ask_depth: u32::try_from(result.ask_depth).unwrap_or(u32::MAX),
             bids: result
                 .bids
                 .iter()
@@ -164,9 +182,9 @@ impl WorkstationService for GrpcWorkstationService {
             asset_id: summary.asset_id,
             start_us: summary.start_us,
             end_us: summary.end_us,
-            book_event_count: summary.book_event_count as u32,
-            trade_event_count: summary.trade_event_count as u32,
-            ingest_event_count: summary.ingest_event_count as u32,
+            book_event_count: summary.book_event_count as u64,
+            trade_event_count: summary.trade_event_count as u64,
+            ingest_event_count: summary.ingest_event_count as u64,
             checkpoint_count: summary.checkpoint_count as u32,
             reconnect_count: summary.reconnect_count as u32,
             gap_count: summary.gap_count as u32,
@@ -200,6 +218,8 @@ impl WorkstationService for GrpcWorkstationService {
                 req.start_us,
                 req.end_us,
                 req.limit as usize,
+                req.offset as usize,
+                req.descending,
             )
             .await
             .map_err(service_error_to_status)?;
@@ -232,7 +252,7 @@ impl WorkstationService for GrpcWorkstationService {
 
         let resp = proto::ExecutionTimelineResponse {
             events,
-            total_count: timeline.total_count as u32,
+            total_count: timeline.total_count as u64,
         };
 
         Ok(Response::new(resp))
@@ -252,14 +272,28 @@ pub async fn start_grpc_server(
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let service = GrpcWorkstationService::new(replay, integrity, execution);
-    let server =
-        tonic::transport::Server::builder().add_service(WorkstationServiceServer::new(service));
+    // Bound the response encode size. The default permits multi-GB messages, so a
+    // wide reconstruct/timeline query against a busy asset could try to serialize
+    // an enormous response and OOM the serve process (HFT-review finding). 16 MiB
+    // comfortably holds legitimate responses while capping a runaway one; it pairs
+    // with the per-read LIMITs pushed into the ClickHouse reader.
+    let workstation = WorkstationServiceServer::new(service)
+        .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+        .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES);
+    let server = tonic::transport::Server::builder().add_service(workstation);
 
+    // Bind up front so a bind failure (e.g. port in use) is returned to the
+    // caller instead of being swallowed inside the spawned task while we log
+    // "bound" and let `serve` run on silently without gRPC (audit finding A.112).
+    let incoming = tonic::transport::server::TcpIncoming::bind(addr)?;
     info!(%addr, "gRPC server bound");
 
     let handle = tokio::spawn(async move {
         let shutdown_signal = shutdown.cancelled_owned();
-        if let Err(e) = server.serve_with_shutdown(addr, shutdown_signal).await {
+        if let Err(e) = server
+            .serve_with_incoming_shutdown(incoming, shutdown_signal)
+            .await
+        {
             tracing::error!(error = %e, "gRPC server error");
         }
     });
@@ -319,6 +353,7 @@ mod tests {
                 source_event_id: Some("ev-1".into()),
                 source_session_id: Some("ses-1".into()),
                 sequence: Some(pb_types::Sequence::new(1)),
+                ingest_ordinal: None,
             },
         }))
         .await
@@ -337,6 +372,7 @@ mod tests {
                 source_event_id: Some("ev-1".into()),
                 source_session_id: Some("ses-1".into()),
                 sequence: Some(pb_types::Sequence::new(1)),
+                ingest_ordinal: None,
             },
         }))
         .await
@@ -455,9 +491,11 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: None,
                 order_id: None,
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()
@@ -513,11 +551,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn completeness_to_str_all_variants() {
-        assert_eq!(completeness_to_str(CompletenessLevel::Full), "full");
-        assert_eq!(completeness_to_str(CompletenessLevel::Partial), "partial");
-        assert_eq!(completeness_to_str(CompletenessLevel::Sparse), "sparse");
-        assert_eq!(completeness_to_str(CompletenessLevel::Empty), "empty");
+    fn completeness_to_str_matches_http_two_value_domain() {
+        // Must mirror the HTTP CompletenessLabel domain (complete / best_effort)
+        // so the two surfaces are interchangeable (HFT-review #15).
+        assert_eq!(completeness_to_str(CompletenessLevel::Full), "complete");
+        assert_eq!(
+            completeness_to_str(CompletenessLevel::Partial),
+            "best_effort"
+        );
+        assert_eq!(
+            completeness_to_str(CompletenessLevel::Sparse),
+            "best_effort"
+        );
+        assert_eq!(completeness_to_str(CompletenessLevel::Empty), "best_effort");
     }
 
     #[test]
@@ -767,8 +813,8 @@ mod tests {
         assert_eq!(resp.asset_id, "test-asset");
         assert_eq!(resp.start_us, start_us);
         assert_eq!(resp.end_us, end_us);
-        // completeness should be a valid string
-        assert!(["full", "partial", "sparse", "empty"].contains(&resp.completeness.as_str()));
+        // completeness mirrors the HTTP two-value domain (HFT-review #15).
+        assert!(["complete", "best_effort"].contains(&resp.completeness.as_str()));
 
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -798,9 +844,11 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: Some("test-asset".into()),
                 order_id: None,
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 10,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()
@@ -837,9 +885,11 @@ mod tests {
             .execution_timeline(proto::ExecutionTimelineRequest {
                 asset_id: None,
                 order_id: Some("order-xyz".into()),
-                start_us: 0,
-                end_us: u64::MAX,
+                start_us: 1,
+                end_us: 86_400_000_001, // exactly the 24h max window
                 limit: 50,
+                offset: 0,
+                descending: false,
             })
             .await
             .unwrap()

@@ -1,0 +1,185 @@
+# Prometheus alerting rules for poly-book (audit findings P2-OBS-1 / P3-MON-1).
+#
+# Load via prometheus.yml:
+#   rule_files:
+#     - /etc/prometheus/poly-book/alerts.yml
+# and point Alertmanager at PagerDuty/Slack for the `critical` severity.
+#
+# Every alert references a RUNBOOK.md section so on-call has an immediate action.
+# `for:` durations are short (seconds) for the data-loss-class alerts so paging is
+# second-scale, per the P3-MON-1 requirement.
+groups:
+  - name: poly-book-data-loss
+    rules:
+      - alert: WalAppendFailing
+        expr: increase(pb_wal_append_failures_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL append is failing on {{ $labels.instance }}"
+          description: >-
+            The write-ahead log — the durability backbone — failed to append.
+            Records are being lost. Almost always disk-full or a permissions/IO
+            error on the WAL volume.
+          runbook: monitoring/RUNBOOK.md#walappendfailing
+
+      - alert: SinkFlushFailing
+        expr: increase(pb_sink_flush_failures_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Storage sink {{ $labels.sink }} flush failing on {{ $labels.instance }}"
+          description: >-
+            A Parquet/ClickHouse flush failed (retried with backoff). Sustained
+            failures mean storage is falling behind the WAL; data is still durable
+            in the WAL and can be rebuilt with `reconcile`.
+          runbook: monitoring/RUNBOOK.md#sinkflushfailing
+
+      - alert: WalDecodeError
+        expr: increase(pb_wal_decode_errors_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL frame failed to decode during live tailing on {{ $labels.instance }}"
+          description: >-
+            A CRC-valid WAL frame could not be decoded by the codec and was skipped
+            during live tailing — the serve read model has diverged from the WAL for
+            that record. This should be near-impossible (a codec version mismatch or
+            CRC collision). Investigate the WAL/codec version and reconcile.
+          runbook: monitoring/RUNBOOK.md#waldecodeerror
+
+      - alert: FeedSilent
+        expr: rate(pb_messages_received_total[2m]) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No WebSocket messages received for 2m on {{ $labels.instance }}"
+          description: >-
+            The feed has gone silent — either the venue WS is down or the client
+            is stuck. Every second of silence is a capture gap.
+          runbook: monitoring/RUNBOOK.md#feedsilent
+
+  - name: poly-book-data-quality
+    rules:
+      - alert: FeedStale
+        expr: pb_feed_staleness_seconds > 15
+        for: 5s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Feed staleness {{ $value }}s on {{ $labels.instance }}"
+          description: >-
+            Time since the last applied update exceeds the staleness threshold.
+            Sustained staleness during market hours indicates a stalled feed.
+          runbook: monitoring/RUNBOOK.md#feedstale
+
+      - alert: BookMismatch
+        expr: increase(pb_book_mismatches_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconstructed book diverged from venue best bid/ask"
+          description: >-
+            Our reconstructed top-of-book disagreed with the venue-stated
+            best_bid/best_ask after a delta — evidence of a silently dropped or
+            corrupt update. A resnapshot is needed for the affected asset.
+          runbook: monitoring/RUNBOOK.md#bookmismatch
+
+      - alert: CrossedBook
+        expr: increase(pb_crossed_books_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Crossed/locked book detected (best_bid >= best_ask)"
+          description: >-
+            The live or replayed book crossed. Usually a missed delta or a
+            stale-vs-fresh ordering problem; cross-check with BookMismatch.
+          runbook: monitoring/RUNBOOK.md#crossedbook
+
+      - alert: ResnapshotRequestsDropped
+        expr: increase(pb_resnapshot_requests_dropped_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Self-heal resnapshot requests are being dropped (channel full)"
+          description: >-
+            A book divergence was detected but the corrective resnapshot request
+            could not be enqueued because the request channel was full. If many
+            assets diverge at once, some assets' self-heal is skipped and their
+            books stay corrupt until the next natural resnapshot. Correlate with
+            BookMismatch volume.
+          runbook: monitoring/RUNBOOK.md#resnapshotrequestsdropped
+
+      - alert: SequenceGaps
+        expr: increase(pb_gaps_detected_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: info
+        annotations:
+          summary: "Sequence gaps detected during ingest/replay"
+          description: >-
+            Sequence continuity broke. Expected briefly around reconnects; if
+            sustained outside reconnects, investigate feed loss.
+          runbook: monitoring/RUNBOOK.md#sequencegaps
+
+      - alert: ClockSkew
+        expr: increase(pb_clock_skew_events_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Venue clock skew detected on {{ $labels.instance }}"
+          description: >-
+            Venue (exchange) timestamps are arriving implausibly ahead of our
+            receive time, meaning the ingest host clock is behind the venue's.
+            Exchange-time replay ordering will be wrong until corrected.
+          runbook: monitoring/RUNBOOK.md#clockskew
+
+      - alert: UnknownMessagesDropped
+        expr: rate(pb_unknown_messages_dropped_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Unknown WS message types being dropped"
+          description: >-
+            Frames that match no known message type are being dropped. A sustained
+            rate usually means the venue introduced a new message type we should
+            handle.
+          runbook: monitoring/RUNBOOK.md#unknownmessagesdropped
+
+  - name: poly-book-backpressure
+    rules:
+      - alert: WalConsumerLagHigh
+        expr: pb_wal_consumer_lag_bytes > 268435456
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL consumer lag {{ $value | humanize1024 }}B on {{ $labels.instance }}"
+          description: >-
+            A WAL consumer (serve replica) is lagging beyond the retention window;
+            if it falls behind pruning it will need a resync/re-hydrate.
+          runbook: monitoring/RUNBOOK.md#walconsumerlaghigh
+
+      - alert: WsBroadcastLagging
+        expr: increase(pb_ws_broadcast_lagged_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "WebSocket subscribers are lagging the broadcast buffer"
+          description: >-
+            One or more streaming clients fell behind the per-asset broadcast
+            buffer and were force-resynced. Occasional events are benign (a slow
+            client); a sustained rate means the update rate exceeds what clients
+            can consume — consider a larger BROADCAST_CAPACITY or client-side
+            throttling.
+          runbook: monitoring/RUNBOOK.md#wsbroadcastlagging

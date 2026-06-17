@@ -12,11 +12,11 @@ description = "WebSocket ingest, REST discovery, and dispatch pipeline for poly-
 
 [dependencies]
 pb-types = { workspace = true }
+pb-book = { workspace = true }
 pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
-native-tls = "0.2"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,3 +26,10 @@ futures-util = { workspace = true }
 governor = { workspace = true }
 url = { workspace = true }
 rustc-hash = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "dispatcher"
+harness = false

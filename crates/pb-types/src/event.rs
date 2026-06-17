@@ -52,6 +52,15 @@ pub struct EventProvenance {
     pub source_event_id: Option<String>,
     pub source_session_id: Option<String>,
     pub sequence: Option<Sequence>,
+    /// Process-monotonic ordinal stamped at the single ingest serialization
+    /// point, strictly increasing in true arrival order across snapshots and
+    /// reconnects (unlike `sequence`, which resets to 0 on every snapshot). This
+    /// is the authoritative replay tiebreaker so a same-microsecond pre-snapshot
+    /// delta sorts before its snapshot (audit finding A.116). `None` for records
+    /// produced before this field existed or outside the ingest path (e.g. replay
+    /// reconstructs `IngestEvent`s for surfaced gaps).
+    #[serde(default)]
+    pub ingest_ordinal: Option<u64>,
 }
 
 /// Book event type.
@@ -117,6 +126,10 @@ pub enum IngestEventKind {
     SequenceGap,
     StaleSnapshotSkip,
     SourceReset,
+    /// The reconstructed top-of-book diverged from the venue-stated
+    /// `best_bid`/`best_ask` after applying a delta — evidence of a silently
+    /// dropped/corrupt update (audit findings A.74/A.109).
+    BookMismatch,
 }
 
 impl std::fmt::Display for IngestEventKind {
@@ -127,6 +140,7 @@ impl std::fmt::Display for IngestEventKind {
             IngestEventKind::SequenceGap => write!(f, "sequence_gap"),
             IngestEventKind::StaleSnapshotSkip => write!(f, "stale_snapshot_skip"),
             IngestEventKind::SourceReset => write!(f, "source_reset"),
+            IngestEventKind::BookMismatch => write!(f, "book_mismatch"),
         }
     }
 }
@@ -222,6 +236,34 @@ impl LatencyTrace {
             exchange_ack_us,
             exchange_fill_us,
         }
+    }
+
+    /// The latency stages in causal order, skipping absent ones.
+    fn present_stages(&self) -> impl Iterator<Item = u64> + '_ {
+        [
+            self.market_data_recv_us,
+            self.normalization_done_us,
+            self.strategy_decision_us,
+            self.order_submit_us,
+            self.exchange_ack_us,
+            self.exchange_fill_us,
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// True if the present stage timestamps are non-decreasing in causal order.
+    /// A violation means a consumer would compute a negative stage duration
+    /// (audit finding A.62).
+    pub fn is_monotonic(&self) -> bool {
+        let mut last: Option<u64> = None;
+        for stage in self.present_stages() {
+            if last.is_some_and(|prev| stage < prev) {
+                return false;
+            }
+            last = Some(stage);
+        }
+        true
     }
 }
 
@@ -350,6 +392,34 @@ impl PersistedRecord {
             PersistedRecord::Execution(event) => event.event_timestamp_us,
         }
     }
+
+    /// The feed-receive timestamp (µs) for records that carry provenance, used to
+    /// measure end-to-end recv→durable latency at ingest (audit finding A.113).
+    /// `ReplayValidation`/`ExecutionEvent` have no feed-receive provenance.
+    pub fn recv_timestamp_us(&self) -> Option<u64> {
+        match self {
+            PersistedRecord::Book(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Trade(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Ingest(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Checkpoint(e) => Some(e.provenance.recv_timestamp_us),
+            PersistedRecord::Validation(_) | PersistedRecord::Execution(_) => None,
+        }
+    }
+
+    /// Mutable access to the record's `EventProvenance`, if it carries one.
+    /// `ReplayValidation` and `ExecutionEvent` have no provenance and return
+    /// `None`. Used at the single ingest serialization point to stamp the
+    /// monotonic `ingest_ordinal` (audit A.116).
+    pub fn provenance_mut(&mut self) -> Option<&mut EventProvenance> {
+        match self {
+            PersistedRecord::Book(event) => Some(&mut event.provenance),
+            PersistedRecord::Trade(event) => Some(&mut event.provenance),
+            PersistedRecord::Ingest(event) => Some(&mut event.provenance),
+            PersistedRecord::Checkpoint(event) => Some(&mut event.provenance),
+            PersistedRecord::Validation(_) => None,
+            PersistedRecord::Execution(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +438,34 @@ pub struct ExecutionWindow {
 mod tests {
     use super::*;
 
+    #[test]
+    fn latency_trace_monotonicity() {
+        // In-order (with gaps) is monotonic.
+        let ok = LatencyTrace::from_optional_timestamps(
+            Some(100),
+            None,
+            Some(200),
+            None,
+            Some(300),
+            Some(300),
+        );
+        assert!(ok.is_monotonic());
+
+        // An earlier stage after a later one is a violation.
+        let bad = LatencyTrace::from_optional_timestamps(
+            Some(100),
+            Some(50), // normalization_done before market_data_recv
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!bad.is_monotonic());
+
+        // All-absent is vacuously monotonic.
+        assert!(LatencyTrace::default().is_monotonic());
+    }
+
     fn sample_provenance() -> EventProvenance {
         EventProvenance {
             recv_timestamp_us: 1_000_000,
@@ -376,6 +474,7 @@ mod tests {
             source_event_id: Some("abc".to_string()),
             source_session_id: Some("session-1".to_string()),
             sequence: Some(Sequence::new(42)),
+            ingest_ordinal: None,
         }
     }
 
@@ -1009,6 +1108,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
 
         // Book uses provenance recv_timestamp_us
@@ -1181,6 +1281,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
         let json = serde_json::to_string(&prov).unwrap();
         let prov2: EventProvenance = serde_json::from_str(&json).unwrap();
@@ -1196,6 +1297,7 @@ mod tests {
             source_event_id: Some("max".to_string()),
             source_session_id: Some("max-session".to_string()),
             sequence: Some(Sequence::new(u64::MAX)),
+            ingest_ordinal: None,
         };
         let json = serde_json::to_string(&prov).unwrap();
         let prov2: EventProvenance = serde_json::from_str(&json).unwrap();

@@ -30,14 +30,30 @@ impl From<pb_service::ServiceError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // Client-facing message. For 4xx the message is a validation hint and is
+        // safe to return; for 5xx the internal detail (ClickHouse URLs, storage
+        // errors, etc.) must NOT leak to unauthenticated clients, so it is
+        // logged server-side and replaced with an opaque message (A.95).
+        let (status, client_message) = match &self {
+            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            Self::ServiceUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service temporarily unavailable".to_string(),
+            ),
+            Self::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            ),
         };
+
+        if status.is_server_error() {
+            // Log the real detail so operators can diagnose; clients never see it.
+            tracing::error!(status = %status.as_u16(), detail = %self, "API request failed");
+        }
+
         let body = Json(ApiErrorResponse {
-            error: self.to_string(),
+            error: client_message,
         });
         (status, body).into_response()
     }

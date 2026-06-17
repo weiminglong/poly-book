@@ -216,7 +216,26 @@ impl LiveState {
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(pending.last_recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(pending.key.exchange_timestamp_us);
+        self.check_book_integrity(asset_id);
         true
+    }
+
+    /// Run the crossed/locked-book invariant check on an asset's current book
+    /// and surface a violation (metric + warning) instead of silently serving a
+    /// crossed book (audit finding A.105).
+    fn check_book_integrity(&mut self, asset_id: &str) {
+        let state = self.ensure_asset(asset_id);
+        if let Err(err) = state.book.check_integrity() {
+            let detail = err.to_string();
+            state.latest_warning = Some(ContinuityWarning {
+                kind: "crossed_book".to_string(),
+                recv_timestamp_us: state.last_recv_timestamp_us.unwrap_or(0),
+                exchange_timestamp_us: state.last_exchange_timestamp_us.unwrap_or(0),
+                details: Some(detail.clone()),
+            });
+            pb_metrics::record_crossed_book();
+            tracing::warn!(asset_id, error = %detail, "crossed/locked book detected on live path");
+        }
     }
 
     fn record_snapshot_event(&mut self, event: BookEvent) {
@@ -267,6 +286,7 @@ impl LiveState {
         );
         state.last_recv_timestamp_us = Some(event.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(event.provenance.exchange_timestamp_us);
+        self.check_book_integrity(&asset_id);
     }
 
     fn record_ingest_event(&mut self, event: IngestEvent) {
@@ -286,7 +306,8 @@ impl LiveState {
             }
             pb_types::IngestEventKind::SequenceGap
             | pb_types::IngestEventKind::StaleSnapshotSkip
-            | pb_types::IngestEventKind::SourceReset => {}
+            | pb_types::IngestEventKind::SourceReset
+            | pb_types::IngestEventKind::BookMismatch => {}
         }
         if let Some(asset_id) = event.asset_id.as_ref() {
             let state = self.ensure_asset(asset_id.as_str());
@@ -313,6 +334,8 @@ impl LiveState {
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(checkpoint.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(checkpoint.provenance.exchange_timestamp_us);
+        let asset_id = asset_id.to_string();
+        self.check_book_integrity(&asset_id);
     }
 
     /// Apply a record and return the list of asset IDs that had book updates
@@ -431,6 +454,9 @@ impl LiveState {
             slug: None,
             sequence: state.book.sequence.raw(),
             last_update_us: state.book.last_update_us,
+            // True totals, not the depth-capped array lengths (HFT-review #4).
+            bid_depth: state.book.bid_depth(),
+            ask_depth: state.book.ask_depth(),
             bids: state
                 .book
                 .top_bids(depth)
@@ -658,7 +684,19 @@ impl LiveReadModel {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = token.cancelled() => break,
+                    _ = token.cancelled() => {
+                        // Drain records already buffered in the channel before
+                        // exiting, so a shutdown does not abandon in-flight feed
+                        // updates the producers had already sent (HFT-review #2;
+                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // current buffer — no new records arrive after cancellation.
+                        while let Ok(record) = rx.try_recv() {
+                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                break;
+                            }
+                        }
+                        break;
+                    }
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
@@ -702,7 +740,19 @@ impl LiveReadModel {
 
             loop {
                 tokio::select! {
-                    _ = token.cancelled() => break,
+                    _ = token.cancelled() => {
+                        // Drain records already buffered in the channel before
+                        // exiting, so a shutdown does not abandon in-flight feed
+                        // updates the producers had already sent (HFT-review #2;
+                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // current buffer — no new records arrive after cancellation.
+                        while let Ok(record) = rx.try_recv() {
+                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
+                                break;
+                            }
+                        }
+                        break;
+                    }
                     record = rx.recv() => {
                         match record {
                             Some(record) => {
@@ -735,14 +785,21 @@ impl LiveReadModel {
     }
 
     /// Apply a single record and wait for it to be processed.
-    /// Primarily used in tests.
-    pub async fn apply_record(&self, record: PersistedRecord) {
+    /// Apply a record through the projector. Returns `false` if the projector
+    /// task is dead (the command channel is closed or the ack was dropped), so
+    /// the WAL tailer can stop committing consumer positions for records that
+    /// were never applied (audit finding A.45) instead of silently advancing.
+    pub async fn apply_record(&self, record: PersistedRecord) -> bool {
         let (ack_tx, ack_rx) = oneshot::channel();
-        let _ = self
+        if self
             .cmd_tx
             .send(ProjectorCommand::RecordAck(record, ack_tx))
-            .await;
-        let _ = ack_rx.await;
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.await.is_ok()
     }
 
     /// Set the active asset list. Waits for the projector to process the change.
@@ -941,6 +998,7 @@ mod tests {
             source_event_id: Some("snapshot-a".to_string()),
             source_session_id: Some("ws-session-1".to_string()),
             sequence: Some(Sequence::new(sequence)),
+            ingest_ordinal: None,
         }
     }
 
@@ -987,6 +1045,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: Some(Sequence::new(sequence)),
+                ingest_ordinal: None,
             },
         })
     }
@@ -1012,6 +1071,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1023,6 +1083,73 @@ mod tests {
         assert_eq!(snapshot.bid_depth, 1);
         assert_eq!(snapshot.ask_depth, 1);
         assert_eq!(snapshot.sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn crossed_book_on_delta_is_detected_and_surfaced() {
+        // A delta that lifts the best bid above the best ask produces a crossed
+        // book, which must be flagged (A.105) rather than served silently.
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.50, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.60, 20.0, 1))
+            .await;
+        // The delta also materializes the pending (valid) snapshot first, then
+        // crosses the book.
+        model
+            .apply_record(delta_record_for("tok1", Side::Bid, 0.65, 5.0, 200, 190, 2))
+            .await;
+
+        let snapshot = model.snapshot("tok1", 5, 100).await.unwrap();
+        let warning = snapshot
+            .latest_warning
+            .expect("crossed book should surface a warning");
+        assert_eq!(warning.kind, "crossed_book");
+    }
+
+    #[tokio::test]
+    async fn crossed_book_at_snapshot_materialization_is_detected() {
+        // A snapshot GROUP that is itself crossed (best bid >= best ask) must be
+        // flagged when it materializes. This is the snapshot path
+        // (materialize_pending_for_asset -> check_book_integrity), distinct from
+        // the delta path covered above (HFT-review coverage gap).
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        // Crossed snapshot: bid 0.60 sits above ask 0.50.
+        model
+            .apply_record(snapshot_record(Side::Bid, 0.60, 10.0, 0))
+            .await;
+        model
+            .apply_record(snapshot_record(Side::Ask, 0.50, 20.0, 1))
+            .await;
+        // A non-snapshot record forces the pending snapshot group to materialize.
+        model
+            .apply_record(PersistedRecord::Ingest(IngestEvent {
+                asset_id: None,
+                kind: IngestEventKind::ReconnectSuccess,
+                provenance: EventProvenance {
+                    recv_timestamp_us: 101,
+                    exchange_timestamp_us: 0,
+                    source: DataSource::WebSocket,
+                    source_event_id: None,
+                    source_session_id: Some("ws-session-1".to_string()),
+                    sequence: None,
+                    ingest_ordinal: None,
+                },
+                expected_sequence: None,
+                observed_sequence: None,
+                details: None,
+            }))
+            .await;
+
+        let snapshot = model.snapshot("tok1", 5, 100).await.unwrap();
+        let warning = snapshot
+            .latest_warning
+            .expect("crossed snapshot should surface a warning at materialization");
+        assert_eq!(warning.kind, "crossed_book");
     }
 
     #[tokio::test]
@@ -1053,6 +1180,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1081,6 +1209,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: Some(2),
                 observed_sequence: Some(5),
@@ -1118,6 +1247,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("session-42".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1144,6 +1274,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1242,6 +1373,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             wal_offset: None,
         };
@@ -1268,6 +1400,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: Some(1),
                 observed_sequence: Some(5),
@@ -1304,6 +1437,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1326,6 +1460,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: Some(Sequence::new(2)),
+                    ingest_ordinal: None,
                 },
             }))
             .await;
@@ -1357,6 +1492,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,
@@ -1405,6 +1541,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: Some("ws-session-1".to_string()),
                     sequence: None,
+                    ingest_ordinal: None,
                 },
                 expected_sequence: None,
                 observed_sequence: None,

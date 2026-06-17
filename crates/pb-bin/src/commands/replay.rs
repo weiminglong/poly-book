@@ -2,7 +2,6 @@ use anyhow::{bail, Result};
 use config::Config;
 use pb_store::{ClickHouseRecordWriter, ParquetRecordWriter};
 use pb_types::{AssetId, PersistedRecord, ReplayMode};
-use std::sync::Arc;
 
 pub async fn run(
     settings: Config,
@@ -84,19 +83,10 @@ async fn persist_validation_parquet(
     settings: &Config,
     validation: pb_types::ReplayValidation,
 ) -> Result<()> {
-    let base_path = settings
+    let configured = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());
-    let base_path = std::path::Path::new(&base_path)
-        .canonicalize()
-        .or_else(|_| {
-            std::fs::create_dir_all(&base_path)?;
-            std::path::Path::new(&base_path).canonicalize()
-        })?
-        .to_string_lossy()
-        .to_string();
-    let store: Arc<dyn object_store::ObjectStore> =
-        Arc::new(object_store::local::LocalFileSystem::new());
+    let (store, base_path) = super::pipeline::build_object_store(&configured)?;
     let writer = ParquetRecordWriter::new(store, base_path);
     writer
         .write_record(PersistedRecord::Validation(validation))

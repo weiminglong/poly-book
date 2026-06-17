@@ -53,10 +53,45 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   for server-side filtering and adds `ORDER BY` clauses on all queries.
 - ClickHouseReader uses `tokio::try_join!` to run independent queries concurrently
   (e.g., checkpoints + market data) instead of sequential awaits.
+- For integrity summaries, `ClickHouseReader::read_integrity_aggregates` pushes the
+  heavy counts to the server (`count()` on `book_events`, `count()`/`countIf(matched)`
+  on `replay_validations`) and `read_ingest_events` fetches only the bounded ingest
+  list. This avoids streaming every book/trade row back just to call `.len()` on it
+  (audit A.42); the two aggregate queries run concurrently via `try_join!`. The
+  returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
+  `validation_match_count`.
+- Unbounded ClickHouse reads (`read_ingest_events`, `read_execution_events`) go
+  through `bounded_client()`, which sets `max_result_rows = MAX_READ_ROWS` (5M) +
+  `result_overflow_mode = 'throw'`, so a pathological window ERRORS loudly instead
+  of materializing millions of rows and OOM-ing the serve process (HFT-review
+  finding). Verified against a live server (TOO_MANY_ROWS_OR_BYTES on overflow).
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
   for efficiency in Parquet hour-path generation.
+- Replay validation seeds reconstruction from the checkpoint *strictly before*
+  the reference checkpoint and replays deltas forward to it, then compares
+  against the independent reference. It must never seed from the reference
+  itself, or `matched` is trivially always true.
+- **Deterministic ordering**: `sort_book_events` imposes a *total* order —
+  timestamp (clock-domain), then `ingest_ordinal` (the authoritative
+  arrival-order tiebreaker stamped at ingest), then `sequence`, then content
+  tiebreakers (side, price, size, source event id). Parquet files are read
+  concurrently and may arrive out of order (`buffer_unordered`), so this total
+  order is what makes two replays of the same window byte-identical (A.117).
+  Because `ingest_ordinal` is monotonic in true arrival order (unlike `sequence`,
+  which resets to 0 on each snapshot), a same-microsecond *pre-snapshot* delta
+  now sorts before its snapshot (A.116). Legacy rows without an ordinal fall back
+  to `sequence` + content tiebreakers.
+- Replay never mutates live observability: a sequence gap found during
+  reconstruction is recorded in the returned continuity events, not pushed to the
+  live `pb_gaps_detected_total` recorder (A.152).
+- **Single clock domain at the checkpoint boundary**: `checkpoint_timestamp_us`
+  is an exchange-clock value, so the post-checkpoint cutoff projects the
+  checkpoint into the active replay clock (`checkpoint_ordering_ts`) before
+  comparing it against events — in RecvTime mode it uses the checkpoint's recv
+  timestamp. Without this, recv-vs-exchange skew could skip or double-apply deltas
+  straddling the boundary (audit P1-REPLAY-2).
 
 ## Docs to Update After Changes
 

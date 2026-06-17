@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+use pb_book::L2Book;
+
 use crate::error::FeedError;
 use crate::ws::{FeedMessage, WsLifecycleEvent, WsLifecycleKind, WsRawMessage};
 use pb_types::event::{
@@ -47,8 +49,21 @@ pub struct Dispatcher {
     asset_sequences: FxHashMap<Arc<str>, u64>,
     /// Per-asset last snapshot exchange timestamp for staleness detection.
     last_snapshot_ts: FxHashMap<Arc<str>, u64>,
+    /// Per-asset last accepted snapshot venue hash, used to deduplicate exact
+    /// retransmits of identical book state (e.g. an equal-timestamp duplicate).
+    last_snapshot_hash: FxHashMap<Arc<str>, String>,
     /// Interned AssetIds to avoid heap allocation on every message.
     asset_id_cache: FxHashMap<Arc<str>, AssetId>,
+    /// Per-asset shadow book maintained purely to cross-check the venue-stated
+    /// `best_bid`/`best_ask` after each delta and detect silent feed corruption
+    /// (audit findings A.74/A.109). Not used for serving — that book is
+    /// reconstructed downstream from the WAL.
+    validation_books: FxHashMap<Arc<str>, L2Book>,
+    /// Optional channel on which the dispatcher requests a REST resnapshot for an
+    /// asset whose book diverged from the venue (A.74). A resnapshot worker
+    /// fetches a fresh snapshot and re-injects it. Sends are non-blocking (drop
+    /// if full) so detection never backpressures ingest.
+    resnapshot_tx: Option<mpsc::Sender<Arc<str>>>,
     current_session_id: Option<String>,
 }
 
@@ -59,9 +74,20 @@ impl Dispatcher {
             tx,
             asset_sequences: FxHashMap::default(),
             last_snapshot_ts: FxHashMap::default(),
+            last_snapshot_hash: FxHashMap::default(),
             asset_id_cache: FxHashMap::default(),
+            validation_books: FxHashMap::default(),
+            resnapshot_tx: None,
             current_session_id: None,
         }
+    }
+
+    /// Wire a channel on which the dispatcher requests a REST resnapshot when it
+    /// detects a book divergence (A.74). Without it, divergences are still
+    /// detected, metered, and persisted as `BookMismatch` events.
+    pub fn with_resnapshot_tx(mut self, tx: mpsc::Sender<Arc<str>>) -> Self {
+        self.resnapshot_tx = Some(tx);
+        self
     }
 
     pub async fn run(&mut self) -> Result<(), FeedError> {
@@ -121,6 +147,7 @@ impl Dispatcher {
             source_event_id: None,
             source_session_id: Some(event.session_id.clone()),
             sequence: None,
+            ingest_ordinal: None,
         };
         self.send(PersistedRecord::Ingest(IngestEvent {
             asset_id: None,
@@ -150,12 +177,20 @@ impl Dispatcher {
     fn reset_continuity_state(&mut self) {
         self.asset_sequences.clear();
         self.last_snapshot_ts.clear();
+        self.last_snapshot_hash.clear();
+        // Drop shadow books: after a continuity reset the next snapshot rebuilds
+        // them, and validating deltas against a pre-reset book would false-alarm.
+        self.validation_books.clear();
     }
 
     async fn dispatch_raw(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
         let msg: WsMessage<'_> = match serde_json::from_str(&raw.text) {
             Ok(m) => m,
             Err(e) => {
+                // A frame that matches no known message type is dropped. Meter it
+                // so silent loss of new/unknown venue message types is visible
+                // (audit finding A.110) instead of vanishing at debug level.
+                pb_metrics::record_unknown_message_dropped();
                 debug!("skipping non-event message: {e}");
                 return Ok(());
             }
@@ -165,11 +200,20 @@ impl Dispatcher {
             WsMessage::Book(book) => {
                 let asset_id = self.intern_asset_id(book.asset_id);
                 let exchange_ts = parse_timestamp_us(book.timestamp);
+                if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
+                    pb_metrics::record_clock_skew(skew);
+                }
                 let source_event_id = book.hash.map(str::to_string);
 
+                // Skip only *strictly older* snapshots. Polymarket emits one
+                // `book` event per trade at millisecond resolution, so two
+                // trades in the same millisecond produce equal-timestamp
+                // snapshots whose later one carries the newer state. Dropping
+                // equal timestamps (the old `<=`) silently lost that state in
+                // exactly the high-activity bursts that matter (A.21).
                 if exchange_ts > 0 {
                     if let Some(&last_ts) = self.last_snapshot_ts.get(asset_id.as_str()) {
-                        if exchange_ts <= last_ts {
+                        if exchange_ts < last_ts {
                             warn!(
                                 asset_id = %asset_id,
                                 exchange_ts,
@@ -189,7 +233,7 @@ impl Dispatcher {
                                 expected_sequence: None,
                                 observed_sequence: None,
                                 details: Some(format!(
-                                    "snapshot exchange timestamp {} <= latest accepted {}",
+                                    "snapshot exchange timestamp {} < latest accepted {}",
                                     exchange_ts, last_ts
                                 )),
                             }))
@@ -197,43 +241,134 @@ impl Dispatcher {
                             return Ok(());
                         }
                     }
+                }
+
+                // Deduplicate exact retransmits of identical book state by venue
+                // hash, so an equal-timestamp duplicate does not re-emit a
+                // redundant snapshot.
+                if let Some(ref hash) = source_event_id {
+                    if self
+                        .last_snapshot_hash
+                        .get(asset_id.as_str())
+                        .map(String::as_str)
+                        == Some(hash.as_str())
+                    {
+                        pb_metrics::record_stale_snapshot_skipped();
+                        return Ok(());
+                    }
+                }
+
+                // Convert every level up-front, directly into per-side vectors. A
+                // mid-message conversion failure must not leave a truncated snapshot
+                // downstream (which would be indistinguishable from a complete one)
+                // and must not poison the staleness tracker, so on error we emit a
+                // continuity-reset marker and leave all tracker state untouched
+                // (A.108). Building snap_bids/snap_asks here (rather than a combined
+                // `levels` vec that is then re-partitioned) removes a full Vec
+                // allocation and a re-iteration on the snapshot path (HFT-review #13).
+                let mut snap_bids: Vec<(FixedPrice, FixedSize)> =
+                    Vec::with_capacity(book.bids.len());
+                let mut snap_asks: Vec<(FixedPrice, FixedSize)> =
+                    Vec::with_capacity(book.asks.len());
+                let mut conversion_error: Option<FeedError> = None;
+                'convert: for (side, entries) in [(Side::Bid, &book.bids), (Side::Ask, &book.asks)]
+                {
+                    for entry in entries {
+                        match (
+                            FixedPrice::try_from(entry.price),
+                            FixedSize::try_from(entry.size),
+                        ) {
+                            (Ok(price), Ok(size)) => match side {
+                                Side::Bid => snap_bids.push((price, size)),
+                                Side::Ask => snap_asks.push((price, size)),
+                            },
+                            (Err(e), _) | (_, Err(e)) => {
+                                conversion_error = Some(e.into());
+                                break 'convert;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(e) = conversion_error {
+                    warn!(
+                        asset_id = %asset_id,
+                        error = %e,
+                        "book snapshot conversion failed; emitting continuity reset instead of a partial snapshot"
+                    );
+                    pb_metrics::record_stale_snapshot_skipped();
+                    self.send(PersistedRecord::Ingest(IngestEvent {
+                        asset_id: Some(asset_id),
+                        kind: IngestEventKind::SourceReset,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id,
+                            None,
+                        ),
+                        expected_sequence: None,
+                        observed_sequence: None,
+                        details: Some(format!("book snapshot dropped (unparseable level): {e}")),
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+
+                // Full conversion succeeded — commit atomically: advance the
+                // staleness tracker, record the hash, reset the sequence
+                // counter, then emit the snapshot.
+                if exchange_ts > 0 {
                     self.last_snapshot_ts
                         .insert(asset_id.0.clone(), exchange_ts);
                 }
+                if let Some(ref hash) = source_event_id {
+                    self.last_snapshot_hash
+                        .insert(asset_id.0.clone(), hash.clone());
+                }
                 pb_metrics::record_snapshot_reconciled();
-
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
 
-                for entry in &book.bids {
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
-                        asset_id.clone(),
-                        BookEventKind::Snapshot,
-                        Side::Bid,
-                        entry.price,
-                        entry.size,
-                        source_event_id.clone(),
-                    )?;
-                    self.send(PersistedRecord::Book(event)).await?;
-                }
+                // Rebuild the shadow book from this snapshot so subsequent deltas
+                // can be cross-checked against the venue best bid/ask (A.74). Uses
+                // the per-side vectors built during conversion — no re-partition.
+                self.validation_books
+                    .entry(asset_id.0.clone())
+                    .or_insert_with(|| L2Book::new(asset_id.clone()))
+                    .apply_snapshot(&snap_bids, &snap_asks, Sequence::default(), exchange_ts);
 
-                for entry in &book.asks {
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
-                        asset_id.clone(),
-                        BookEventKind::Snapshot,
-                        Side::Ask,
-                        entry.price,
-                        entry.size,
-                        source_event_id.clone(),
-                    )?;
+                // Emit bids then asks, preserving the original (bid-first) ordering
+                // so sequence assignment is unchanged.
+                let emit = snap_bids
+                    .into_iter()
+                    .map(|(price, size)| (Side::Bid, price, size))
+                    .chain(
+                        snap_asks
+                            .into_iter()
+                            .map(|(price, size)| (Side::Ask, price, size)),
+                    );
+                for (side, price, size) in emit {
+                    let sequence = self.next_sequence_for(&asset_id);
+                    let event = BookEvent {
+                        asset_id: asset_id.clone(),
+                        kind: BookEventKind::Snapshot,
+                        side,
+                        price,
+                        size,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id.clone(),
+                            Some(sequence),
+                        ),
+                    };
                     self.send(PersistedRecord::Book(event)).await?;
                 }
             }
             WsMessage::PriceChange(pc) => {
                 let exchange_ts = parse_timestamp_us(pc.timestamp);
+                if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
+                    pb_metrics::record_clock_skew(skew);
+                }
                 for entry in &pc.price_changes {
                     let side = match parse_side(entry.side) {
                         Some(s) => s,
@@ -244,17 +379,88 @@ impl Dispatcher {
                     };
 
                     let asset_id = self.intern_asset_id(entry.asset_id);
-                    let event = self.make_book_event(
-                        raw.recv_timestamp_us,
-                        exchange_ts,
-                        asset_id,
-                        BookEventKind::Delta,
+                    // Skip an unparseable price/size entry instead of aborting
+                    // the whole price_change batch (which would also drop the
+                    // valid entries after it). Deltas are independent level
+                    // updates, so this matches the existing bad-side handling
+                    // (A.108).
+                    let (price, size) = match (
+                        FixedPrice::try_from(entry.price),
+                        FixedSize::try_from(entry.size),
+                    ) {
+                        (Ok(price), Ok(size)) => (price, size),
+                        (Err(e), _) | (_, Err(e)) => {
+                            warn!(
+                                asset_id = %asset_id,
+                                error = %e,
+                                "price_change entry conversion failed, skipping delta"
+                            );
+                            pb_metrics::record_stale_snapshot_skipped();
+                            continue;
+                        }
+                    };
+
+                    let sequence = self.next_sequence_for(&asset_id);
+                    let event = BookEvent {
+                        asset_id: asset_id.clone(),
+                        kind: BookEventKind::Delta,
                         side,
-                        entry.price,
-                        entry.size,
-                        entry.hash.map(str::to_string),
-                    )?;
+                        price,
+                        size,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            entry.hash.map(str::to_string),
+                            Some(sequence),
+                        ),
+                    };
                     self.send(PersistedRecord::Book(event)).await?;
+
+                    // Cross-check the venue-stated best bid/ask against our shadow
+                    // book after applying the same delta (A.74/A.109). Only when a
+                    // snapshot has seeded the book — otherwise we cannot compare.
+                    let mismatch =
+                        if let Some(book) = self.validation_books.get_mut(asset_id.as_str()) {
+                            book.apply_delta(side, price, size, sequence, exchange_ts);
+                            detect_book_mismatch(book, entry.best_bid, entry.best_ask)
+                        } else {
+                            None
+                        };
+                    if let Some(details) = mismatch {
+                        pb_metrics::record_book_mismatch();
+                        warn!(asset_id = %asset_id, %details, "venue book mismatch detected");
+                        // Request a REST resnapshot to self-heal (A.74). Non-blocking:
+                        // dropping never backpressures ingest. A `Full` channel means
+                        // a request is already pending for *some* asset, but if many
+                        // assets diverge at once the dropped request may be for a
+                        // distinct asset whose self-heal is now skipped — so meter the
+                        // drop instead of silently discarding it (HFT-review finding).
+                        if let Some(tx) = &self.resnapshot_tx {
+                            if let Err(e) = tx.try_send(asset_id.0.clone()) {
+                                if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                                    pb_metrics::record_resnapshot_request_dropped();
+                                    warn!(
+                                        asset_id = %asset_id,
+                                        "resnapshot request dropped (channel full); self-heal for this asset may be skipped"
+                                    );
+                                }
+                            }
+                        }
+                        self.send(PersistedRecord::Ingest(IngestEvent {
+                            asset_id: Some(asset_id.clone()),
+                            kind: IngestEventKind::BookMismatch,
+                            provenance: self.make_provenance(
+                                raw.recv_timestamp_us,
+                                exchange_ts,
+                                entry.hash.map(str::to_string),
+                                Some(sequence),
+                            ),
+                            expected_sequence: None,
+                            observed_sequence: None,
+                            details: Some(details),
+                        }))
+                        .await?;
+                    }
                 }
             }
             WsMessage::LastTradePrice(lt) => {
@@ -301,37 +507,6 @@ impl Dispatcher {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
-    fn make_book_event(
-        &mut self,
-        recv_timestamp_us: u64,
-        exchange_timestamp_us: u64,
-        asset_id: AssetId,
-        kind: BookEventKind,
-        side: Side,
-        price_str: &str,
-        size_str: &str,
-        source_event_id: Option<String>,
-    ) -> Result<BookEvent, FeedError> {
-        let price = FixedPrice::try_from(price_str)?;
-        let size = FixedSize::try_from(size_str)?;
-        let sequence = self.next_sequence_for(&asset_id);
-
-        Ok(BookEvent {
-            asset_id,
-            kind,
-            side,
-            price,
-            size,
-            provenance: self.make_provenance(
-                recv_timestamp_us,
-                exchange_timestamp_us,
-                source_event_id,
-                Some(sequence),
-            ),
-        })
-    }
-
     fn make_provenance(
         &self,
         recv_timestamp_us: u64,
@@ -346,6 +521,7 @@ impl Dispatcher {
             source_event_id,
             source_session_id: self.current_session_id.clone(),
             sequence,
+            ingest_ordinal: None,
         }
     }
 
@@ -420,13 +596,69 @@ impl Dispatcher {
     }
 }
 
+/// Parse a venue timestamp into microseconds. Delegates to the single shared
+/// converter so the dispatcher and the REST backfill agree on every resolution
+/// (seconds/ms/µs/ns) and on the zero case (audit findings A.119/A.147). Absent
+/// or non-numeric input becomes `0` (the "unknown timestamp" sentinel).
 fn parse_timestamp_us(ts: Option<&str>) -> u64 {
-    let raw = ts.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    if raw > 0 && raw < 10_000_000_000_000 {
-        raw.saturating_mul(1000)
-    } else {
-        raw
+    pb_types::time::parse_to_micros(ts).unwrap_or(0)
+}
+
+/// Tolerance before a venue (exchange) timestamp ahead of our receive timestamp
+/// is treated as clock skew. Normally network + processing latency makes recv
+/// *later* than exchange (`exchange_ts <= recv_ts`); the venue being meaningfully
+/// ahead means our host clock is behind the venue's, which corrupts exchange-time
+/// replay ordering (audit finding A.76).
+const CLOCK_SKEW_TOLERANCE_US: u64 = 2_000_000; // 2s
+
+/// Returns the skew (µs) when `exchange_us` is implausibly ahead of `recv_us`
+/// beyond tolerance, else `None`. Zero/absent timestamps can't be compared.
+fn clock_skew_us(recv_us: u64, exchange_us: u64) -> Option<u64> {
+    if recv_us == 0 || exchange_us == 0 {
+        return None;
     }
+    let skew = exchange_us.saturating_sub(recv_us);
+    (skew > CLOCK_SKEW_TOLERANCE_US).then_some(skew)
+}
+
+/// Whether our top-of-book price disagrees with the venue-stated one. A venue
+/// value of `"0"` (or absent/unparseable) means "no level on that side": that
+/// only conflicts when *we* still hold one. A non-zero venue value must equal our
+/// top exactly. Returns `false` when there is nothing to compare (A.74).
+fn top_price_mismatch(ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
+    let Some(venue_str) = venue else {
+        return false;
+    };
+    let Ok(venue_price) = FixedPrice::try_from(venue_str) else {
+        return false;
+    };
+    if venue_price.is_zero() {
+        ours.is_some()
+    } else {
+        ours != Some(venue_price)
+    }
+}
+
+/// Compare the shadow book's best bid/ask against the venue-stated values after a
+/// delta. Returns a human-readable description of the divergence, or `None` if
+/// they agree / there is nothing to compare (audit findings A.74/A.109).
+fn detect_book_mismatch(
+    book: &L2Book,
+    venue_best_bid: Option<&str>,
+    venue_best_ask: Option<&str>,
+) -> Option<String> {
+    let our_bid = book.best_bid().map(|(price, _)| price);
+    let our_ask = book.best_ask().map(|(price, _)| price);
+    let bid_bad = top_price_mismatch(our_bid, venue_best_bid);
+    let ask_bad = top_price_mismatch(our_ask, venue_best_ask);
+    if !bid_bad && !ask_bad {
+        return None;
+    }
+    Some(format!(
+        "reconstructed top-of-book diverged from venue: \
+         best_bid ours={our_bid:?} venue={venue_best_bid:?}, \
+         best_ask ours={our_ask:?} venue={venue_best_ask:?}"
+    ))
 }
 
 #[cfg(test)]
@@ -515,6 +747,151 @@ mod tests {
             }
             other => panic!("expected ingest event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn same_millisecond_snapshot_is_accepted_not_dropped() {
+        // Two snapshots with equal exchange timestamps (two trades within the
+        // same millisecond): the second must be applied, not dropped (A.21).
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let first = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "h1",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(first.to_string()))
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.kind, BookEventKind::Snapshot),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+
+        // Same timestamp, different state (different hash) — must be accepted.
+        let second = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "h2",
+            "bids": [{"price": "0.51", "size": "11"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(second.to_string()))
+            .await
+            .unwrap();
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => {
+                assert_eq!(e.kind, BookEventKind::Snapshot);
+                assert_eq!(e.price, FixedPrice::try_from("0.51").unwrap());
+            }
+            other => panic!("expected accepted same-ms snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_snapshot_retransmit_is_deduped_by_hash() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "hash": "same-hash",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await.unwrap(),
+            PersistedRecord::Book(_)
+        ));
+
+        // Exact retransmit (same hash) — deduped, no new record emitted.
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_unparseable_level_emits_reset_not_partial() {
+        // A snapshot whose second level is unparseable must produce ZERO book
+        // events (no partial snapshot) and a single continuity-reset marker,
+        // and must not advance the staleness tracker (A.108).
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "100",
+            "bids": [{"price": "0.50", "size": "10"}, {"price": "not-a-number", "size": "5"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Ingest(e) => assert_eq!(e.kind, IngestEventKind::SourceReset),
+            other => panic!("expected source-reset marker, got {other:?}"),
+        }
+        // No book events at all (not even the first, valid bid).
+        assert!(event_rx.try_recv().is_err());
+        // Tracker untouched, so a subsequent valid snapshot at the same ts is
+        // still accepted.
+        assert!(!dispatcher.last_snapshot_ts.contains_key("tok1"));
+    }
+
+    #[tokio::test]
+    async fn price_change_skips_bad_entry_keeps_valid_ones() {
+        // A price_change batch with one unparseable entry must still emit the
+        // valid deltas around it (A.108), not abort the whole batch.
+        let (_raw_tx, raw_rx) = mpsc::channel(16);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let msg = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000000",
+            "price_changes": [
+                {"asset_id": "tok1", "price": "0.50", "size": "10", "side": "BUY"},
+                {"asset_id": "tok1", "price": "bad", "size": "1", "side": "BUY"},
+                {"asset_id": "tok1", "price": "0.55", "size": "20", "side": "SELL"}
+            ]
+        });
+        dispatcher
+            .dispatch(raw_message(msg.to_string()))
+            .await
+            .unwrap();
+
+        // First valid delta.
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.price, FixedPrice::try_from("0.50").unwrap()),
+            other => panic!("expected first delta, got {other:?}"),
+        }
+        // Third valid delta (second was skipped).
+        match event_rx.recv().await.unwrap() {
+            PersistedRecord::Book(e) => assert_eq!(e.price, FixedPrice::try_from("0.55").unwrap()),
+            other => panic!("expected third delta, got {other:?}"),
+        }
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1240,6 +1617,7 @@ mod tests {
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         };
 
         assert_eq!(
@@ -1327,5 +1705,225 @@ mod tests {
             })),
             "execution"
         );
+    }
+
+    // ---- venue book-mismatch validation (A.74/A.109) ----
+
+    #[test]
+    fn clock_skew_detection() {
+        // Normal: exchange at or before receive → no skew.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_000_000_000), None);
+        assert_eq!(clock_skew_us(1_000_000_000, 999_000_000), None);
+        // Small exchange-ahead within tolerance → no skew.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_000_500_000), None);
+        // Exchange implausibly ahead beyond 2s tolerance → skew reported.
+        assert_eq!(clock_skew_us(1_000_000_000, 1_003_000_000), Some(3_000_000));
+        // Missing timestamps can't be compared.
+        assert_eq!(clock_skew_us(0, 1_000_000_000), None);
+        assert_eq!(clock_skew_us(1_000_000_000, 0), None);
+    }
+
+    #[test]
+    fn top_price_mismatch_cases() {
+        let p = |v: u32| Some(FixedPrice::new(v).unwrap());
+        // Nothing to compare → no mismatch.
+        assert!(!top_price_mismatch(p(5000), None));
+        assert!(!top_price_mismatch(None, None));
+        // Venue "0" means empty side: conflicts only if we still hold a level.
+        assert!(!top_price_mismatch(None, Some("0")));
+        assert!(top_price_mismatch(p(5000), Some("0")));
+        // Non-zero venue must match our top exactly.
+        assert!(!top_price_mismatch(p(5000), Some("0.5"))); // 0.5 == 5000 scaled
+        assert!(top_price_mismatch(p(5000), Some("0.6")));
+        assert!(top_price_mismatch(None, Some("0.5"))); // venue has a level, we don't
+                                                        // Unparseable venue value → cannot compare → no mismatch.
+        assert!(!top_price_mismatch(p(5000), Some("garbage")));
+    }
+
+    #[tokio::test]
+    async fn price_change_emits_book_mismatch_when_venue_best_diverges() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Snapshot seeds the shadow book: best_bid = 0.50, best_ask = 0.60.
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        // Drain the two snapshot book events.
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        // A delta that keeps our best_bid at 0.50, but the venue claims 0.99 →
+        // divergence ⇒ a BookMismatch ingest event must be emitted.
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1",
+                "price": "0.50",
+                "size": "5",
+                "side": "BUY",
+                "best_bid": "0.99",
+                "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // First the delta book event, then the mismatch ingest event.
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        let mismatch = event_rx.recv().await.unwrap();
+        match mismatch {
+            PersistedRecord::Ingest(ev) => {
+                assert_eq!(ev.kind, IngestEventKind::BookMismatch);
+            }
+            other => panic!("expected BookMismatch ingest event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn book_mismatch_requests_resnapshot_when_channel_wired() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (resnap_tx, mut resnap_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx).with_resnapshot_tx(resnap_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1", "price": "0.50", "size": "5", "side": "BUY",
+                "best_bid": "0.99", "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // A resnapshot was requested for the diverging asset.
+        let requested = resnap_rx.try_recv().expect("expected a resnapshot request");
+        assert_eq!(&*requested, "tok1");
+    }
+
+    #[tokio::test]
+    async fn book_mismatch_with_full_resnapshot_channel_still_emits_event_and_does_not_error() {
+        // HFT-review finding: a full resnapshot channel must not abort dispatch and
+        // must not suppress the durable BookMismatch event — the drop is metered
+        // (pb_resnapshot_requests_dropped_total) but the ingest event still lands.
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        // Capacity-1 resnapshot channel, pre-filled so the next try_send is Full.
+        let (resnap_tx, _resnap_rx) = mpsc::channel::<Arc<str>>(1);
+        resnap_tx.try_send(Arc::from("pending")).unwrap();
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx).with_resnapshot_tx(resnap_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1", "price": "0.50", "size": "5", "side": "BUY",
+                "best_bid": "0.99", "best_ask": "0.60"
+            }]
+        });
+        // Dispatch must succeed even though the resnapshot channel is full.
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        // The delta and the durable BookMismatch event are both still emitted.
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        let mismatch = event_rx.recv().await.unwrap();
+        match mismatch {
+            PersistedRecord::Ingest(ev) => assert_eq!(ev.kind, IngestEventKind::BookMismatch),
+            other => panic!("expected BookMismatch ingest event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn price_change_no_mismatch_when_venue_best_agrees() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.60", "size": "20"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        // Delta updates bid@0.50 size; venue best agrees with our book → no event
+        // beyond the delta itself.
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1",
+                "price": "0.50",
+                "size": "7",
+                "side": "BUY",
+                "best_bid": "0.50",
+                "best_ask": "0.60"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        // No further event should be queued.
+        assert!(event_rx.try_recv().is_err(), "no mismatch event expected");
     }
 }

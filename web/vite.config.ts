@@ -28,6 +28,9 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: apiProxyTarget,
           changeOrigin: true,
+          // Proxy WebSocket upgrades too, otherwise the orderbook stream
+          // (/api/v1/streams/orderbook) is dead in dev and e2e (A.69).
+          ws: true,
         },
       },
     },

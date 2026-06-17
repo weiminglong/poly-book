@@ -9,7 +9,7 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. |
+| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover, P3-HA-1). |
 | `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
 | `replay` | Reconstruct historical orderbook state at a specific timestamp. |
 | `execution-replay` | Replay stored execution history independently of market-data replay. |
@@ -17,6 +17,7 @@ to the appropriate subsystem.
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
 | `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
+| `reconcile` | Offline recovery: rebuild Parquet partitions from the durable WAL after a crash lost a buffered window. Idempotent (per-partition replace). |
 
 ## Config Layering
 
@@ -47,6 +48,19 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   shared between `ingest` and `auto_ingest`.
 - Forwarder tasks use idiomatic `while let` receive loops instead of
   `tokio::select!` patterns.
+- **Task supervision**: long-lived background tasks (feed, dispatcher, storage
+  sinks, fan-out forwarders, WAL drain, checkpoint producer) are registered with
+  a `pipeline::Supervisor` (a tagged `JoinSet`). If any exits unexpectedly —
+  returns, errors, or panics — before a coordinated shutdown, `ingest`/
+  `auto-ingest` cancel the shutdown token and return a non-zero error rather than
+  continuing with a dead component or exiting 0. In `auto_ingest` the rotating
+  per-market feed generations are deliberately *not* supervised this way (their
+  cycling is the expected steady state and is managed via `Generation`).
+- **WAL→storage reconciliation**: `reconcile` reads the durable WAL and rebuilds
+  the Parquet partitions it covers via `ParquetRecordWriter::write_batch_replacing`
+  (per-`(dataset, asset, hour)` delete-then-write), so a storage window lost when
+  a crash dropped the in-memory Parquet buffer is recoverable from the WAL (A.27).
+  Run it offline (ingest stopped); it is idempotent.
 
 ## Docs to Update After Changes
 

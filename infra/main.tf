@@ -26,3 +26,6 @@ provider "aws" {
     }
   }
 }
+
+# Current account id, used to scope the S3 access-log bucket policy.
+data "aws_caller_identity" "current" {}

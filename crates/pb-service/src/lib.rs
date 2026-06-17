@@ -81,6 +81,8 @@ pub(crate) fn build_replay_result(
 }
 
 /// Build an `IntegritySummary` from a market data window and validations.
+///
+/// Used by the Parquet backend, which already materializes the full window.
 pub(crate) fn build_integrity_summary(
     asset_id: &AssetId,
     start_us: u64,
@@ -88,19 +90,47 @@ pub(crate) fn build_integrity_summary(
     window: MarketDataWindow,
     validations: Vec<ReplayValidation>,
 ) -> IntegritySummary {
-    let book_event_count = window.book_events.len();
-    let ingest_event_count = window.ingest_events.len();
+    assemble_integrity_summary(
+        asset_id,
+        start_us,
+        end_us,
+        window.book_events.len(),
+        &window.ingest_events,
+        validations.len(),
+        validations.iter().filter(|v| v.matched).count(),
+    )
+}
+
+/// Assemble an `IntegritySummary` from already-computed primitive counts plus the
+/// (bounded) ingest events needed for per-kind tallies and `continuity_events`.
+///
+/// This is the shared core used by both backends. The ClickHouse path computes
+/// `book_event_count`/validation counts server-side with `count()`/`countIf()`
+/// (audit A.42) and only materializes the small ingest-event list, so it never
+/// transfers full book/trade rows just to count them.
+pub(crate) fn assemble_integrity_summary(
+    asset_id: &AssetId,
+    start_us: u64,
+    end_us: u64,
+    book_event_count: usize,
+    ingest_events: &[IngestEvent],
+    validation_count: usize,
+    validation_match_count: usize,
+) -> IntegritySummary {
+    let ingest_event_count = ingest_events.len();
 
     let mut reconnect_count = 0usize;
     let mut gap_count = 0usize;
     let mut stale_snapshot_skip_count = 0usize;
 
-    for event in &window.ingest_events {
+    for event in ingest_events {
         match event.kind {
             IngestEventKind::ReconnectStart | IngestEventKind::ReconnectSuccess => {
                 reconnect_count += 1;
             }
-            IngestEventKind::SequenceGap | IngestEventKind::SourceReset => {
+            IngestEventKind::SequenceGap
+            | IngestEventKind::SourceReset
+            | IngestEventKind::BookMismatch => {
                 gap_count += 1;
             }
             IngestEventKind::StaleSnapshotSkip => {
@@ -108,9 +138,6 @@ pub(crate) fn build_integrity_summary(
             }
         }
     }
-
-    let validation_count = validations.len();
-    let validation_match_count = validations.iter().filter(|v| v.matched).count();
 
     let has_boundaries = reconnect_count > 0 || gap_count > 0;
     let completeness = if book_event_count == 0 {
@@ -121,11 +148,7 @@ pub(crate) fn build_integrity_summary(
         CompletenessLevel::Full
     };
 
-    let continuity_events = window
-        .ingest_events
-        .iter()
-        .map(ingest_to_continuity)
-        .collect();
+    let continuity_events = ingest_events.iter().map(ingest_to_continuity).collect();
 
     IntegritySummary {
         asset_id: asset_id.to_string(),
@@ -150,6 +173,8 @@ pub(crate) fn build_execution_timeline(
     mut events: Vec<ExecutionEvent>,
     asset_id: Option<&AssetId>,
     limit: usize,
+    offset: usize,
+    descending: bool,
 ) -> ExecutionTimeline {
     if let Some(filter_id) = asset_id {
         events.retain(|e| {
@@ -161,7 +186,17 @@ pub(crate) fn build_execution_timeline(
     }
 
     let total_count = events.len();
-    events.truncate(limit);
+    // Events arrive sorted ascending by the execution total-order tie-break
+    // (event_timestamp_us, order_id, event_kind). To page from the most recent
+    // event (what an execution inspector usually wants) reverse first, then apply
+    // offset/limit. With `descending` + `offset = 0` this yields the most recent
+    // `limit` events; increasing `offset` pages backwards in time. Ascending
+    // order pages forward from the window start. `total_count` always reports the
+    // true filtered total so callers know more exist beyond the page (A.65).
+    if descending {
+        events.reverse();
+    }
+    let events: Vec<ExecutionEvent> = events.into_iter().skip(offset).take(limit).collect();
 
     ExecutionTimeline {
         events,
@@ -333,6 +368,11 @@ pub struct ContinuityEvent {
 /// Execution event timeline queries.
 pub trait ExecutionService: Send + Sync {
     /// Query execution events over a time range with optional filters.
+    ///
+    /// `offset` skips that many events from the start of the ordered page and
+    /// `descending` selects most-recent-first ordering, together providing
+    /// server-side pagination over the full window (A.65).
+    #[allow(clippy::too_many_arguments)]
     fn timeline(
         &self,
         asset_id: Option<&AssetId>,
@@ -340,6 +380,8 @@ pub trait ExecutionService: Send + Sync {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> impl std::future::Future<Output = Result<ExecutionTimeline, ServiceError>> + Send;
 }
 
@@ -348,6 +390,35 @@ pub trait ExecutionService: Send + Sync {
 pub struct ExecutionTimeline {
     pub events: Vec<ExecutionEvent>,
     pub total_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Shared request validation (enforced for ALL callers — HTTP and gRPC)
+// ---------------------------------------------------------------------------
+
+/// Maximum queryable time window. Bounds work (and `hour_paths` iteration) so a
+/// hostile `end_us` cannot drive billions of iterations / OOM the process. This
+/// lives in the service layer rather than the HTTP handler so gRPC inherits it
+/// too (audit findings A.22/A.64).
+pub const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
+
+/// Maximum number of execution events returned in a single timeline query.
+pub const MAX_EXECUTION_LIMIT: usize = 10_000;
+
+/// Validate a `[start_us, end_us)` query window.
+pub fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ServiceError> {
+    if start_us >= end_us {
+        return Err(ServiceError::InvalidParams(
+            "start_us must be less than end_us".to_string(),
+        ));
+    }
+    if end_us - start_us > MAX_QUERY_WINDOW_US {
+        return Err(ServiceError::InvalidParams(format!(
+            "time window exceeds maximum of {} hours",
+            MAX_QUERY_WINDOW_US / 3_600_000_000
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +461,7 @@ impl IntegrityService for AnyIntegrityService {
         start_us: u64,
         end_us: u64,
     ) -> Result<IntegritySummary, ServiceError> {
+        validate_time_window(start_us, end_us)?;
         match self {
             Self::Parquet(s) => s.summary(asset_id, start_us, end_us).await,
             Self::ClickHouse(s) => s.summary(asset_id, start_us, end_us).await,
@@ -412,15 +484,29 @@ impl ExecutionService for AnyExecutionService {
         start_us: u64,
         end_us: u64,
         limit: usize,
+        offset: usize,
+        descending: bool,
     ) -> Result<ExecutionTimeline, ServiceError> {
+        validate_time_window(start_us, end_us)?;
+        // Clamp the caller-supplied limit so a gRPC client cannot request an
+        // unbounded result set (A.64). 0 is treated as "use the max".
+        let limit = if limit == 0 {
+            MAX_EXECUTION_LIMIT
+        } else {
+            limit.min(MAX_EXECUTION_LIMIT)
+        };
         match self {
             Self::Parquet(s) => {
-                s.timeline(asset_id, order_id, start_us, end_us, limit)
-                    .await
+                s.timeline(
+                    asset_id, order_id, start_us, end_us, limit, offset, descending,
+                )
+                .await
             }
             Self::ClickHouse(s) => {
-                s.timeline(asset_id, order_id, start_us, end_us, limit)
-                    .await
+                s.timeline(
+                    asset_id, order_id, start_us, end_us, limit, offset, descending,
+                )
+                .await
             }
         }
     }
@@ -430,6 +516,25 @@ impl ExecutionService for AnyExecutionService {
 mod tests {
     use super::*;
     use pb_types::event::{DataSource, EventProvenance, IngestEventKind};
+
+    // -----------------------------------------------------------------------
+    // validate_time_window
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_time_window_accepts_valid_range() {
+        assert!(validate_time_window(1, 1 + MAX_QUERY_WINDOW_US).is_ok());
+        assert!(validate_time_window(1_000, 2_000).is_ok());
+    }
+
+    #[test]
+    fn validate_time_window_rejects_inverted_and_oversized() {
+        assert!(validate_time_window(5, 5).is_err());
+        assert!(validate_time_window(10, 5).is_err());
+        // A far-future end_us (the OOM vector) must be rejected.
+        assert!(validate_time_window(0, u64::MAX).is_err());
+        assert!(validate_time_window(0, MAX_QUERY_WINDOW_US + 1).is_err());
+    }
 
     // -----------------------------------------------------------------------
     // map_replay_error
@@ -476,6 +581,7 @@ mod tests {
                 source_event_id: None,
                 source_session_id: None,
                 sequence: None,
+                ingest_ordinal: None,
             },
             expected_sequence: None,
             observed_sequence: None,
@@ -539,6 +645,7 @@ mod tests {
                     source_event_id: None,
                     source_session_id: None,
                     sequence: None,
+                    ingest_ordinal: None,
                 },
             })
             .collect();
@@ -684,7 +791,7 @@ mod tests {
 
     #[test]
     fn build_execution_timeline_empty() {
-        let timeline = build_execution_timeline(vec![], None, 10);
+        let timeline = build_execution_timeline(vec![], None, 10, 0, false);
         assert_eq!(timeline.total_count, 0);
         assert!(timeline.events.is_empty());
     }
@@ -692,7 +799,7 @@ mod tests {
     #[test]
     fn build_execution_timeline_no_filter() {
         let events = make_execution_events(5, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100);
+        let timeline = build_execution_timeline(events, None, 100, 0, false);
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 5);
     }
@@ -702,7 +809,7 @@ mod tests {
         let mut events = make_execution_events(3, Some("tok1"));
         events.extend(make_execution_events(2, Some("tok2")));
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
         assert_eq!(timeline.total_count, 3);
         assert!(timeline
             .events
@@ -728,14 +835,14 @@ mod tests {
             latency: pb_types::event::LatencyTrace::default(),
         });
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
         assert_eq!(timeline.total_count, 2);
     }
 
     #[test]
     fn build_execution_timeline_respects_limit() {
         let events = make_execution_events(10, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 3);
+        let timeline = build_execution_timeline(events, None, 3, 0, false);
         assert_eq!(timeline.total_count, 10);
         assert_eq!(timeline.events.len(), 3);
     }
@@ -743,7 +850,7 @@ mod tests {
     #[test]
     fn build_execution_timeline_limit_larger_than_events() {
         let events = make_execution_events(2, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100);
+        let timeline = build_execution_timeline(events, None, 100, 0, false);
         assert_eq!(timeline.total_count, 2);
         assert_eq!(timeline.events.len(), 2);
     }
@@ -753,9 +860,47 @@ mod tests {
         let mut events = make_execution_events(5, Some("tok1"));
         events.extend(make_execution_events(5, Some("tok2")));
         let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 2);
+        let timeline = build_execution_timeline(events, Some(&filter_id), 2, 0, false);
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 2);
+    }
+
+    #[test]
+    fn build_execution_timeline_descending_returns_most_recent_first() {
+        // make_execution_events stamps event_timestamp_us = 1000 + i, so
+        // ascending order is 1000..1010. Descending with offset 0 must return the
+        // newest events first.
+        let events = make_execution_events(10, Some("tok1"));
+        let timeline = build_execution_timeline(events, None, 3, 0, true);
+        assert_eq!(timeline.total_count, 10);
+        let ts: Vec<u64> = timeline
+            .events
+            .iter()
+            .map(|e| e.event_timestamp_us)
+            .collect();
+        assert_eq!(ts, vec![1009, 1008, 1007]);
+    }
+
+    #[test]
+    fn build_execution_timeline_offset_pages_forward() {
+        let events = make_execution_events(10, Some("tok1"));
+        // Ascending, skip the first 4, take 3 → timestamps 1004,1005,1006.
+        let timeline = build_execution_timeline(events, None, 3, 4, false);
+        assert_eq!(timeline.total_count, 10);
+        let ts: Vec<u64> = timeline
+            .events
+            .iter()
+            .map(|e| e.event_timestamp_us)
+            .collect();
+        assert_eq!(ts, vec![1004, 1005, 1006]);
+    }
+
+    #[test]
+    fn build_execution_timeline_offset_beyond_total_is_empty() {
+        let events = make_execution_events(5, Some("tok1"));
+        let timeline = build_execution_timeline(events, None, 10, 100, false);
+        assert_eq!(timeline.total_count, 5);
+        assert!(timeline.events.is_empty());
     }
 
     // -----------------------------------------------------------------------

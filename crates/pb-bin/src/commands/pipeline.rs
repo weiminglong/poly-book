@@ -8,10 +8,61 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Read an integer config key, defaulting when absent and clamping to a minimum.
+///
+/// Config integers are `i64`; casting a negative value straight to `u32/u64/usize`
+/// wraps to a huge number (e.g. `-1 as u64 == u64::MAX`), which silently disables
+/// lag checks, allocates absurd buffers, or never fires intervals. A value below
+/// `min` (e.g. a `0` flush interval that would busy-loop, or a `0` segment size)
+/// is equally pathological. This clamps to `min` and warns rather than letting a
+/// hostile/typo'd config produce undefined behavior (HFT-review: config bounds).
+pub(crate) fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
+    let v = settings.get_int(key).unwrap_or(default);
+    if v < min {
+        tracing::warn!(
+            key,
+            value = v,
+            min,
+            "config value below minimum; clamping to minimum"
+        );
+        min
+    } else {
+        v
+    }
+}
+
+/// Build a `RateLimiter` from `[feed]` config (shared by REST callers).
+pub fn rest_rate_limiter(settings: &Config) -> pb_feed::RateLimiter {
+    let rate_requests = cfg_int_min(settings, "feed.rate_limit_requests", 1500, 1) as u32;
+    let rate_window = cfg_int_min(settings, "feed.rate_limit_window_secs", 10, 1) as u32;
+    pb_feed::RateLimiter::with_window(rate_requests, rate_window)
+}
+
+/// Build a `RestConfig` from `[feed]` config (shared by REST callers).
+pub fn rest_config_from_settings(settings: &Config) -> pb_feed::RestConfig {
+    pb_feed::RestConfig {
+        clob_base_url: settings
+            .get_string("feed.rest_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().clob_base_url),
+        gamma_base_url: settings
+            .get_string("feed.gamma_url")
+            .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
+    }
+}
+
+/// Current wall-clock time in microseconds since the Unix epoch, for measuring
+/// recv→durable latency. Saturates to 0 before the epoch (never in practice).
+pub fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 pub async fn start_metrics_server(settings: &Config) -> Result<()> {
     let metrics_addr: SocketAddr = settings
         .get_string("metrics.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
         .parse()?;
     let metrics_endpoint = settings
         .get_string("metrics.endpoint")
@@ -20,6 +71,10 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
     let handle = pb_metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {e}"))?;
     pb_metrics::register_metrics();
+
+    // Drain idle histogram state periodically so bucket memory stays bounded even
+    // if scraping stalls (audit finding A.115).
+    pb_metrics::spawn_upkeep(handle.clone(), Duration::from_secs(5));
 
     let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
     tracing::info!(%metrics_addr, endpoint = metrics_endpoint.as_str(), "metrics server bound");
@@ -38,42 +93,146 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
 pub struct SinkHandles {
     pub parquet_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
     pub clickhouse_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
-    pub task_handles: Vec<JoinHandle<()>>,
+}
+
+/// Supervises long-lived background tasks. Each task is tagged with a stable
+/// name; if any exits — returns, errors, or panics — before a coordinated
+/// shutdown, the supervisor reports its name so the owning command can treat the
+/// exit as fatal (cancel the shutdown token and return a non-zero error)
+/// instead of silently continuing with a dead component or exiting 0.
+///
+/// This addresses the audit finding that there was no task supervision anywhere:
+/// a single transient sink error caused its task to end while the ingest loop
+/// kept running and the process ultimately exited 0, masking real data loss.
+#[derive(Default)]
+pub struct Supervisor {
+    tasks: tokio::task::JoinSet<&'static str>,
+}
+
+impl Supervisor {
+    pub fn new() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+        }
+    }
+
+    /// Spawn a supervised task. The task runs `fut` to completion; the
+    /// supervisor records `name` so it can report which component exited.
+    pub fn spawn<F>(&mut self, name: &'static str, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(async move {
+            fut.await;
+            name
+        });
+    }
+
+    /// True when no supervised tasks remain. Use as a `select!` precondition so
+    /// an empty supervisor never busy-loops returning `None`.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    /// Wait for the next supervised task to exit. Returns the task's name, or
+    /// `"<panicked>"` if it panicked or was cancelled. Returns `None` only when
+    /// the supervisor holds no tasks.
+    pub async fn next_exit(&mut self) -> Option<&'static str> {
+        match self.tasks.join_next().await {
+            Some(Ok(name)) => Some(name),
+            Some(Err(e)) => {
+                tracing::error!(error = %e, "supervised task panicked");
+                Some("<panicked>")
+            }
+            None => None,
+        }
+    }
+
+    /// Await all remaining tasks during a coordinated shutdown, logging any that
+    /// panicked. Call after cancelling the shutdown token. Bounded so a hung
+    /// task cannot block shutdown forever.
+    pub async fn join_all(mut self, label: &str) {
+        let deadline = Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout(deadline, self.tasks.join_next()).await {
+                Ok(Some(Ok(_name))) => {}
+                Ok(Some(Err(e))) if !e.is_cancelled() => {
+                    tracing::error!(error = %e, "{label} task panicked during shutdown");
+                }
+                Ok(Some(Err(_))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!("{label} tasks did not all shut down within timeout");
+                    self.tasks.abort_all();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Build the object store and path prefix for a configured storage base path.
+///
+/// A path with a URL scheme (`s3://bucket/prefix`, `gs://...`, `file://...`) is
+/// wired to the matching `object_store` backend; a plain path is a local
+/// filesystem directory. This is the fix for the critical finding (A.1) where an
+/// `s3://...` base path was silently handled by `LocalFileSystem` and written to
+/// a local directory literally named `s3:` on ephemeral container storage.
+///
+/// For `s3://` (and other cloud schemes), configuration is taken from process
+/// environment variables via `object_store::parse_url_opts(url, std::env::vars())`.
+/// This is what wires in region and credentials: `AWS_REGION`, static
+/// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or — when no static keys are set —
+/// the default AWS provider chain (ECS task role / instance profile). It also
+/// honors `AWS_ENDPOINT` (+ `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`)
+/// so an S3-compatible endpoint (MinIO/LocalStack) can be targeted. Plain
+/// `object_store::parse_url` passes *no* options, so the builder would have no
+/// region/credentials/endpoint and fail against real S3 — hence `parse_url_opts`.
+pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::ObjectStore>, String)> {
+    if base_path.contains("://") {
+        let url = url::Url::parse(base_path)
+            .map_err(|e| anyhow::anyhow!("invalid storage URL {base_path}: {e}"))?;
+        let (store, prefix) = object_store::parse_url_opts(&url, std::env::vars())
+            .map_err(|e| anyhow::anyhow!("failed to build object store for {base_path}: {e}"))?;
+        Ok((Arc::from(store), prefix.to_string()))
+    } else {
+        // Local filesystem: canonicalize/create the dir and use the absolute
+        // path as the object-path prefix on a root LocalFileSystem.
+        let abs = std::path::Path::new(base_path)
+            .canonicalize()
+            .or_else(|_| {
+                std::fs::create_dir_all(base_path)?;
+                std::path::Path::new(base_path).canonicalize()
+            })?
+            .to_string_lossy()
+            .to_string();
+        Ok((Arc::new(object_store::local::LocalFileSystem::new()), abs))
+    }
 }
 
 pub async fn start_storage_sinks(
     settings: &Config,
     enable_parquet: bool,
     enable_clickhouse: bool,
+    supervisor: &mut Supervisor,
 ) -> Result<SinkHandles> {
-    let mut task_handles = Vec::new();
-
     let parquet_tx = if enable_parquet {
-        let base_path = settings
+        let configured = settings
             .get_string("storage.parquet_base_path")
             .unwrap_or_else(|_| "./data".to_string());
-        let base_path = std::path::Path::new(&base_path)
-            .canonicalize()
-            .or_else(|_| {
-                std::fs::create_dir_all(&base_path)?;
-                std::path::Path::new(&base_path).canonicalize()
-            })?
-            .to_string_lossy()
-            .to_string();
-        let flush_secs = settings
-            .get_int("storage.parquet_flush_interval_secs")
-            .unwrap_or(300) as u64;
+        let (store, base_path) = build_object_store(&configured)?;
+        // min 1s: a 0 interval would make the flush timer fire continuously.
+        let flush_secs =
+            cfg_int_min(settings, "storage.parquet_flush_interval_secs", 300, 1) as u64;
 
         let (ptx, prx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
-        let store: Arc<dyn object_store::ObjectStore> =
-            Arc::new(object_store::local::LocalFileSystem::new());
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
             .with_flush_interval(Duration::from_secs(flush_secs));
-        task_handles.push(tokio::spawn(async move {
+        supervisor.spawn("parquet-sink", async move {
             if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "parquet sink failed");
             }
-        }));
+        });
         Some(ptx)
     } else {
         None
@@ -91,15 +250,20 @@ pub async fn start_storage_sinks(
         let client = clickhouse::Client::default()
             .with_url(&ch_url)
             .with_database(&ch_db);
-        let sink = pb_store::ClickHouseSink::new(crx, client);
+        let batch_size = cfg_int_min(settings, "storage.clickhouse_batch_size", 10_000, 1) as usize;
+        // min 1s: a 0 interval would make the batch timer fire continuously.
+        let batch_interval_secs =
+            cfg_int_min(settings, "storage.clickhouse_batch_interval_secs", 1, 1) as u64;
+        let sink = pb_store::ClickHouseSink::new(crx, client)
+            .with_batch_config(batch_size, Duration::from_secs(batch_interval_secs));
         if let Err(e) = sink.ensure_table().await {
             tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
         }
-        task_handles.push(tokio::spawn(async move {
+        supervisor.spawn("clickhouse-sink", async move {
             if let Err(e) = sink.run().await {
                 tracing::error!(error = %e, "clickhouse sink failed");
             }
-        }));
+        });
         Some(ctx)
     } else {
         None
@@ -108,16 +272,15 @@ pub async fn start_storage_sinks(
     Ok(SinkHandles {
         parquet_tx,
         clickhouse_tx,
-        task_handles,
     })
 }
 
 pub fn checkpoint_config_from_settings(
     settings: &Config,
 ) -> super::checkpoint_producer::CheckpointProducerConfig {
-    let checkpoint_interval_secs = settings
-        .get_int("storage.checkpoint_interval_secs")
-        .unwrap_or(60) as u64;
+    // min 1s: a 0 interval would make the checkpoint timer fire continuously.
+    let checkpoint_interval_secs =
+        cfg_int_min(settings, "storage.checkpoint_interval_secs", 60, 1) as u64;
     super::checkpoint_producer::CheckpointProducerConfig {
         rest_url: settings
             .get_string("feed.rest_url")
@@ -127,46 +290,114 @@ pub fn checkpoint_config_from_settings(
     }
 }
 
+/// Spawn the checkpoint producer into the supervisor if enabled. Returns `true`
+/// if it was started. Supervising it means an unexpected exit (rather than a
+/// shutdown-token cancellation) is surfaced as a fatal component death.
 pub fn start_checkpoint_producer(
     settings: &Config,
     active_assets_rx: tokio::sync::watch::Receiver<Vec<String>>,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     shutdown: &CancellationToken,
-) -> Option<JoinHandle<()>> {
+    supervisor: &mut Supervisor,
+) -> bool {
     let enabled = settings
         .get_bool("storage.checkpoints_enabled")
         .unwrap_or(true);
     if !enabled {
-        return None;
+        return false;
     }
     let config = checkpoint_config_from_settings(settings);
-    Some(super::checkpoint_producer::spawn(
-        config,
-        active_assets_rx,
-        event_tx,
-        shutdown.child_token(),
-    ))
+    let token = shutdown.child_token();
+    supervisor.spawn("checkpoint-producer", async move {
+        super::checkpoint_producer::run(config, active_assets_rx, event_tx, token).await;
+    });
+    true
+}
+
+/// List committed consumer position files (`consumer_*.pos`) in the WAL
+/// directory. These tell the pruner how far each consumer has read so it never
+/// prunes a segment a live reader still needs.
+pub fn wal_consumer_position_files(wal_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(wal_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("consumer_") && name.ends_with(".pos"))
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
     let base_path = settings
         .get_string("wal.base_path")
         .unwrap_or_else(|_| "./data/wal".to_string());
-    let segment_size_mb = settings.get_int("wal.segment_size_mb").unwrap_or(64) as u64;
-    let max_segments = settings.get_int("wal.max_segments").unwrap_or(16) as usize;
-    let max_consumer_lag_bytes = settings
-        .get_int("wal.max_consumer_lag_bytes")
-        .unwrap_or(256 * 1024 * 1024) as u64;
-    let position_commit_interval_ms = settings
-        .get_int("wal.position_commit_interval_ms")
-        .unwrap_or(1_000)
-        .max(1) as u64;
+    // min 1 MB: a 0 segment size would allocate zero-byte segments and wedge the
+    // writer. min 1 segment: 0 would break pruning/retention math.
+    let segment_size_mb = cfg_int_min(settings, "wal.segment_size_mb", 64, 1) as u64;
+    let max_segments = cfg_int_min(settings, "wal.max_segments", 16, 1) as usize;
+    // min 1 byte: a negative value cast to u64 would be u64::MAX and silently
+    // disable the consumer-lag check (the lag could never exceed it).
+    let max_consumer_lag_bytes =
+        cfg_int_min(settings, "wal.max_consumer_lag_bytes", 256 * 1024 * 1024, 1) as u64;
+    let position_commit_interval_ms =
+        cfg_int_min(settings, "wal.position_commit_interval_ms", 1_000, 1) as u64;
+    let flush_interval_ms = cfg_int_min(settings, "wal.flush_interval_ms", 20, 1) as u64;
+    let sync_interval_ms = cfg_int_min(settings, "wal.sync_interval_ms", 200, 1) as u64;
     pb_wal::WalConfig {
         base_path: std::path::PathBuf::from(base_path),
         segment_size: segment_size_mb * 1024 * 1024,
         max_segments,
         max_consumer_lag_bytes,
         position_commit_interval_ms,
+        flush_interval_ms,
+        sync_interval_ms,
+    }
+}
+
+/// Open the WAL writer, optionally as a hot standby that waits to take over.
+///
+/// Without `standby`, this is the fail-fast behavior: a second writer on the same
+/// WAL directory returns the `WriterLocked` error immediately (the single-writer
+/// flock; audit A.128). With `standby`, a `WriterLocked` is treated as "the
+/// primary is alive" — the process polls the lock on `poll` and promotes itself to
+/// primary writer the moment the lock is released (the primary exits/dies),
+/// resuming on the shared WAL with no data loss (the takeover semantics are
+/// covered by `pb_wal`'s `standby_writer_takes_over_shared_wal_after_primary_exit`
+/// test). Returns `Ok(None)` if `shutdown` fires while still waiting.
+///
+/// NOTE (audit P3-HA-1): this is automatic *writer* promotion only. Redundant
+/// feed connectivity with arbitration, and a measured wall-clock failover RTO,
+/// require a real multi-replica deployment and are not exercised here.
+pub async fn open_wal_writer_with_standby(
+    config: pb_wal::WalConfig,
+    standby: bool,
+    poll: Duration,
+    shutdown: &CancellationToken,
+) -> Result<Option<pb_wal::WalWriter>> {
+    loop {
+        match pb_wal::WalWriter::open(config.clone()) {
+            Ok(writer) => return Ok(Some(writer)),
+            Err(pb_wal::WalError::WriterLocked { path }) if standby => {
+                tracing::info!(
+                    ?path,
+                    "standby: WAL is held by the active writer; waiting to promote"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(poll) => {}
+                    _ = shutdown.cancelled() => {
+                        tracing::info!("standby: shutdown requested before promotion");
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("failed to open WAL writer: {e}")),
+        }
     }
 }
 
@@ -175,13 +406,13 @@ pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
         ws_url: settings
             .get_string("feed.ws_url")
             .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
-        ping_interval_secs: settings.get_int("feed.ping_interval_secs").unwrap_or(10) as u64,
-        reconnect_base_delay_ms: settings
-            .get_int("feed.reconnect_base_delay_ms")
-            .unwrap_or(100) as u64,
-        reconnect_max_delay_ms: settings
-            .get_int("feed.reconnect_max_delay_ms")
-            .unwrap_or(30000) as u64,
+        ping_interval_secs: cfg_int_min(settings, "feed.ping_interval_secs", 10, 1) as u64,
+        // min 1ms: a 0 base/max reconnect delay would spin a CPU-bound reconnect
+        // loop with no backoff.
+        reconnect_base_delay_ms: cfg_int_min(settings, "feed.reconnect_base_delay_ms", 100, 1)
+            as u64,
+        reconnect_max_delay_ms: cfg_int_min(settings, "feed.reconnect_max_delay_ms", 30000, 1)
+            as u64,
     }
 }
 
@@ -316,8 +547,8 @@ pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQue
 
 /// Read query guard settings from config.
 pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
-    let max_rows = settings.get_int("api.query_max_rows").unwrap_or(10_000) as usize;
-    let timeout_secs = settings.get_int("api.query_timeout_secs").unwrap_or(30) as u64;
+    let max_rows = cfg_int_min(settings, "api.query_max_rows", 10_000, 1) as usize;
+    let timeout_secs = cfg_int_min(settings, "api.query_timeout_secs", 30, 1) as u64;
     (max_rows, timeout_secs)
 }
 
@@ -325,9 +556,9 @@ pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
     let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
     let addr: SocketAddr = settings
         .get_string("grpc.listen_addr")
-        .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
         .parse()
-        .unwrap_or_else(|_| "0.0.0.0:50051".parse().unwrap());
+        .unwrap_or_else(|_| "127.0.0.1:50051".parse().unwrap());
     (enabled, addr)
 }
 
@@ -387,6 +618,210 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    // --- Config bounds validation ---
+
+    #[test]
+    fn cfg_int_min_defaults_clamps_and_rejects_negatives() {
+        // Missing key -> default.
+        assert_eq!(cfg_int_min(&empty_config(), "x.y", 64, 1), 64);
+        // Present, above min -> unchanged.
+        assert_eq!(cfg_int_min(&config_with("x.y", "128"), "x.y", 64, 1), 128);
+        // Zero, below min -> clamped to min (would otherwise be a 0 interval /
+        // zero-byte segment).
+        assert_eq!(cfg_int_min(&config_with("x.y", "0"), "x.y", 64, 1), 1);
+        // Negative -> clamped to min, NOT cast to a huge unsigned value.
+        assert_eq!(cfg_int_min(&config_with("x.y", "-1"), "x.y", 64, 1), 1);
+        assert_eq!(
+            cfg_int_min(&config_with("x.y", "-1000"), "x.y", 64, 1) as u64,
+            1
+        );
+    }
+
+    // --- Supervisor ---
+
+    #[tokio::test]
+    async fn supervisor_reports_exited_task_name() {
+        let mut sup = Supervisor::new();
+        sup.spawn("short-lived", async {});
+        sup.spawn("long-lived", async {
+            // Stay alive long enough that the short-lived task is observed first.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let exited = sup.next_exit().await;
+        assert_eq!(exited, Some("short-lived"));
+    }
+
+    // --- Standby writer promotion (P3-HA-1) ---
+
+    fn standby_wal_config(dir: &std::path::Path) -> pb_wal::WalConfig {
+        pb_wal::WalConfig {
+            base_path: dir.to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..pb_wal::WalConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn non_standby_open_fails_fast_when_wal_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let _primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+        // standby=false must surface the WriterLocked as an error, not wait.
+        let result =
+            open_wal_writer_with_standby(config, false, Duration::from_millis(10), &shutdown).await;
+        assert!(
+            result.is_err(),
+            "non-standby open must fail fast when locked"
+        );
+    }
+
+    #[tokio::test]
+    async fn standby_open_waits_then_promotes_when_lock_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+
+        let cfg = config.clone();
+        let sd = shutdown.clone();
+        let standby = tokio::spawn(async move {
+            open_wal_writer_with_standby(cfg, true, Duration::from_millis(20), &sd).await
+        });
+
+        // Give the standby several poll cycles; while the primary holds the lock
+        // it must not promote.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !standby.is_finished(),
+            "standby must wait while primary holds the lock"
+        );
+
+        // Primary exits -> the standby promotes on its next poll.
+        drop(primary);
+        let promoted = tokio::time::timeout(Duration::from_secs(2), standby)
+            .await
+            .expect("standby should promote within the timeout")
+            .expect("join ok")
+            .expect("open ok");
+        assert!(
+            promoted.is_some(),
+            "standby must acquire the WAL after the primary releases it"
+        );
+    }
+
+    #[tokio::test]
+    async fn standby_open_returns_none_on_shutdown_while_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = standby_wal_config(dir.path());
+        let _primary = pb_wal::WalWriter::open(config.clone()).unwrap();
+        let shutdown = CancellationToken::new();
+
+        let cfg = config.clone();
+        let sd = shutdown.clone();
+        let standby = tokio::spawn(async move {
+            open_wal_writer_with_standby(cfg, true, Duration::from_millis(20), &sd).await
+        });
+
+        // Cancel while it is still waiting for the (still-held) lock.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), standby)
+            .await
+            .expect("should return promptly after shutdown")
+            .expect("join ok")
+            .expect("open ok");
+        assert!(result.is_none(), "shutdown while waiting must yield None");
+    }
+
+    #[tokio::test]
+    async fn supervisor_detects_panicked_task() {
+        let mut sup = Supervisor::new();
+        sup.spawn("panicker", async {
+            panic!("boom");
+        });
+        let exited = sup.next_exit().await;
+        assert_eq!(exited, Some("<panicked>"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_empty_is_empty() {
+        let mut sup = Supervisor::new();
+        assert!(sup.is_empty());
+        sup.spawn("t", async {});
+        assert!(!sup.is_empty());
+        // Drain it.
+        let _ = sup.next_exit().await;
+        assert!(sup.is_empty());
+    }
+
+    #[tokio::test]
+    async fn supervisor_join_all_completes_when_tasks_finish() {
+        let mut sup = Supervisor::new();
+        sup.spawn("a", async {});
+        sup.spawn("b", async {});
+        // Should return promptly once both tasks complete (well under the 10s cap).
+        tokio::time::timeout(Duration::from_secs(5), sup.join_all("test"))
+            .await
+            .expect("join_all should complete promptly");
+    }
+
+    // --- build_object_store ---
+
+    #[test]
+    fn build_object_store_s3_url_does_not_create_local_dir() {
+        // An s3:// path must be parsed as an S3 store, never silently turned into
+        // a local directory named "s3:" (critical finding A.1).
+        let result = build_object_store("s3://test-bucket/orderbook");
+        assert!(
+            result.is_ok(),
+            "s3:// url should construct an S3 object store: {result:?}"
+        );
+        let (_store, prefix) = result.unwrap();
+        assert_eq!(prefix, "orderbook");
+        assert!(
+            !std::path::Path::new("s3:").exists(),
+            "must not create a local directory named 's3:'"
+        );
+    }
+
+    #[test]
+    fn build_object_store_local_path_canonicalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("nested/data");
+        let (_store, prefix) =
+            build_object_store(sub.to_str().unwrap()).expect("local store should build");
+        // The directory is created and the prefix is an absolute canonical path.
+        assert!(std::path::Path::new(&prefix).is_absolute());
+        assert!(sub.exists(), "local base path should be created");
+    }
+
+    #[test]
+    fn wal_consumer_position_files_lists_only_pos_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("consumer_serve-live.pos"), "0:0").unwrap();
+        std::fs::write(dir.path().join("consumer_other.pos"), "1:0").unwrap();
+        std::fs::write(dir.path().join("segment_00000000000000000000.wal"), b"x").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+
+        let mut files = wal_consumer_position_files(dir.path());
+        files.sort();
+        assert_eq!(files.len(), 2, "should list only consumer_*.pos files");
+        assert!(files.iter().all(|p| p
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("consumer_")));
+    }
+
+    #[test]
+    fn wal_consumer_position_files_missing_dir_is_empty() {
+        let files = wal_consumer_position_files(std::path::Path::new("/no/such/wal/dir"));
+        assert!(files.is_empty());
     }
 
     // --- wal_config_from_settings ---
@@ -479,7 +914,7 @@ mod tests {
     fn grpc_config_defaults() {
         let (enabled, addr) = grpc_config_from_settings(&empty_config());
         assert!(!enabled);
-        assert_eq!(addr, "0.0.0.0:50051".parse::<SocketAddr>().unwrap());
+        assert_eq!(addr, "127.0.0.1:50051".parse::<SocketAddr>().unwrap());
     }
 
     #[test]

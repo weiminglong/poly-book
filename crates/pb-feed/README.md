@@ -67,17 +67,50 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   See [ADR-0006](../../docs/adr/0006-fxhashmap-dispatcher.md).
 - Unified `parse_side()` function for bid/ask parsing (deduplicated from previous
   per-site implementations).
-- WsClient reconnects with exponential backoff plus jitter (improved distribution
-  using Knuth's multiplicative hash constant) to avoid thundering herd on venue
-  restarts.
+- WsClient reconnects with exponential backoff plus jitter. The exponential term
+  is capped below `reconnect_max_delay_ms` so jitter still varies the delay at the
+  cap (otherwise every client would reconnect at exactly the max). The backoff
+  attempt counter resets after a session that stays connected ≥30s, so a later
+  disconnect retries promptly instead of inheriting an ever-growing delay.
+- A liveness watchdog forces a reconnect if no frame (data or pong) arrives within
+  ~3× the ping interval, so a half-open TCP connection cannot silently stall the
+  feed for many minutes.
 - On reconnect success, the dispatcher clears per-asset sequence and stale
   snapshot tracking before emitting `SourceReset`, so downstream replay does not
   stitch state across feed sessions or reject the first fresh post-reconnect
   snapshot as stale.
+- Snapshot staleness: only *strictly older* snapshots (`exchange_ts < last_ts`)
+  are skipped. Polymarket emits one `book` per trade at millisecond resolution,
+  so two trades in the same millisecond produce equal-timestamp snapshots whose
+  later one carries newer state; equal timestamps are accepted, and exact
+  retransmits of identical state are deduplicated by the venue `hash`.
+- Atomic snapshots: a `book` message's levels are all converted before any are
+  emitted. A mid-message conversion failure emits a single `SourceReset` marker
+  (and leaves the staleness tracker untouched) instead of a partial snapshot
+  that would be indistinguishable from a complete one. A `price_change` batch
+  skips an unparseable entry rather than aborting the remaining valid deltas.
+- Venue cross-check: the dispatcher keeps a per-asset shadow `L2Book` (seeded by
+  snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
+  against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
+  divergence emits an `IngestEventKind::BookMismatch` event (a queryable data
+  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt updates
+  (A.74/A.109). Shadow books are dropped on continuity reset. Frames that match
+  no known message type increment `pb_unknown_messages_dropped_total` (A.110).
+- Self-healing: on a detected divergence the dispatcher requests a resnapshot
+  (`with_resnapshot_tx`); `run_resnapshot_worker` (debounced per asset) fetches a
+  fresh REST book and re-injects it as a synthetic WS `book` message via the
+  shared raw channel, so the normal snapshot path rebuilds the book. The
+  REST→WS-`book` conversion is round-trip-tested against `WsMessage` so it matches
+  the live wire format. (Wired in `ingest`; `auto-ingest` relies on rotation.)
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
-- 50 tests covering malformed JSON, `parse_side` coverage, dispatcher behavior,
+- Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,
+  same-millisecond and duplicate snapshot handling, atomic snapshot emission,
   lifecycle events, and run loop shutdown.
+- **Benchmark** (`cargo bench -p pb-feed`, `benches/dispatcher.rs`) measures the
+  normalize hot path end-to-end through the async pipeline — JSON parse +
+  normalize + shadow-book apply + venue cross-check + channel handoff — at
+  ~480 ns / ~2.1M `price_change` entries per second. See `docs/latency.md`.
 
 ## Docs to Update After Changes
 

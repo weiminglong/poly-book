@@ -8,8 +8,9 @@ and a read-only workstation API. Cargo workspace with crates under `crates/`.
 ```bash
 cargo check                                          # type-check all crates
 cargo test --workspace --exclude pb-integration-tests # unit + property tests
-cargo bench                                          # Criterion benchmarks (pb-types, pb-book)
+cargo bench                                          # Criterion benchmarks (pb-types, pb-book, pb-wal, pb-api, pb-service)
 cargo +nightly fuzz run fuzz_book_delta               # fuzz targets (requires nightly)
+cargo +nightly fuzz run fuzz_codec_decode             # WAL codec decode fuzz target (requires nightly)
 cargo +nightly fuzz run fuzz_query_guard              # query guard fuzz target (requires nightly)
 cargo run -- --help                                  # CLI binary
 ```
@@ -34,11 +35,11 @@ Full system diagram, crate dependency graph, and runtime topology:
 - **pb-feed**: `WsClient` (reconnect with exp backoff + jitter), `RestClient` (with `RateLimiter` via governor), `Dispatcher` (deser + normalize to split `PersistedRecord` events). Dispatcher uses `FxHashMap` for hot-path lookups.
 - **pb-store**: `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ClickHouseSink` (1s batch, `MergeTree`).
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
-- **pb-wal**: Embedded write-ahead log. BufWriter-wrapped append-only segments with length-prefix + CRC32C framing. `WalWriter` appends and rotates, `WalReader` tails with independent consumer positions, `WalPruner` reclaims. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
+- **pb-wal**: Embedded write-ahead log. BufWriter-wrapped append-only segments with length-prefix + CRC32C framing. `WalWriter` appends, rotates, and reclaims sealed segments via `prune`/`prune_with_backpressure` (count-capped by `max_segments`, single-writer `flock`); `WalReader` tails with independent consumer positions. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
 - **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService`, `QueryService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, `AnyIntegrityService`, `AnyExecutionService`, `AnyQueryService`) for configurable backend selection.
 - **pb-grpc**: gRPC read surface using tonic. Exposes `WorkstationService` with `Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs. Delegates to `pb-service` traits. Configurable via `[grpc]` config section (disabled by default, port 50051).
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
-- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, and `serve`. Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
+- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, `serve`, and `reconcile` (offline WAL→Parquet rebuild for crash recovery). Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
@@ -129,9 +130,11 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `clippy` — `cargo clippy --all-targets -- -D warnings`
 - `fmt` — `cargo fmt --all -- --check`
 - `audit` — rustsec dependency vulnerability scan
+- `monitoring` — `promtool check rules` + `promtool test rules` (alert-rule syntax + offline incident unit tests)
+- `bench` — `cargo bench --workspace --no-run` (compiles every Criterion benchmark so the latency harness can't rot; statistical regression gating is local-only, not on shared runners)
 - `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
-- `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta); additional local target `fuzz_query_guard`
+- `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta, query guard, WS deser, WAL codec decode, fixed-point parse)
 - `miri` — undefined behavior checks on pb-types, pb-book
 
 Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny).

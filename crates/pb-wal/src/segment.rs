@@ -2,6 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use tracing::warn;
+
 use crate::error::WalError;
 use crate::FRAME_HEADER_LEN;
 
@@ -14,6 +16,45 @@ pub const MAX_RECORD_SIZE: usize = 256 * 1024 * 1024;
 /// BufWriter capacity — 64 KiB is enough to batch many small record frames
 /// while keeping memory usage low.
 const BUF_WRITER_CAPACITY: usize = 64 * 1024;
+
+/// Compute the frame CRC covering both the length prefix and the payload.
+///
+/// Including the length field in the checksum means a corrupted length is
+/// detected as a CRC mismatch instead of being silently trusted — a flipped
+/// length byte can no longer cause the reader to misparse the rest of the
+/// segment (see audit finding A.126).
+#[inline]
+pub fn frame_crc(len: u32, payload: &[u8]) -> u32 {
+    let crc = crc32c::crc32c(&len.to_le_bytes());
+    crc32c::crc32c_append(crc, payload)
+}
+
+/// fsync a directory so that newly created/renamed entries (segment files,
+/// position files) are durable after a power loss. On most platforms opening a
+/// directory and calling `sync_all` flushes its metadata.
+pub fn fsync_dir(dir: &Path) -> Result<(), WalError> {
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| WalError::io(dir, e))
+}
+
+/// Scan a segment's bytes frame-by-frame and return the byte offset at the end
+/// of the last contiguous valid frame.
+///
+/// A torn (partial) frame, a zero-length record, or a CRC failure marks the
+/// recovery boundary: everything at or after that offset is unrecoverable tail
+/// garbage (from a crash mid-append or an OS zero-fill of unsynced tail pages)
+/// and must be truncated before the writer resumes appending. On a cleanly
+/// written segment this returns `data.len()`.
+pub fn scan_valid_end(data: &[u8], segment_id: u64) -> usize {
+    let mut offset = 0usize;
+    // A clean end, zero-length tail, or truncated/CRC-failed frame all stop the
+    // scan: the last good data ends at `offset`.
+    while let Ok(Some((_, next))) = read_record_at(data, offset, segment_id) {
+        offset = next;
+    }
+    offset
+}
 
 /// A single WAL segment file.
 ///
@@ -47,24 +88,52 @@ impl Segment {
         })
     }
 
-    /// Open an existing segment file for appending.
+    /// Open an existing segment file for appending, recovering a torn or
+    /// zero-filled tail first.
+    ///
+    /// Before resuming, the segment is scanned frame-by-frame from the start. If
+    /// the last bytes do not end on a valid frame boundary — a crash mid-append
+    /// left a partial frame, or an OS crash zero-filled unsynced tail pages —
+    /// the file is truncated back to the end of the last valid frame so new
+    /// appends are correctly framed. Without this, a stale length field in the
+    /// torn tail would point into freshly appended data and desync the reader,
+    /// silently losing every post-restart record (audit finding A.30).
     pub fn open_append(id: u64, dir: &Path) -> Result<Self, WalError> {
         let path = segment_path(dir, id);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .write(true)
             .read(true)
             .open(&path)
             .map_err(|e| WalError::io(&path, e))?;
-        let write_offset = file.metadata().map_err(|e| WalError::io(&path, e))?.len();
-        // Seek to end so BufWriter appends correctly.
+
+        let file_len = file.metadata().map_err(|e| WalError::io(&path, e))?.len();
+
+        // Read existing contents once (open is cold, not on the hot path) and
+        // find the end of the last valid frame.
+        let existing = std::fs::read(&path).map_err(|e| WalError::io(&path, e))?;
+        let valid_end = scan_valid_end(&existing, id) as u64;
+
+        if valid_end < file_len {
+            warn!(
+                segment_id = id,
+                file_len,
+                valid_end,
+                discarded_bytes = file_len - valid_end,
+                "recovering WAL segment: truncating torn/zeroed tail to last valid frame"
+            );
+            file.set_len(valid_end)
+                .map_err(|e| WalError::io(&path, e))?;
+            file.sync_data().map_err(|e| WalError::io(&path, e))?;
+        }
+
+        // Seek to the recovered end so the BufWriter appends correctly.
         use std::io::Seek;
-        let mut file = file;
-        file.seek(std::io::SeekFrom::End(0))
+        file.seek(std::io::SeekFrom::Start(valid_end))
             .map_err(|e| WalError::io(&path, e))?;
         Ok(Self {
             id,
             path,
-            write_offset,
+            write_offset: valid_end,
             writer: BufWriter::with_capacity(BUF_WRITER_CAPACITY, file),
         })
     }
@@ -84,7 +153,7 @@ impl Segment {
 
         let offset = self.write_offset;
         let len = payload.len() as u32;
-        let crc = crc32c::crc32c(payload);
+        let crc = frame_crc(len, payload);
 
         // Assemble frame header into a stack buffer, then write header + payload
         // through BufWriter (typically coalesced into a single syscall).
@@ -169,7 +238,7 @@ pub fn read_record_at(
     }
 
     let payload = &data[payload_start..payload_end];
-    let computed_crc = crc32c::crc32c(payload);
+    let computed_crc = frame_crc(len as u32, payload);
 
     if stored_crc != computed_crc {
         return Err(WalError::CrcMismatch {
@@ -249,7 +318,7 @@ mod tests {
     fn read_record_at_valid_frame() {
         let payload = b"hello";
         let len = payload.len() as u32;
-        let crc = crc32c::crc32c(payload);
+        let crc = frame_crc(len, payload);
 
         let mut data = Vec::new();
         data.extend_from_slice(&len.to_le_bytes());
@@ -283,7 +352,7 @@ mod tests {
                 assert_eq!(segment_id, 42);
                 assert_eq!(offset, 0);
                 assert_eq!(expected, bad_crc);
-                assert_eq!(actual, crc32c::crc32c(payload));
+                assert_eq!(actual, frame_crc(payload.len() as u32, payload));
             }
             other => panic!("expected CrcMismatch, got {other:?}"),
         }
@@ -318,7 +387,7 @@ mod tests {
 
         for payload in [p1.as_slice(), p2.as_slice()] {
             let len = payload.len() as u32;
-            let crc = crc32c::crc32c(payload);
+            let crc = frame_crc(len, payload);
             data.extend_from_slice(&len.to_le_bytes());
             data.extend_from_slice(&crc.to_le_bytes());
             data.extend_from_slice(payload);
@@ -334,7 +403,7 @@ mod tests {
     fn read_record_at_corrupt_single_byte_in_payload() {
         let payload = b"integrity-check";
         let len = payload.len() as u32;
-        let crc = crc32c::crc32c(payload);
+        let crc = frame_crc(len, payload);
 
         let mut data = Vec::new();
         data.extend_from_slice(&len.to_le_bytes());
@@ -454,6 +523,121 @@ mod tests {
         }
         let ids = list_segment_ids(dir.path()).unwrap();
         assert_eq!(ids, vec![1, 2, 3, 5]);
+    }
+
+    // ---- Frame CRC covers the length field ----
+
+    #[test]
+    fn corrupt_length_field_detected_as_crc_mismatch() {
+        // A valid frame whose length is then corrupted to a smaller in-bounds
+        // value must be rejected (CRC covers the length), not silently
+        // misparsed.
+        let payload = b"abcdefghij"; // 10 bytes
+        let len = payload.len() as u32;
+        let crc = frame_crc(len, payload);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(&crc.to_le_bytes());
+        data.extend_from_slice(payload);
+
+        // Corrupt the length to 4 (still in-bounds). Old code trusted it.
+        data[0] = 4;
+        let err = read_record_at(&data, 0, 0).unwrap_err();
+        assert!(
+            matches!(err, WalError::CrcMismatch { .. }),
+            "corrupted in-bounds length must be a CRC mismatch, got {err:?}"
+        );
+    }
+
+    // ---- Torn / zeroed tail recovery on reopen ----
+
+    #[test]
+    fn scan_valid_end_clean_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = Segment::create(0, dir.path()).unwrap();
+        seg.append(b"one").unwrap();
+        seg.append(b"two").unwrap();
+        seg.flush().unwrap();
+        let data = std::fs::read(&seg.path).unwrap();
+        assert_eq!(scan_valid_end(&data, 0), data.len());
+    }
+
+    #[test]
+    fn open_append_truncates_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let good_end = {
+            let mut seg = Segment::create(0, dir.path()).unwrap();
+            seg.append(b"record-1").unwrap();
+            seg.append(b"record-2").unwrap();
+            seg.flush().unwrap();
+            seg.write_offset
+        };
+        // Simulate a crash mid-append: append a partial frame (header claiming
+        // a 50-byte payload, but only 5 payload bytes written).
+        {
+            use std::io::Write;
+            let path = segment_path(dir.path(), 0);
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            let mut hdr = [0u8; HEADER_SIZE];
+            hdr[..4].copy_from_slice(&50u32.to_le_bytes());
+            hdr[4..8].copy_from_slice(&frame_crc(50, b"short").to_le_bytes());
+            f.write_all(&hdr).unwrap();
+            f.write_all(b"short").unwrap();
+            f.sync_all().unwrap();
+        }
+        // Reopen for append: the torn tail must be truncated to the last valid
+        // frame, and new appends must land cleanly after it.
+        {
+            let mut seg = Segment::open_append(0, dir.path()).unwrap();
+            assert_eq!(
+                seg.write_offset, good_end,
+                "torn tail should be truncated to last valid frame"
+            );
+            seg.append(b"record-3").unwrap();
+            seg.flush().unwrap();
+        }
+        // All three good records must read back, with no desync.
+        let data = std::fs::read(segment_path(dir.path(), 0)).unwrap();
+        let (r1, n1) = read_record_at(&data, 0, 0).unwrap().unwrap();
+        let (r2, n2) = read_record_at(&data, n1, 0).unwrap().unwrap();
+        let (r3, _) = read_record_at(&data, n2, 0).unwrap().unwrap();
+        assert_eq!(r1, b"record-1");
+        assert_eq!(r2, b"record-2");
+        assert_eq!(r3, b"record-3");
+    }
+
+    #[test]
+    fn open_append_truncates_zero_filled_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let good_end = {
+            let mut seg = Segment::create(0, dir.path()).unwrap();
+            seg.append(b"durable").unwrap();
+            seg.flush().unwrap();
+            seg.write_offset
+        };
+        // Simulate ext4/XFS zero-fill of unsynced tail pages after an OS crash.
+        {
+            use std::io::Write;
+            let path = segment_path(dir.path(), 0);
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&[0u8; 4096]).unwrap();
+            f.sync_all().unwrap();
+        }
+        let mut seg = Segment::open_append(0, dir.path()).unwrap();
+        assert_eq!(
+            seg.write_offset, good_end,
+            "zero-filled tail should be truncated back to the last valid frame"
+        );
+        // A record appended after recovery must be readable (not buried behind
+        // the zero region).
+        seg.append(b"after-recovery").unwrap();
+        seg.flush().unwrap();
+        let data = std::fs::read(segment_path(dir.path(), 0)).unwrap();
+        let (r1, n1) = read_record_at(&data, 0, 0).unwrap().unwrap();
+        let (r2, _) = read_record_at(&data, n1, 0).unwrap().unwrap();
+        assert_eq!(r1, b"durable");
+        assert_eq!(r2, b"after-recovery");
     }
 
     #[test]

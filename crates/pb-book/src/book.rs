@@ -21,6 +21,10 @@ pub struct L2Book {
     pub last_update_us: u64,
     total_bid_raw: u64,
     total_ask_raw: u64,
+    /// Whether any snapshot/delta has established a sequence yet. Distinguishes
+    /// "no sequence seen" from a legitimate sequence value of 0, so gap detection
+    /// is not silently disabled right after a snapshot/checkpoint (A.148).
+    seq_initialized: bool,
 }
 
 /// A snapshot of one side of the book: Vec<(price, size)>.
@@ -36,6 +40,7 @@ impl L2Book {
             last_update_us: 0,
             total_bid_raw: 0,
             total_ask_raw: 0,
+            seq_initialized: false,
         }
     }
 
@@ -52,6 +57,12 @@ impl L2Book {
         self.total_bid_raw = 0;
         self.total_ask_raw = 0;
 
+        // `old_raw` is always either 0 (new price) or the size previously stored
+        // at this price in the map, and `total_*_raw` is maintained as the exact
+        // sum of all stored sizes. So `old_raw <= total_*_raw` is a structural
+        // invariant and the subtraction cannot underflow — no checked arithmetic
+        // is needed here (HFT-review verified this is not reachable from feed data,
+        // since old_raw is sourced from the map, never the incoming delta).
         for &(price, size) in bids {
             if !size.is_zero() {
                 let old_raw = self
@@ -69,6 +80,7 @@ impl L2Book {
         }
 
         self.sequence = sequence;
+        self.seq_initialized = true;
         self.last_update_us = timestamp_us;
     }
 
@@ -110,6 +122,7 @@ impl L2Book {
         }
 
         self.sequence = sequence;
+        self.seq_initialized = true;
         self.last_update_us = timestamp_us;
     }
 
@@ -156,9 +169,20 @@ impl L2Book {
     }
 
     /// Check if there's a sequence gap.
+    ///
+    /// Gap detection is active once any snapshot/delta has established a
+    /// sequence, including when that sequence is 0 — previously the `> 0`
+    /// sentinel disabled detection exactly post-snapshot/post-checkpoint where
+    /// `sequence == 0` is legitimate (A.148).
     pub fn check_sequence(&self, incoming: Sequence) -> Result<(), BookError> {
-        if self.sequence.raw() > 0 && incoming.raw() != self.sequence.raw() + 1 {
-            let expected = self.sequence.raw() + 1;
+        // wrapping_add, not `+ 1`: with overflow-checks = true (release profile,
+        // ADR-0007) a plain `+ 1` panics when the stored/replayed sequence is
+        // u64::MAX. Sequence values can come from corrupt storage or a hostile
+        // feed, so harden the comparison rather than risk a panic on the
+        // replay/ingest path (HFT-review finding). Wrapping is the correct
+        // "next sequence" semantics at the boundary.
+        let expected = self.sequence.raw().wrapping_add(1);
+        if self.seq_initialized && incoming.raw() != expected {
             let got = incoming.raw();
             return Err(BookError::SequenceGap {
                 asset_id: self.asset_id.to_string(),
@@ -362,6 +386,17 @@ mod tests {
         let book = make_book();
         assert!(book.check_sequence(Sequence::new(2)).is_ok());
         assert!(book.check_sequence(Sequence::new(5)).is_err());
+    }
+
+    #[test]
+    fn check_sequence_wraps_at_u64_max() {
+        // With overflow-checks = true, a plain `sequence + 1` would panic when the
+        // stored sequence is u64::MAX. wrapping_add makes the next expected
+        // sequence 0 — no panic, correct wrap semantics (HFT-review finding).
+        let mut book = L2Book::new(AssetId::new("wrap"));
+        book.apply_snapshot(&[], &[], Sequence::new(u64::MAX), 1);
+        assert!(book.check_sequence(Sequence::new(0)).is_ok());
+        assert!(book.check_sequence(Sequence::new(2)).is_err());
     }
 
     #[test]
@@ -857,6 +892,7 @@ mod tests {
     fn check_sequence_gap_error_fields() {
         let mut book = L2Book::new(AssetId::new("my-asset"));
         book.sequence = Sequence::new(10);
+        book.seq_initialized = true;
         let err = book.check_sequence(Sequence::new(15)).unwrap_err();
         match err {
             BookError::SequenceGap {
@@ -878,6 +914,7 @@ mod tests {
     fn check_sequence_duplicate_is_gap() {
         let mut book = L2Book::new(AssetId::new("seq"));
         book.sequence = Sequence::new(5);
+        book.seq_initialized = true;
         // Receiving the same sequence number is a "gap" (got 5, expected 6)
         assert!(book.check_sequence(Sequence::new(5)).is_err());
     }
@@ -886,7 +923,18 @@ mod tests {
     fn check_sequence_backwards_is_gap() {
         let mut book = L2Book::new(AssetId::new("seq"));
         book.sequence = Sequence::new(10);
+        book.seq_initialized = true;
         assert!(book.check_sequence(Sequence::new(3)).is_err());
+    }
+
+    #[test]
+    fn check_sequence_detects_gap_right_after_snapshot_at_zero() {
+        // A snapshot establishes sequence 0; a first delta of 5 (not 1) is a gap
+        // that the old `> 0` sentinel silently ignored (A.148).
+        let mut book = L2Book::new(AssetId::new("seq"));
+        book.apply_snapshot(&[], &[], Sequence::new(0), 1_000);
+        assert!(book.check_sequence(Sequence::new(1)).is_ok());
+        assert!(book.check_sequence(Sequence::new(5)).is_err());
     }
 
     // --- Weighted mid price edge cases ---
@@ -1188,6 +1236,37 @@ mod proptests {
             }
         }
 
+        /// `check_integrity` reports a crossed book exactly when
+        /// `best_bid >= best_ask`. Bids and asks are drawn from the SAME
+        /// overlapping price range so crossings actually occur — the
+        /// disjoint-range tests above can never produce one, leaving the
+        /// detector untested (audit finding A.159).
+        #[test]
+        fn check_integrity_detects_crossings(
+            bid_prices in prop_vec(1u32..=10_000u32, 1..20),
+            ask_prices in prop_vec(1u32..=10_000u32, 1..20),
+        ) {
+            let bids: Vec<_> = bid_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+            let asks: Vec<_> = ask_prices.iter().map(|&p| {
+                (FixedPrice::new(p).unwrap(), FixedSize::new(1_000_000))
+            }).collect();
+
+            let mut book = L2Book::new(AssetId::new("prop"));
+            book.apply_snapshot(&bids, &asks, Sequence::new(1), 1_000_000);
+
+            let crossed = match (book.best_bid(), book.best_ask()) {
+                (Some((b, _)), Some((a, _))) => b >= a,
+                _ => false,
+            };
+            prop_assert_eq!(
+                book.check_integrity().is_err(),
+                crossed,
+                "check_integrity disagreed with best_bid>=best_ask"
+            );
+        }
+
         /// Removing a level (size=0 delta) never increases depth.
         #[test]
         fn zero_size_delta_removes_level(
@@ -1281,6 +1360,7 @@ mod proptests {
         fn sequence_gap_detection(current in 1u64..1_000_000, incoming in 1u64..1_000_000) {
             let mut book = L2Book::new(AssetId::new("prop"));
             book.sequence = Sequence::new(current);
+            book.seq_initialized = true;
             let result = book.check_sequence(Sequence::new(incoming));
             if incoming == current + 1 {
                 prop_assert!(result.is_ok());

@@ -37,25 +37,42 @@ export function DataTable<T>({ columns, data, pageSize = 50 }: DataTableProps<T>
           <thead>
             {table.getHeaderGroups().map((group) => (
               <tr key={group.id}>
-                {group.headers.map((header) => (
-                  <th
-                    key={header.id}
-                    className="cursor-pointer border-b border-card-border px-3 py-2.5 text-left text-[var(--density-font-size)] font-bold text-muted-foreground select-none"
-                    onClick={header.column.getToggleSortingHandler()}
-                    aria-sort={
-                      header.column.getIsSorted() === 'asc'
-                        ? 'ascending'
-                        : header.column.getIsSorted() === 'desc'
-                          ? 'descending'
-                          : 'none'
-                    }
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      {flexRender(header.column.columnDef.header, header.getContext())}
-                      {{ asc: ' ↑', desc: ' ↓' }[header.column.getIsSorted() as string] ?? ''}
-                    </span>
-                  </th>
-                ))}
+                {group.headers.map((header) => {
+                  const canSort = header.column.getCanSort()
+                  return (
+                    <th
+                      key={header.id}
+                      className={`border-b border-card-border px-3 py-2.5 text-left text-[var(--density-font-size)] font-bold text-muted-foreground select-none${
+                        canSort ? ' cursor-pointer' : ''
+                      }`}
+                      onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
+                      // Keyboard-operable sorting (Enter/Space), not mouse-only (A.72).
+                      onKeyDown={
+                        canSort
+                          ? (e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                header.column.toggleSorting()
+                              }
+                            }
+                          : undefined
+                      }
+                      tabIndex={canSort ? 0 : undefined}
+                      aria-sort={
+                        header.column.getIsSorted() === 'asc'
+                          ? 'ascending'
+                          : header.column.getIsSorted() === 'desc'
+                            ? 'descending'
+                            : 'none'
+                      }
+                    >
+                      <span className="inline-flex items-center gap-1">
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        {{ asc: ' ↑', desc: ' ↓' }[header.column.getIsSorted() as string] ?? ''}
+                      </span>
+                    </th>
+                  )
+                })}
               </tr>
             ))}
           </thead>

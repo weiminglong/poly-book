@@ -32,6 +32,9 @@ pub enum WalError {
         committed_segment: u64,
         earliest_available: u64,
     },
+
+    #[error("WAL directory {path} is already locked by another writer")]
+    WriterLocked { path: PathBuf },
 }
 
 impl WalError {

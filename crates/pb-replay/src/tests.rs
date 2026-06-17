@@ -28,6 +28,7 @@ fn test_provenance(recv_ts: u64, seq: u64) -> EventProvenance {
         source_event_id: Some("evt-1".into()),
         source_session_id: Some("sess-1".into()),
         sequence: Some(Sequence::new(seq)),
+        ingest_ordinal: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn make_checkpoint(
             source_event_id: None,
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         bids: bids
             .into_iter()
@@ -191,6 +193,7 @@ fn source_reset_event(recv_ts: u64) -> pb_types::IngestEvent {
             source_event_id: None,
             source_session_id: Some("sess-reset".into()),
             sequence: None,
+            ingest_ordinal: None,
         },
         expected_sequence: None,
         observed_sequence: None,
@@ -233,6 +236,39 @@ async fn replay_engine_reconstruct_from_snapshot() {
     // Should have 2 bid levels and 1 ask level
     assert_eq!(result.book.bid_depth(), 2);
     assert_eq!(result.book.ask_depth(), 1);
+}
+
+#[tokio::test]
+async fn reconstruct_flags_crossed_book_in_continuity() {
+    // A snapshot with bid 0.60 and ask 0.50 reconstructs to a crossed book; the
+    // engine must surface it as a continuity marker rather than silently
+    // returning a crossed book (A.53).
+    let snapshot_ts = BASE_TS;
+    let target_ts = BASE_TS + 100_000;
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(snapshot_ts, Side::Bid, 6000, 1_000_000, 1),
+            make_snapshot_event(snapshot_ts, Side::Ask, 5000, 2_000_000, 1),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![],
+    };
+    let reader = MockReader::new().with_market_data(market_data);
+    let engine = ReplayEngine::new(reader);
+
+    let result = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await
+        .unwrap();
+
+    assert!(
+        result.continuity_events.iter().any(|e| e
+            .details
+            .as_deref()
+            .map(|d| d.contains("crossed"))
+            .unwrap_or(false)),
+        "crossed book should be surfaced as a continuity event"
+    );
 }
 
 #[tokio::test]
@@ -551,6 +587,52 @@ async fn replay_engine_validate_matching_checkpoint() {
 }
 
 #[tokio::test]
+async fn replay_engine_validate_detects_divergence() {
+    // Regression test for the vacuous-validation bug (A.8/A.23): the reconstructed
+    // book must be compared against an INDEPENDENT reference checkpoint, so a
+    // replay that diverges from the reference is reported as a mismatch. Under
+    // the old code (which seeded reconstruction from the reference checkpoint
+    // itself) `matched` was always true and this test would fail.
+    let t0 = BASE_TS;
+    let snapshot_ts = t0;
+    let checkpoint_ts = t0 + 1000;
+
+    // Replayed market data yields bid size 1_000_000 at 5000.
+    let market_data = MarketDataWindow {
+        book_events: vec![
+            make_snapshot_event(snapshot_ts, Side::Bid, 5000, 1_000_000, 1),
+            make_snapshot_event(snapshot_ts, Side::Ask, 5100, 2_000_000, 1),
+        ],
+        trade_events: vec![],
+        ingest_events: vec![],
+    };
+
+    // Reference checkpoint disagrees: bid size 2_000_000 at 5000.
+    let checkpoint = make_checkpoint(
+        checkpoint_ts,
+        vec![(5000, 2_000_000)],
+        vec![(5100, 2_000_000)],
+    );
+
+    let reader = MockReader::new()
+        .with_market_data(market_data)
+        .with_checkpoints(vec![checkpoint]);
+    let engine = ReplayEngine::new(reader);
+
+    let validation = engine
+        .validate_at(&test_asset_id(), t0, ReplayMode::RecvTime)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !validation.matched,
+        "a replay that diverges from the reference checkpoint must not match"
+    );
+    assert!(validation.mismatch_summary.is_some());
+}
+
+#[tokio::test]
 async fn replay_engine_validate_no_future_checkpoint_returns_none() {
     let reader = MockReader::new()
         .with_market_data(MarketDataWindow::default())
@@ -692,6 +774,40 @@ async fn parquet_reader_reads_book_events() {
     assert_eq!(window.book_events[0].kind, BookEventKind::Snapshot);
     assert_eq!(window.book_events[0].side, Side::Bid);
     assert_eq!(window.book_events[0].price, FixedPrice::new(5000).unwrap());
+}
+
+#[tokio::test]
+async fn parquet_reader_preserves_ingest_ordinal() {
+    // The ingest ordinal must survive the Parquet write→read round-trip so replay
+    // can use it as the authoritative arrival-order tiebreaker (A.116).
+    let dir = TempDir::new().unwrap();
+    let base_path = dir.path();
+    let t0 = BASE_TS;
+
+    let mut prov = test_provenance(t0, 1);
+    prov.ingest_ordinal = Some(987_654);
+    let book = BookEvent {
+        asset_id: test_asset_id(),
+        kind: BookEventKind::Snapshot,
+        side: Side::Bid,
+        price: FixedPrice::new(5000).unwrap(),
+        size: FixedSize::new(1_000_000),
+        provenance: prov,
+    };
+    write_parquet_records(base_path, &[pb_types::PersistedRecord::Book(book)]).await;
+
+    let reader = ParquetReader::new(base_path);
+    let window = reader
+        .read_market_data(&test_asset_id(), t0 - 1000, t0 + 1000)
+        .await
+        .unwrap();
+
+    assert_eq!(window.book_events.len(), 1);
+    assert_eq!(
+        window.book_events[0].provenance.ingest_ordinal,
+        Some(987_654),
+        "ingest_ordinal must round-trip through Parquet"
+    );
 }
 
 #[tokio::test]
@@ -968,4 +1084,123 @@ fn parse_timestamp_us_microseconds() {
 
     let cp = checkpoint_from_rest(&response).unwrap();
     assert_eq!(cp.checkpoint_timestamp_us, 1_750_000_200_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Golden replay determinism regression (P3-CHG-1)
+// ---------------------------------------------------------------------------
+
+/// A fixed, deterministic set of book events written to Parquet, with explicit
+/// ingest ordinals — including a same-microsecond pre-snapshot delta that must
+/// sort before its snapshot (A.116). Replaying this fixture must always produce
+/// the same book; a book-logic change that alters the output will fail this test.
+fn golden_book_records() -> Vec<pb_types::PersistedRecord> {
+    fn ev(
+        kind: BookEventKind,
+        side: Side,
+        price: u32,
+        size: u64,
+        recv_ts: u64,
+        seq: u64,
+        ordinal: u64,
+    ) -> pb_types::PersistedRecord {
+        let mut prov = test_provenance(recv_ts, seq);
+        prov.ingest_ordinal = Some(ordinal);
+        pb_types::PersistedRecord::Book(BookEvent {
+            asset_id: test_asset_id(),
+            kind,
+            side,
+            price: FixedPrice::new(price).unwrap(),
+            size: FixedSize::new(size),
+            provenance: prov,
+        })
+    }
+    let t = BASE_TS;
+    vec![
+        // Initial snapshot at t.
+        ev(BookEventKind::Snapshot, Side::Bid, 5000, 100, t, 0, 0),
+        ev(BookEventKind::Snapshot, Side::Bid, 4900, 80, t, 0, 1),
+        ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, t, 0, 2),
+        // A delta that arrived BEFORE a re-snapshot at the same microsecond
+        // (ordinal 3 < 4): it must be applied first, then overwritten by the
+        // snapshot — i.e. it must NOT win the tie (A.116).
+        ev(BookEventKind::Delta, Side::Bid, 5000, 999, t + 10, 7, 3),
+        ev(BookEventKind::Snapshot, Side::Bid, 5000, 110, t + 10, 0, 4),
+        ev(BookEventKind::Snapshot, Side::Bid, 4900, 80, t + 10, 0, 5),
+        ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, t + 10, 0, 6),
+        // Post-snapshot deltas.
+        ev(BookEventKind::Delta, Side::Bid, 5000, 130, t + 20, 1, 7),
+        ev(BookEventKind::Delta, Side::Ask, 5300, 150, t + 30, 2, 8),
+    ]
+}
+
+async fn replay_golden(base_path: &std::path::Path) -> crate::engine::ReplayResult {
+    let reader = ParquetReader::new(base_path);
+    let engine = ReplayEngine::new(reader);
+    engine
+        .reconstruct_at(&test_asset_id(), BASE_TS + 1_000_000, ReplayMode::RecvTime)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn golden_replay_produces_expected_book() {
+    let dir = TempDir::new().unwrap();
+    write_parquet_records(dir.path(), &golden_book_records()).await;
+
+    let result = replay_golden(dir.path()).await;
+
+    // Expected final book after the re-snapshot at t+10 and the two later deltas:
+    //   bids: 5000=130 (delta @t+20 over snapshot 110), 4900=80
+    //   asks: 5100=200, 5300=150
+    // The stale pre-snapshot delta (5000=999) must have been overwritten.
+    assert_eq!(result.book.bid_depth(), 2, "bids");
+    assert_eq!(result.book.ask_depth(), 2, "asks");
+    assert_eq!(
+        result.book.best_bid(),
+        Some((FixedPrice::new(5000).unwrap(), FixedSize::new(130)))
+    );
+    assert_eq!(
+        result.book.best_ask(),
+        Some((FixedPrice::new(5100).unwrap(), FixedSize::new(200)))
+    );
+}
+
+#[tokio::test]
+async fn golden_replay_is_deterministic_across_runs_and_input_order() {
+    let records = golden_book_records();
+
+    // Run 1: canonical order.
+    let dir1 = TempDir::new().unwrap();
+    write_parquet_records(dir1.path(), &records).await;
+    let r1 = replay_golden(dir1.path()).await;
+
+    // Run 2: same input, fresh store — must match run 1 exactly.
+    let dir2 = TempDir::new().unwrap();
+    write_parquet_records(dir2.path(), &records).await;
+    let r2 = replay_golden(dir2.path()).await;
+
+    // Run 3: reversed write order — the deterministic total order (A.117) must
+    // still yield byte-identical book state.
+    let mut reversed = records.clone();
+    reversed.reverse();
+    let dir3 = TempDir::new().unwrap();
+    write_parquet_records(dir3.path(), &reversed).await;
+    let r3 = replay_golden(dir3.path()).await;
+
+    let fingerprint = |r: &crate::engine::ReplayResult| {
+        (
+            r.book.bid_depth(),
+            r.book.ask_depth(),
+            r.book.best_bid(),
+            r.book.best_ask(),
+            r.book.sequence.raw(),
+        )
+    };
+    assert_eq!(fingerprint(&r1), fingerprint(&r2), "run-to-run determinism");
+    assert_eq!(
+        fingerprint(&r1),
+        fingerprint(&r3),
+        "input-order independence"
+    );
 }

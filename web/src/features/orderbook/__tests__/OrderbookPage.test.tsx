@@ -60,6 +60,7 @@ function setupDefaultMocks(snapshotOverrides?: Parameters<typeof queryResult>[0]
     snapshot: null,
     status: 'closed',
     error: null,
+    stale: false,
   })
 }
 
@@ -114,6 +115,7 @@ describe('OrderbookPage', () => {
       snapshot: null,
       status: 'closed',
       error: null,
+      stale: false,
     })
 
     render(<OrderbookPage />)
@@ -135,6 +137,7 @@ describe('OrderbookPage', () => {
       snapshot: null,
       status: 'closed',
       error: null,
+      stale: false,
     })
 
     render(<OrderbookPage />)
@@ -148,6 +151,7 @@ describe('OrderbookPage', () => {
       snapshot: null,
       status: 'connected',
       error: null,
+      stale: false,
     })
 
     render(<OrderbookPage />)
@@ -160,6 +164,7 @@ describe('OrderbookPage', () => {
       snapshot: null,
       status: 'fallback',
       error: 'WebSocket unavailable',
+      stale: false,
     })
 
     render(<OrderbookPage />)
@@ -200,6 +205,7 @@ describe('OrderbookPage', () => {
       snapshot: null,
       status: 'closed',
       error: null,
+      stale: false,
     })
 
     render(<OrderbookPage />)

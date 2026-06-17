@@ -135,6 +135,7 @@ pub fn checkpoint_from_rest(book: &RestBookResponse) -> Result<BookCheckpoint, R
             source_event_id: book.hash.clone(),
             source_session_id: None,
             sequence: None,
+            ingest_ordinal: None,
         },
         bids,
         asks,
@@ -147,25 +148,35 @@ pub async fn fetch_snapshot(
     base_url: &str,
     token_id: &str,
 ) -> Result<RestBookResponse, ReplayError> {
-    let url = format!("{}/book?token_id={}", base_url, token_id);
+    // Build the URL via parse_with_params (percent-encodes token_id so it cannot
+    // inject extra query params), and keep only the base endpoint in error context
+    // rather than a full URL embedding the raw id (HFT-review #11 defense-in-depth).
+    let endpoint = format!("{}/book", base_url);
+    let url =
+        reqwest::Url::parse_with_params(&endpoint, &[("token_id", token_id)]).map_err(|e| {
+            ReplayError::Http {
+                url: endpoint.clone(),
+                reason: format!("invalid backfill URL: {e}"),
+            }
+        })?;
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|e| ReplayError::Http {
-            url: url.clone(),
+            url: endpoint.clone(),
             reason: e.to_string(),
         })?;
 
     if !resp.status().is_success() {
         return Err(ReplayError::Http {
-            url: url.clone(),
+            url: endpoint.clone(),
             reason: format!("HTTP {} for token_id={}", resp.status(), token_id),
         });
     }
 
     let book: RestBookResponse = resp.json().await.map_err(|e| ReplayError::Http {
-        url,
+        url: endpoint,
         reason: e.to_string(),
     })?;
 
@@ -180,11 +191,9 @@ fn parse_size(s: &str) -> Result<FixedSize, pb_types::TypesError> {
     FixedSize::try_from(s)
 }
 
+/// Parse a snapshot timestamp into microseconds via the single shared converter,
+/// so backfill and the dispatcher agree on every resolution and the zero case
+/// (audit findings A.119/A.147).
 fn parse_timestamp_us(ts: Option<&str>) -> Option<u64> {
-    let raw = ts?.parse::<u64>().ok()?;
-    if raw < 10_000_000_000_000 {
-        Some(raw.saturating_mul(1000))
-    } else {
-        Some(raw)
-    }
+    pb_types::time::parse_to_micros(ts)
 }

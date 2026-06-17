@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, Timelike};
 use clickhouse::Client;
+use futures_util::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
@@ -28,14 +29,16 @@ CREATE TABLE IF NOT EXISTS book_events (
     side Enum8('Bid' = 1, 'Ask' = 2),
     price UInt32,
     size UInt64,
-    sequence Nullable(UInt64),
-    source String,
+    sequence UInt64,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
+    ingest_ordinal Nullable(UInt64),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, recv_timestamp_us, sequence, price)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_TRADE_EVENTS_DDL: &str = r#"
@@ -47,15 +50,16 @@ CREATE TABLE IF NOT EXISTS trade_events (
     size Nullable(UInt64),
     side Nullable(Enum8('Bid' = 1, 'Ask' = 2)),
     trade_id Nullable(String),
-    fidelity String,
+    fidelity LowCardinality(String),
     sequence Nullable(UInt64),
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (asset_id, recv_timestamp_us, trade_id)
+ORDER BY (asset_id, recv_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_INGEST_EVENTS_DDL: &str = r#"
@@ -63,18 +67,19 @@ CREATE TABLE IF NOT EXISTS ingest_events (
     recv_timestamp_us UInt64,
     exchange_timestamp_us UInt64,
     asset_id Nullable(String),
-    event_kind String,
+    event_kind LowCardinality(String),
     sequence Nullable(UInt64),
     expected_sequence Nullable(UInt64),
     observed_sequence Nullable(UInt64),
     details Nullable(String),
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(recv_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (recv_timestamp_us, event_kind, source_session_id)
+ORDER BY (recv_timestamp_us, event_kind)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_BOOK_CHECKPOINTS_DDL: &str = r#"
@@ -83,7 +88,7 @@ CREATE TABLE IF NOT EXISTS book_checkpoints (
     recv_timestamp_us UInt64,
     exchange_timestamp_us UInt64,
     asset_id String,
-    source String,
+    source LowCardinality(String),
     source_event_id Nullable(String),
     source_session_id Nullable(String),
     bids_json String,
@@ -93,12 +98,13 @@ CREATE TABLE IF NOT EXISTS book_checkpoints (
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, checkpoint_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_REPLAY_VALIDATIONS_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS replay_validations (
     asset_id String,
-    mode String,
+    mode LowCardinality(String),
     replay_timestamp_us UInt64,
     reference_timestamp_us UInt64,
     matched UInt8,
@@ -108,6 +114,7 @@ CREATE TABLE IF NOT EXISTS replay_validations (
 ) ENGINE = MergeTree()
 PARTITION BY event_date
 ORDER BY (asset_id, persisted_at_us, replay_timestamp_us)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 const CREATE_EXECUTION_EVENTS_DDL: &str = r#"
@@ -117,7 +124,7 @@ CREATE TABLE IF NOT EXISTS execution_events (
     order_id String,
     client_order_id Nullable(String),
     venue_order_id Nullable(String),
-    event_kind String,
+    event_kind LowCardinality(String),
     side Nullable(Enum8('Bid' = 1, 'Ask' = 2)),
     price Nullable(UInt32),
     size Nullable(UInt64),
@@ -127,13 +134,58 @@ CREATE TABLE IF NOT EXISTS execution_events (
     event_date Date MATERIALIZED toDate(fromUnixTimestamp64Micro(event_timestamp_us))
 ) ENGINE = MergeTree()
 PARTITION BY event_date
-ORDER BY (order_id, event_timestamp_us)
+-- Lead with event_timestamp_us: the execution timeline always filters by a time
+-- range (order_id is optional), so this matches the dominant query and avoids a
+-- full scan on time-range lookups (audit finding A.38, clickhouse rule
+-- schema-pk-prioritize-filters).
+ORDER BY (event_timestamp_us, order_id)
+SETTINGS non_replicated_deduplication_window = 1000
 "#;
 
 #[derive(Clone)]
 pub struct ParquetRecordWriter {
     store: Arc<dyn ObjectStore>,
     base_path: String,
+}
+
+/// Lower bound for a plausible event timestamp (~2001-09-09 in µs). Anything
+/// below this is treated as corrupt/unstamped rather than a real 1970s event.
+const MIN_PLAUSIBLE_PARTITION_US: u64 = 1_000_000_000_000_000;
+/// Upper bound for a plausible event timestamp (~2286 in µs). Guards against an
+/// absurd far-future value (e.g. a u64 that overflows i64) misfiling records.
+const MAX_PLAUSIBLE_PARTITION_US: u64 = 10_000_000_000_000_000;
+
+/// Build the `YYYY/MM/DD/HH` partition key for a record timestamp.
+///
+/// Timestamps outside a wide plausible band — or not representable as a datetime
+/// — are routed to a dedicated `invalid_timestamp` partition with a warning,
+/// instead of being silently misfiled into the 1970-01-01 partition by
+/// `unwrap_or_default()` (audit finding A.123). This keeps corrupt/unstamped
+/// records visible and quarantined rather than corrupting a real date partition.
+pub(crate) fn partition_hour_key(partition_ts_us: u64) -> String {
+    if !(MIN_PLAUSIBLE_PARTITION_US..=MAX_PLAUSIBLE_PARTITION_US).contains(&partition_ts_us) {
+        tracing::warn!(
+            partition_ts_us,
+            "record timestamp outside plausible range; routing to invalid_timestamp partition"
+        );
+        return "invalid_timestamp".to_string();
+    }
+    match chrono::DateTime::from_timestamp_micros(partition_ts_us as i64) {
+        Some(dt) => format!(
+            "{:04}/{:02}/{:02}/{:02}",
+            dt.date_naive().year(),
+            dt.date_naive().month(),
+            dt.date_naive().day(),
+            dt.time().hour(),
+        ),
+        None => {
+            tracing::warn!(
+                partition_ts_us,
+                "record timestamp not representable; routing to invalid_timestamp partition"
+            );
+            "invalid_timestamp".to_string()
+        }
+    }
 }
 
 impl ParquetRecordWriter {
@@ -156,16 +208,7 @@ impl ParquetRecordWriter {
         let flush_start = std::time::Instant::now();
         let mut groups: HashMap<(String, String, String), Vec<&PersistedRecord>> = HashMap::new();
         for record in records {
-            let dt =
-                chrono::DateTime::from_timestamp_micros(record.partition_timestamp_us() as i64)
-                    .unwrap_or_default();
-            let hour_key = format!(
-                "{:04}/{:02}/{:02}/{:02}",
-                dt.date_naive().year(),
-                dt.date_naive().month(),
-                dt.date_naive().day(),
-                dt.time().hour(),
-            );
+            let hour_key = partition_hour_key(record.partition_timestamp_us());
             groups
                 .entry((
                     record.dataset_name().to_string(),
@@ -177,53 +220,148 @@ impl ParquetRecordWriter {
         }
 
         for ((dataset, asset, hour_key), records) in &groups {
-            let first_ts_us = records[0].partition_timestamp_us();
-            let path = format!(
-                "{}/{}/{}/{}_{}.parquet",
-                self.base_path, dataset, hour_key, asset, first_ts_us
-            );
-
-            let batch = records_to_record_batch(records)?;
-            let schema = Arc::new(schema_for_record(records[0]));
-            let props = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(
-                    ZstdLevel::try_new(3).expect("valid zstd level"),
-                ))
-                .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
-                .set_column_encoding("recv_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding(
-                    "exchange_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
-                .set_column_encoding(
-                    "checkpoint_timestamp_us".into(),
-                    Encoding::DELTA_BINARY_PACKED,
-                )
-                .set_column_encoding("event_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)
-                .build();
-
-            let mut buf = Vec::with_capacity(256 * 1024);
-            let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
-            writer.write(&batch)?;
-            writer.close()?;
-
-            let object_path = ObjectPath::from(path.as_str());
-            self.store.put(&object_path, PutPayload::from(buf)).await?;
-
-            tracing::debug!(
-                dataset = %dataset,
-                asset = %asset,
-                rows = records.len(),
-                path = %path,
-                "flushed parquet file"
-            );
+            self.write_group(dataset, asset, hour_key, records).await?;
         }
 
         pb_metrics::record_storage_flush("parquet");
         pb_metrics::record_flush_duration_ms(flush_start.elapsed().as_millis() as f64);
+        Ok(())
+    }
+
+    /// Rebuild Parquet partitions from an authoritative record stream (the WAL),
+    /// so a storage window lost to a crash mid-buffer can be recovered (A.27).
+    ///
+    /// For every `(dataset, asset, hour)` group present in `records`, the existing
+    /// Parquet files for that group are deleted and replaced with the complete
+    /// group rebuilt from `records`. This makes the source stream authoritative
+    /// for each touched partition and makes re-running idempotent (a second run
+    /// deletes and rewrites byte-identical content), avoiding the duplicate-rows
+    /// hazard of merging differently-batched files into the same hour.
+    ///
+    /// Intended for **offline** recovery (ingest stopped): a concurrent live sink
+    /// writing the same partitions would race the per-group delete. `records`
+    /// should be the full set for the reconciled window (the caller accumulates
+    /// the WAL replay) so each group is written complete in one pass.
+    pub async fn write_batch_replacing(
+        &self,
+        records: &[PersistedRecord],
+    ) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut groups: HashMap<(String, String, String), Vec<&PersistedRecord>> = HashMap::new();
+        for record in records {
+            let hour_key = partition_hour_key(record.partition_timestamp_us());
+            groups
+                .entry((
+                    record.dataset_name().to_string(),
+                    record.asset_partition().to_string(),
+                    hour_key,
+                ))
+                .or_default()
+                .push(record);
+        }
+
+        for ((dataset, asset, hour_key), records) in &groups {
+            self.delete_group(dataset, asset, hour_key).await?;
+            self.write_group(dataset, asset, hour_key, records).await?;
+        }
+        Ok(())
+    }
+
+    /// Delete all existing Parquet files for one `(dataset, asset, hour)` group so
+    /// it can be rewritten authoritatively from the WAL (A.27). Files are named
+    /// `{asset}_{ts}_{hash}.parquet`, so we match on the `{asset}_` prefix within
+    /// the hour directory to avoid touching other assets in the same hour.
+    async fn delete_group(
+        &self,
+        dataset: &str,
+        asset: &str,
+        hour_key: &str,
+    ) -> Result<(), StoreError> {
+        let dir = format!("{}/{}/{}", self.base_path, dataset, hour_key);
+        let dir_path = ObjectPath::from(dir.as_str());
+        let file_prefix = format!("{asset}_");
+        let existing = self.store.list(Some(&dir_path)).collect::<Vec<_>>().await;
+        for meta in existing {
+            let meta = meta?;
+            let is_match = meta
+                .location
+                .filename()
+                .map(|name| name.starts_with(&file_prefix) && name.ends_with(".parquet"))
+                .unwrap_or(false);
+            if is_match {
+                self.store.delete(&meta.location).await?;
+                tracing::debug!(path = %meta.location, "reconcile: deleted stale parquet file");
+            }
+        }
+        Ok(())
+    }
+
+    /// Write one `(dataset, asset, hour)` group as a single content-hashed Parquet
+    /// file (shared by the live flush path and reconciliation).
+    async fn write_group(
+        &self,
+        dataset: &str,
+        asset: &str,
+        hour_key: &str,
+        records: &[&PersistedRecord],
+    ) -> Result<(), StoreError> {
+        let first_ts_us = records[0].partition_timestamp_us();
+
+        let batch = records_to_record_batch(records)?;
+        let schema = Arc::new(schema_for_record(records[0]));
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(
+                ZstdLevel::try_new(3).expect("valid zstd level"),
+            ))
+            .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+            .set_column_encoding("recv_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding(
+                "exchange_timestamp_us".into(),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_encoding(
+                "checkpoint_timestamp_us".into(),
+                Encoding::DELTA_BINARY_PACKED,
+            )
+            .set_column_encoding("event_timestamp_us".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("sequence".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("price".into(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding("size".into(), Encoding::DELTA_BINARY_PACKED)
+            .build();
+
+        let mut buf = Vec::with_capacity(256 * 1024);
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+
+        // Append a content-derived suffix so two batches that land in the same
+        // (asset, hour) bucket with the same first-record timestamp (quiet books,
+        // checkpoints, execution-append re-runs) do not silently overwrite each
+        // other (A.122). Identical content hashes to the same name, making a true
+        // retry idempotent.
+        let content_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            buf.hash(&mut hasher);
+            hasher.finish()
+        };
+        let path = format!(
+            "{}/{}/{}/{}_{}_{:016x}.parquet",
+            self.base_path, dataset, hour_key, asset, first_ts_us, content_hash
+        );
+
+        let object_path = ObjectPath::from(path.as_str());
+        self.store.put(&object_path, PutPayload::from(buf)).await?;
+
+        tracing::debug!(
+            dataset = %dataset,
+            asset = %asset,
+            rows = records.len(),
+            path = %path,
+            "flushed parquet file"
+        );
         Ok(())
     }
 }
@@ -233,14 +371,21 @@ struct BookEventRow {
     recv_timestamp_us: u64,
     exchange_timestamp_us: u64,
     asset_id: String,
-    event_kind: String,
-    side: String,
+    // Enum8 columns are serialized as their i8 discriminant over RowBinary;
+    // sending a Rust String here is rejected by ClickHouse (audit finding A.4).
+    event_kind: i8,
+    side: i8,
     price: u32,
     size: u64,
-    sequence: Option<u64>,
+    // Non-nullable so it can stay in the sorting key without allow_nullable_key
+    // (audit finding A.3). Book events always carry a sequence; 0 if absent.
+    sequence: u64,
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
+    // Monotonic ingest ordinal — replay's authoritative arrival-order tiebreaker
+    // (A.116). Nullable for rows written before this column existed.
+    ingest_ordinal: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, clickhouse::Row)]
@@ -250,7 +395,7 @@ struct TradeEventRow {
     asset_id: String,
     price: u32,
     size: Option<u64>,
-    side: Option<String>,
+    side: Option<i8>,
     trade_id: Option<String>,
     fidelity: String,
     sequence: Option<u64>,
@@ -307,7 +452,7 @@ struct ExecutionEventRow {
     client_order_id: Option<String>,
     venue_order_id: Option<String>,
     event_kind: String,
-    side: Option<String>,
+    side: Option<i8>,
     price: Option<u32>,
     size: Option<u64>,
     status: Option<String>,
@@ -315,11 +460,24 @@ struct ExecutionEventRow {
     latency_json: String,
 }
 
-fn side_to_string(side: Option<Side>) -> Option<String> {
-    side.map(|value| match value {
-        Side::Bid => "Bid".to_string(),
-        Side::Ask => "Ask".to_string(),
-    })
+/// Map a side to its `Enum8('Bid' = 1, 'Ask' = 2)` discriminant for RowBinary.
+fn side_to_i8(side: Side) -> i8 {
+    match side {
+        Side::Bid => 1,
+        Side::Ask => 2,
+    }
+}
+
+fn opt_side_to_i8(side: Option<Side>) -> Option<i8> {
+    side.map(side_to_i8)
+}
+
+/// Map a book event kind to its `Enum8('Snapshot' = 1, 'Delta' = 2)` discriminant.
+fn book_kind_to_i8(kind: BookEventKind) -> i8 {
+    match kind {
+        BookEventKind::Snapshot => 1,
+        BookEventKind::Delta => 2,
+    }
 }
 
 #[derive(Clone)]
@@ -384,36 +542,66 @@ impl ClickHouseRecordWriter {
             }
         }
 
+        // Per-batch, content-derived deduplication token. With the tables'
+        // non_replicated_deduplication_window, re-inserting the identical batch
+        // (an operator retry, or a partial-failure re-send) is deduplicated
+        // server-side per table instead of double-counting rows — the at-least-
+        // once-without-duplicates property the audit required (A.60/A.124).
+        let dedup_token = {
+            use std::hash::{Hash, Hasher};
+            // Propagate a serialization failure rather than collapsing to empty
+            // bytes (`unwrap_or_default`): two different batches that both failed
+            // to serialize would otherwise hash identically, and ClickHouse's
+            // dedup window would silently drop the second batch — losing rows
+            // (HFT-review finding). A failed dedup token means the whole flush
+            // fails and the records stay in the WAL for retry/reconcile.
+            let bytes = serde_json::to_vec(records)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        };
+        // Insert client carries: the dedup token (A.60/A.124) and async-insert
+        // settings (A.40). On quiet assets the sink's 1s timer flushes far fewer
+        // than the recommended min batch, which would create many tiny parts;
+        // async_insert lets the server coalesce them, and wait_for_async_insert=1
+        // keeps the call durable (it returns only once the data is written).
+        let dedup_client = self
+            .client
+            .clone()
+            .with_setting("insert_deduplication_token", &dedup_token)
+            .with_setting("async_insert", "1")
+            .with_setting("wait_for_async_insert", "1");
+
         let mut book_insert: Option<clickhouse::insert::Insert<BookEventRow>> = if has_book {
-            Some(self.client.insert("book_events").await?)
+            Some(dedup_client.insert("book_events").await?)
         } else {
             None
         };
         let mut trade_insert: Option<clickhouse::insert::Insert<TradeEventRow>> = if has_trade {
-            Some(self.client.insert("trade_events").await?)
+            Some(dedup_client.insert("trade_events").await?)
         } else {
             None
         };
         let mut ingest_insert: Option<clickhouse::insert::Insert<IngestEventRow>> = if has_ingest {
-            Some(self.client.insert("ingest_events").await?)
+            Some(dedup_client.insert("ingest_events").await?)
         } else {
             None
         };
         let mut checkpoint_insert: Option<clickhouse::insert::Insert<CheckpointRow>> =
             if has_checkpoint {
-                Some(self.client.insert("book_checkpoints").await?)
+                Some(dedup_client.insert("book_checkpoints").await?)
             } else {
                 None
             };
         let mut validation_insert: Option<clickhouse::insert::Insert<ReplayValidationRow>> =
             if has_validation {
-                Some(self.client.insert("replay_validations").await?)
+                Some(dedup_client.insert("replay_validations").await?)
             } else {
                 None
             };
         let mut execution_insert: Option<clickhouse::insert::Insert<ExecutionEventRow>> =
             if has_execution {
-                Some(self.client.insert("execution_events").await?)
+                Some(dedup_client.insert("execution_events").await?)
             } else {
                 None
             };
@@ -425,20 +613,15 @@ impl ClickHouseRecordWriter {
                         recv_timestamp_us: event.provenance.recv_timestamp_us,
                         exchange_timestamp_us: event.provenance.exchange_timestamp_us,
                         asset_id: event.asset_id.as_str().to_string(),
-                        event_kind: match event.kind {
-                            BookEventKind::Snapshot => "Snapshot".to_string(),
-                            BookEventKind::Delta => "Delta".to_string(),
-                        },
-                        side: match event.side {
-                            Side::Bid => "Bid".to_string(),
-                            Side::Ask => "Ask".to_string(),
-                        },
+                        event_kind: book_kind_to_i8(event.kind),
+                        side: side_to_i8(event.side),
                         price: event.price.raw(),
                         size: event.size.raw(),
-                        sequence: event.provenance.sequence.map(|seq| seq.raw()),
+                        sequence: event.provenance.sequence.map_or(0, |seq| seq.raw()),
                         source: event.provenance.source.to_string(),
                         source_event_id: event.provenance.source_event_id.clone(),
                         source_session_id: event.provenance.source_session_id.clone(),
+                        ingest_ordinal: event.provenance.ingest_ordinal,
                     };
                     book_insert.as_mut().unwrap().write(&row).await?;
                 }
@@ -449,7 +632,7 @@ impl ClickHouseRecordWriter {
                         asset_id: event.asset_id.as_str().to_string(),
                         price: event.price.raw(),
                         size: event.size.map(|size| size.raw()),
-                        side: side_to_string(event.side),
+                        side: opt_side_to_i8(event.side),
                         trade_id: event.trade_id.clone(),
                         fidelity: event.fidelity.to_string(),
                         sequence: event.provenance.sequence.map(|seq| seq.raw()),
@@ -519,7 +702,7 @@ impl ClickHouseRecordWriter {
                             ExecutionEventKind::Fill => "fill".to_string(),
                             ExecutionEventKind::Terminal => "terminal".to_string(),
                         },
-                        side: side_to_string(event.side),
+                        side: opt_side_to_i8(event.side),
                         price: event.price.map(|price| price.raw()),
                         size: event.size.map(|size| size.raw()),
                         status: event.status.clone(),

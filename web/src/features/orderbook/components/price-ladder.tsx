@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { formatPrice, formatSize } from '../../../shared/lib/formatters'
 import type { PriceLevelView } from '../../../types'
 
@@ -8,8 +8,21 @@ interface PriceLadderProps {
 }
 
 export const PriceLadder = memo(function PriceLadder({ bids, asks }: PriceLadderProps) {
-  const allSizes = [...bids, ...asks].map((l) => Number.parseFloat(l.size))
-  const maxSize = Math.max(...allSizes, 1)
+  // Memoize + single-pass: avoid rebuilding a combined array and Math.max(...spread)
+  // (which allocates and can blow the stack on deep books) on every render during
+  // high-frequency updates (HFT-review #21).
+  const maxSize = useMemo(() => {
+    let max = 1
+    for (const l of bids) {
+      const s = Number.parseFloat(l.size)
+      if (s > max) max = s
+    }
+    for (const l of asks) {
+      const s = Number.parseFloat(l.size)
+      if (s > max) max = s
+    }
+    return max
+  }, [bids, asks])
 
   return (
     <div className="grid grid-cols-2 gap-[var(--density-gap)]">
