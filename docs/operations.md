@@ -11,6 +11,11 @@ Runtime config is layered in this order:
 2. Environment variables with the `PB__` prefix
 3. CLI flags
 
+At startup the process validates the loaded config against the set of recognized
+keys and logs a `WARN` for any unknown `section.key` (a typo or a removed/renamed
+setting), so a misspelled key — which is otherwise silently ignored and falls
+back to the default — is visible in the logs rather than silently dropped.
+
 Current defaults:
 
 ```toml

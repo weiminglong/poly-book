@@ -539,12 +539,16 @@ the data-corruption class the original audit found — clear diminishing returns
 The review program is treated as converged; further proactive passes are paused in
 favor of maintenance cadence (act on new direction / regressions).
 
-**Deferred (attended): #9 unknown-config-key validation.** A typo'd config key is
-silently ignored. The robust fix is a typed-config struct with
-`#[serde(deny_unknown_fields)]`, but the code reads config ad-hoc via `get_int`,
-so a validation struct must mirror every key exactly or it breaks startup; a
-partial whitelist is fragile/false-positive-prone. Substantial + risky for
-unattended execution — do with the user present.
+**#9 unknown-config-key validation — DONE (2026-06, attended).** A typo'd config
+key was silently ignored. Added `crates/pb-bin/src/config_validation.rs`: a
+`KNOWN_CONFIG_KEYS` whitelist (union of code-read keys + `config/default.toml`)
+and `warn_unknown_config_keys`, which projects the loaded config to JSON, walks
+`section.key`, and **warns** (loudly at startup, not hard-error — a missed
+whitelist entry can't break an always-on process) on any unrecognized key. Wired
+into `main` after tracing init. Tests cover the walk logic, bare top-level keys,
+a clean config, and a drift guard (`config_keys_cover_default_toml` fails if
+default.toml gains a key not in the whitelist). Verified end-to-end: a typo'd
+`wal.segment_size_md` / `api.defualt_depth` now emits a startup WARN.
 
 - **Blocking I/O off the ingest loop (#8 fsync, #9 prune):** the periodic
   fdatasync and prune (read_dir + metadata + remove_file) are blocking syscalls

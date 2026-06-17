@@ -9,6 +9,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
+mod config_validation;
 
 #[derive(Parser)]
 #[command(
@@ -190,6 +191,11 @@ async fn main() -> Result<()> {
     } else {
         builder.init();
     }
+
+    // Surface typo'd / removed config keys now that tracing is up, so a silently
+    // ignored setting is visible instead of leaving the operator's intent lost
+    // (audit/HFT-review #9).
+    config_validation::warn_unknown_config_keys(&settings);
 
     // Create shared slug registry
     let slug_registry = pb_types::SlugRegistry::new();
