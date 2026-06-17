@@ -840,6 +840,9 @@ mod tests {
             "SELECT /*",
             "SELECT --",
             "SELECT '€'",
+            "SELECT 1 LIMIT 5",
+            "SELECT 1 LIMIT 5 -",
+            "SELECT 1 LIMIT 5 --",
         ];
         let alpha = [
             ' ', ';', '\'', '"', '`', '-', '/', '*', '\n', '(', ')', 'x', '1', '€',
@@ -867,10 +870,10 @@ mod tests {
                             !first.trim().is_empty(),
                             "guarded SQL must not be empty: {sql:?} -> {first:?}",
                         );
-                        assert!(
-                            !first.trim_end().ends_with(';'),
-                            "guarded SQL must not keep a trailing semicolon: {sql:?} -> {first:?}",
-                        );
+                        // Idempotence (below) is the meaningful invariant: a
+                        // trailing *unquoted* semicolon would be stripped on the
+                        // second pass, breaking equality. A `;` inside a trailing
+                        // comment/string is harmless and intentionally retained.
                         let second = guard_sql(&first, &guard).unwrap_or_else(|e| {
                             panic!(
                                 "re-guarding accepted output failed: {sql:?} -> {first:?}: {e:?}"

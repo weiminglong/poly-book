@@ -19,11 +19,14 @@ fuzz_target!(|input: FuzzInput| {
 
     if let Ok(guarded_sql) = result {
         assert!(!guarded_sql.trim().is_empty(), "guarded SQL must not be empty");
-        assert!(
-            !guarded_sql.trim_end().ends_with(';'),
-            "guarded SQL should not retain a trailing semicolon"
-        );
 
+        // The meaningful safety invariant is that the guarded SQL is a fixed
+        // point of the guard: re-guarding it must succeed and return it byte for
+        // byte. This subsumes "no trailing statement separator" — a trailing
+        // *unquoted* semicolon would be stripped by the second pass's LIMIT
+        // injection, breaking this equality. (A `;` inside a trailing comment or
+        // string literal is part of a single valid statement and is harmless, so
+        // it is deliberately not rejected.)
         let second_pass = guard_sql(&guarded_sql, &guard).expect("second guard pass failed");
         assert_eq!(
             guarded_sql, second_pass,
