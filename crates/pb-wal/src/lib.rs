@@ -203,6 +203,93 @@ mod tests {
         assert!(reader.next().unwrap().is_none());
     }
 
+    /// A reader that has cached a segment including an incomplete (torn) trailing
+    /// frame must, after a writer's torn-tail recovery truncates that tail and
+    /// appends a *shorter* real record, reload and surface the new record — not
+    /// stay stuck on the stale cache. Before the fix, `top_up` treated
+    /// `file_len <= prev_len` as "nothing new" and the reader never saw the
+    /// post-recovery data (review-pass-6).
+    #[test]
+    fn reader_reloads_after_torn_tail_truncation_to_shorter_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 1_000_000, // one segment for the whole test
+            max_segments: 8,
+            ..WalConfig::default()
+        };
+
+        // Writer commits "alpha", then a crash leaves an incomplete trailing frame.
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        writer.append(b"alpha").unwrap();
+        writer.flush().unwrap();
+        drop(writer); // release the single-writer lock
+
+        let seg_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".wal"))
+            .expect("segment file");
+
+        // Length of the committed "alpha" frame (header + 5-byte payload).
+        let alpha_len = {
+            let data = std::fs::read(&seg_path).unwrap();
+            let payload = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+            FRAME_HEADER_LEN + payload
+        };
+
+        // Append a torn frame: a header claiming 1000 payload bytes, but only a
+        // few follow. read_record_at sees an incomplete frame -> Ok(None).
+        {
+            use std::io::Write;
+            let mut torn = Vec::new();
+            torn.extend_from_slice(&1000u32.to_le_bytes()); // payload len
+            torn.extend_from_slice(&0u32.to_le_bytes()); // crc placeholder
+            torn.extend_from_slice(&[0xAB; 40]); // far fewer than 1000 bytes
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seg_path)
+                .unwrap();
+            f.write_all(&torn).unwrap();
+            f.flush().unwrap();
+        }
+        let torn_len = std::fs::metadata(&seg_path).unwrap().len();
+
+        // Reader caches the whole segment (alpha + torn tail) and stalls at the
+        // torn boundary, having emitted only "alpha".
+        let mut reader = WalReader::open(config.clone(), "tail-consumer").unwrap();
+        assert_eq!(reader.next().unwrap().as_deref(), Some(b"alpha".as_slice()));
+        assert!(reader.next().unwrap().is_none(), "stalls at the torn frame");
+
+        // Torn-tail recovery: truncate the incomplete tail back to the last valid
+        // frame, then a fresh writer appends a SHORTER real record. The segment is
+        // now shorter than what the reader cached.
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&seg_path)
+                .unwrap();
+            f.set_len(alpha_len as u64).unwrap();
+        }
+        let mut writer2 = WalWriter::open(config.clone()).unwrap();
+        writer2.append(b"z").unwrap();
+        writer2.flush().unwrap();
+        let new_len = std::fs::metadata(&seg_path).unwrap().len();
+        assert!(
+            new_len < torn_len,
+            "post-recovery segment ({new_len}) must be shorter than the torn cache ({torn_len})"
+        );
+        drop(writer2);
+
+        // The reader must reload the shrunken segment and surface "z".
+        assert_eq!(
+            reader.next().unwrap().as_deref(),
+            Some(b"z".as_slice()),
+            "reader must reload after the segment was truncated beneath its cache"
+        );
+    }
+
     #[test]
     fn multi_consumer_independent_positions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1080,6 +1167,44 @@ mod tests {
         // At least the active segment must remain.
         let remaining = count_wal_files(dir.path());
         assert!(remaining >= 1, "active segment should always remain");
+    }
+
+    #[test]
+    fn prune_keeps_all_segments_when_a_position_file_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 64,
+            max_segments: 100,
+            max_consumer_lag_bytes: 0,
+            position_commit_interval_ms: 1_000,
+            flush_interval_ms: 20,
+            sync_interval_ms: 200,
+        };
+
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for i in 0..10 {
+            writer.append(format!("rec-{i}").as_bytes()).unwrap();
+        }
+        writer.flush().unwrap();
+        let before = count_wal_files(dir.path());
+        assert!(before > 1, "test needs multiple segments");
+
+        // The sole consumer's position file EXISTS but is corrupt — a partial
+        // write that never got the "segment:offset" colon. Pruning must treat this
+        // conservatively (keep every segment), exactly like a missing file. The
+        // old code silently skipped it, leaving min_seg=u64::MAX so prune deleted
+        // every non-active segment the consumer still needed (review-pass-6).
+        let pos = dir.path().join("consumer_corrupt.pos");
+        std::fs::write(&pos, b"5").unwrap();
+
+        writer.prune(&[pos]).unwrap();
+
+        assert_eq!(
+            count_wal_files(dir.path()),
+            before,
+            "a corrupt consumer position file must block pruning, not enable it"
+        );
     }
 
     // ---- Codec round-trip through WAL (encode -> WAL append -> WAL read -> decode) ----

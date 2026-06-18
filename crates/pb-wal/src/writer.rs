@@ -246,10 +246,25 @@ impl WalWriter {
             }
             let content =
                 std::fs::read_to_string(pos_file).map_err(|e| WalError::io(pos_file, e))?;
-            // Format: "segment_id:offset"
-            if let Some((seg_str, _)) = content.trim().split_once(':') {
-                if let Ok(seg_id) = seg_str.parse::<u64>() {
-                    min_seg = min_seg.min(seg_id);
+            // Format: "segment_id:offset". A file that exists but cannot be
+            // parsed (e.g. truncated to "5" by a partial write) must be treated
+            // CONSERVATIVELY — exactly like a missing file above — by keeping all
+            // segments. Silently skipping it left `min_seg` at u64::MAX, so a sole
+            // corrupt consumer let prune delete segments it still needed, losing
+            // that consumer's data (review-pass-6).
+            let parsed = content
+                .trim()
+                .split_once(':')
+                .and_then(|(seg_str, _)| seg_str.parse::<u64>().ok());
+            match parsed {
+                Some(seg_id) => min_seg = min_seg.min(seg_id),
+                None => {
+                    warn!(
+                        path = %pos_file.display(),
+                        content = %content.trim(),
+                        "unparseable consumer position file; keeping all segments until it is repaired"
+                    );
+                    return Ok(0);
                 }
             }
         }

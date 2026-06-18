@@ -83,7 +83,16 @@ and feeds decoded records into the live read model.
   (serve started before ingest) or racing a prune reloads and recovers instead
   of returning `None` forever.
 - **Incremental tailing**: a caught-up reader stats the active segment and reads
-  only newly appended bytes, never re-reading the whole segment per poll.
+  only newly appended bytes, never re-reading the whole segment per poll. If the
+  active segment is observed *shorter* than the reader's cached copy — a writer's
+  torn-tail recovery truncating it in a multi-process setup — the reader reloads
+  the whole segment instead of splicing the new suffix onto a now-stale prefix,
+  and a reader parked at an incomplete trailing frame keeps its offset at that
+  frame's start so it resumes correctly once the writer completes or rewrites it.
+- **Conservative prune on a corrupt position file**: if a consumer position file
+  exists but cannot be parsed (e.g. a partial write), pruning keeps every segment
+  (as it does for a missing file) and logs a warning, rather than treating the
+  consumer as fully caught up and deleting segments it still needs.
 - **Single-buffer codec encode**: `codec::encode` uses `serialize_into` to write
   directly into the frame buffer, avoiding an intermediate allocation.
 - Segments are fixed-size append-only files. The writer rotates to a new segment
