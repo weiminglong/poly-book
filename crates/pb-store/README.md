@@ -49,11 +49,15 @@ PersistedRecord channel
   (or not representable as a datetime) are routed to a dedicated
   `invalid_timestamp` partition with a warning, instead of being silently misfiled
   into the 1970-01-01 partition by `unwrap_or_default()` (audit finding A.123).
-- Parquet object names are `{asset}_{first_ts}_{content_hash}.parquet`. The
-  content-hash suffix means two batches that land in the same (asset, hour) bucket
-  with the same first-record timestamp cannot silently overwrite each other;
-  identical content maps to the same name (idempotent retry). Readers list by the
-  `{asset}_` prefix, so multiple files per bucket are read transparently.
+- Parquet object names are `{asset}_{first_ts}_{content_hash}_{len}.parquet`. The
+  content-hash + byte-length suffix means two batches that land in the same
+  (asset, hour) bucket with the same first-record timestamp cannot silently
+  overwrite each other; identical content maps to the same name (idempotent
+  retry). The byte length is appended so a (vanishingly unlikely) 64-bit hash
+  collision between two *different* batches would also need identical lengths to
+  collide — at no extra cost, since identical content has identical length.
+  Readers list by the `{asset}_` prefix, so multiple files per bucket are read
+  transparently.
 - `write_batch_replacing` rebuilds partitions authoritatively from a record
   stream (WAL replay) for crash recovery (A.27): for each `(dataset, asset, hour)`
   group it deletes the existing `{asset}_*` files and writes the complete group,
