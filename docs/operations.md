@@ -406,12 +406,22 @@ takeover preserves the primary's durably-synced records). The promotion *logic* 
 unit-tested in-process (`pipeline::open_wal_writer_with_standby` tests +
 `pb_wal`'s takeover test).
 
+**Measuring the durability-layer RTO locally:** `just failover-drill` measures the
+code-controlled component of the failover RTO on the current hardware — the
+wall-clock from "primary process gone" through the standby acquiring the WAL
+lease, recovering the tail, resuming durable appends, and re-reading the full
+history (it prints a per-phase breakdown and asserts no records were lost across
+the handoff). On a dev laptop this is tens of milliseconds for a 50k-record
+backlog; run it on the target instance type for a real baseline.
+
 **Still deferred** (needs a real multi-replica deployment to author and verify,
 tracked under audit P3-HA-1 / A.78): a redundant second *feed* with arbitration
 (the standby connects to the feed only after it promotes, so there is a capture
-gap equal to the promotion latency), and a *measured* wall-clock RTO from a live
-failover drill. The single-writer flock + `--standby` auto-promotion + durable
-storage + `reconcile` is the supported recovery path.
+gap equal to the promotion latency), and the *full* wall-clock RTO from a live
+failover drill — which adds container scheduling + health-check time on top of the
+locally-measured durability-layer handoff above. The single-writer flock +
+`--standby` auto-promotion + durable storage + `reconcile` is the supported
+recovery path.
 
 ### Historical Backend Selection
 
