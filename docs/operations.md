@@ -218,8 +218,9 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
-- `tfsec` + `terraform fmt`/`validate` — Terraform static security scan and
-  validation of `infra/` (`supply-chain` workflow, `iac-scan` job)
+- `tfsec` + `tflint` (AWS ruleset) + `terraform fmt`/`validate` — Terraform
+  static security scan, provider-aware lint, and validation of `infra/`
+  (`supply-chain` workflow, `iac-scan` job)
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
   validation and offline incident unit tests; `amtool check-config` + routing
   assertions — Alertmanager routing validation (`monitoring` job)

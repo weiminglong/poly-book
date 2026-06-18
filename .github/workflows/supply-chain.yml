@@ -54,6 +54,21 @@ jobs:
       - name: tfsec
         run: tfsec infra/ --minimum-severity LOW
 
+      # Provider-aware lint (invalid instance types, deprecated arguments, type
+      # errors) — a class tfsec (security) and `terraform validate` (syntax) miss.
+      # Downloaded directly (like tfsec/promtool/amtool) to avoid depending on a
+      # third-party action SHA.
+      - name: Install tflint
+        run: |
+          curl -fsSL -o /tmp/tflint.zip \
+            "https://github.com/terraform-linters/tflint/releases/download/v0.63.1/tflint_linux_amd64.zip"
+          unzip -o /tmp/tflint.zip -d /tmp >/dev/null
+          sudo mv /tmp/tflint /usr/local/bin/tflint
+      - name: tflint
+        run: |
+          tflint --chdir=infra --init
+          tflint --chdir=infra
+
       - name: terraform fmt
         run: terraform -chdir=infra fmt -check -recursive
 
