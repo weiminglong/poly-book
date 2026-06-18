@@ -194,7 +194,7 @@ fn reconstruct_book(
             target_ts = target_timestamp_us,
             "reconstructing from checkpoint"
         );
-        apply_checkpoint(&mut book, &checkpoint);
+        apply_checkpoint(&mut book, &checkpoint, mode);
         used_checkpoint = true;
         // Compare the checkpoint boundary in the SAME clock domain as the events.
         // `checkpoint_timestamp_us` is an exchange-clock value (backfill sets it to
@@ -306,7 +306,13 @@ fn reconstruct_book(
                     event.price,
                     event.size,
                     next_sequence,
-                    event.provenance.recv_timestamp_us,
+                    // `current_time` is the event's timestamp already projected into
+                    // the active replay clock domain (line above), matching the
+                    // snapshot/checkpoint apply paths. Stamping the raw recv-clock
+                    // time here instead mixed domains in `book.last_update_us` —
+                    // wrong in ExchangeTime mode and inconsistent with the
+                    // checkpoint fix (review-pass-6).
+                    current_time,
                 );
             }
         }
@@ -445,7 +451,7 @@ fn checkpoint_ordering_ts(checkpoint: &BookCheckpoint, mode: ReplayMode) -> u64 
     }
 }
 
-fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint) {
+fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint, mode: ReplayMode) {
     let bids = checkpoint
         .bids
         .iter()
@@ -456,11 +462,17 @@ fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint) {
         .iter()
         .map(|level| (level.price, level.size))
         .collect::<Vec<_>>();
+    // Project the checkpoint's boundary timestamp into the ACTIVE replay clock
+    // domain before stamping `book.last_update_us`. Using the raw exchange-clock
+    // `checkpoint_timestamp_us` here while deltas stamp the recv-clock time mixed
+    // the two domains in one field, so a hydrate-only reconstruct (or the first
+    // crossed-book continuity marker) reported a timestamp from the wrong clock
+    // under recv/exchange skew (review-pass-6).
     book.apply_snapshot(
         &bids,
         &asks,
         Sequence::default(),
-        checkpoint.checkpoint_timestamp_us,
+        checkpoint_ordering_ts(checkpoint, mode),
     );
 }
 
@@ -673,6 +685,49 @@ mod sort_tests {
         assert_eq!(
             book.best_bid().map(|(_, size)| size),
             Some(FixedSize::new(100))
+        );
+    }
+
+    /// The hydrated book's `last_update_us` must be stamped in the ACTIVE replay
+    /// clock domain, not the raw exchange-clock `checkpoint_timestamp_us`. Before
+    /// the fix it mixed domains: recv-mode hydration reported the exchange time
+    /// (review-pass-6).
+    #[test]
+    fn apply_checkpoint_stamps_active_clock_domain() {
+        use pb_types::event::{BookCheckpoint, PriceLevel};
+
+        let checkpoint = BookCheckpoint {
+            asset_id: AssetId::new("tok"),
+            checkpoint_timestamp_us: 1000, // exchange clock
+            provenance: EventProvenance {
+                recv_timestamp_us: 2000, // recv clock
+                exchange_timestamp_us: 1000,
+                source: DataSource::RestSnapshot,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            bids: vec![PriceLevel {
+                price: FixedPrice::new(5000).unwrap(),
+                size: FixedSize::new(100),
+            }],
+            asks: vec![],
+            wal_offset: None,
+        };
+
+        let mut recv_book = L2Book::new(AssetId::new("tok"));
+        apply_checkpoint(&mut recv_book, &checkpoint, ReplayMode::RecvTime);
+        assert_eq!(
+            recv_book.last_update_us, 2000,
+            "RecvTime hydration must stamp the recv-clock timestamp"
+        );
+
+        let mut exch_book = L2Book::new(AssetId::new("tok"));
+        apply_checkpoint(&mut exch_book, &checkpoint, ReplayMode::ExchangeTime);
+        assert_eq!(
+            exch_book.last_update_us, 1000,
+            "ExchangeTime hydration must stamp the exchange-clock timestamp"
         );
     }
 
