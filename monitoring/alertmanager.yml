@@ -1,0 +1,87 @@
+# Alertmanager routing for poly-book.
+#
+# The alert RULES live in alerts.yml (Prometheus) and are unit-tested offline
+# with `promtool test rules alerts_test.yml`. This file is the ROUTING half:
+# where each firing alert is delivered, how it is grouped/throttled, and how a
+# critical alert suppresses redundant lower-severity noise. It is validated
+# offline in CI with `amtool check-config` + `amtool config routes test`
+# (audit P3-MON-1) so the routing cannot rot; only the live PagerDuty/Slack
+# integration secrets and a running Alertmanager remain environment-specific.
+#
+# Secrets are NEVER committed: PagerDuty routing keys and the Slack webhook are
+# read at runtime from files mounted by the deploy (see `*_file` keys below), so
+# this config is safe to keep in version control and to validate in CI.
+
+global:
+  # How long after the last firing notification an alert is declared resolved
+  # if Prometheus stops sending it.
+  resolve_timeout: 5m
+
+# Inhibition: while a critical alert is firing for a subsystem, mute the warning
+# and info alerts for that same alertname so responders see one page, not a
+# storm. Equal `alertname` is required on both sides.
+inhibit_rules:
+  - source_matchers: [severity = "critical"]
+    target_matchers: [severity =~ "warning|info"]
+    equal: [alertname]
+  - source_matchers: [severity = "warning"]
+    target_matchers: [severity = "info"]
+    equal: [alertname]
+
+route:
+  # Group alerts that share name + severity into a single notification so a
+  # multi-asset incident does not fan out into N pages.
+  group_by: [alertname, severity]
+  group_wait: 30s # wait to batch the first burst of an incident
+  group_interval: 5m # how long before adding new alerts to an existing group
+  repeat_interval: 12h # re-notify cadence for an unresolved group (default)
+  # Catch-all: anything without an explicit child route still reaches a human.
+  # Default to the warning lane (Slack) rather than paging, so an unlabeled or
+  # new alert is surfaced without a 3 a.m. page.
+  receiver: slack-warning
+  routes:
+    # Critical: page immediately and re-page hourly until resolved.
+    - matchers: [severity = "critical"]
+      receiver: pagerduty-critical
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: false
+    # Warning: notify Slack, re-notify every 12h.
+    - matchers: [severity = "warning"]
+      receiver: slack-warning
+      repeat_interval: 12h
+      continue: false
+    # Info: low-priority Slack channel, re-notify at most daily.
+    - matchers: [severity = "info"]
+      receiver: slack-info
+      repeat_interval: 24h
+      continue: false
+
+receivers:
+  - name: pagerduty-critical
+    pagerduty_configs:
+      # routing_key_file is read at runtime; the integration key is mounted by
+      # the deploy (e.g. ECS secret) and never stored in the repo.
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty_routing_key
+        severity: "{{ .CommonLabels.severity }}"
+        description: "{{ .CommonAnnotations.summary }}"
+        details:
+          alertname: "{{ .CommonLabels.alertname }}"
+          runbook: "{{ .CommonAnnotations.runbook }}"
+          num_firing: "{{ .Alerts.Firing | len }}"
+
+  - name: slack-warning
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        channel: "#poly-book-alerts"
+        send_resolved: true
+        title: "[{{ .CommonLabels.severity | toUpper }}] {{ .CommonLabels.alertname }}"
+        text: "{{ .CommonAnnotations.summary }}\nRunbook: {{ .CommonAnnotations.runbook }}"
+
+  - name: slack-info
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+        channel: "#poly-book-info"
+        send_resolved: true
+        title: "[INFO] {{ .CommonLabels.alertname }}"
+        text: "{{ .CommonAnnotations.summary }}"

@@ -96,6 +96,34 @@ jobs:
         run: promtool check rules monitoring/alerts.yml
       - name: Test alert rules (simulated incidents)
         run: promtool test rules monitoring/alerts_test.yml
+      # Validate the Alertmanager ROUTING config (where alerts page) the same way:
+      # structure check + assert each severity routes to its intended receiver, so
+      # the routing cannot drift from the alert rules' severity labels (P3-MON-1).
+      - name: Install amtool
+        env:
+          AM_VERSION: "0.28.1"
+        run: |
+          curl -fsSL -o /tmp/am.tar.gz \
+            "https://github.com/prometheus/alertmanager/releases/download/v${AM_VERSION}/alertmanager-${AM_VERSION}.linux-amd64.tar.gz"
+          tar xzf /tmp/am.tar.gz -C /tmp
+          echo "/tmp/alertmanager-${AM_VERSION}.linux-amd64" >> "$GITHUB_PATH"
+      - name: Check Alertmanager config
+        run: amtool check-config monitoring/alertmanager.yml
+      - name: Test Alertmanager routing
+        run: |
+          set -euo pipefail
+          assert_route() {
+            local got
+            got=$(amtool config routes test --config.file=monitoring/alertmanager.yml "severity=$1")
+            if [ "$got" != "$2" ]; then
+              echo "routing FAIL: severity=$1 routed to '$got', expected '$2'" >&2
+              exit 1
+            fi
+            echo "ok: severity=$1 -> $got"
+          }
+          assert_route critical pagerduty-critical
+          assert_route warning slack-warning
+          assert_route info slack-info
 
   bench:
     name: Benchmarks (compile)

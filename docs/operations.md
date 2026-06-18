@@ -219,7 +219,8 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
-  validation and offline incident unit tests (`monitoring` job)
+  validation and offline incident unit tests; `amtool check-config` + routing
+  assertions — Alertmanager routing validation (`monitoring` job)
 - `cargo bench --workspace --no-run` — compiles every Criterion benchmark so the
   latency harness can't rot (`bench` job; statistical regression gating is
   local-only, since shared runners are too noisy)
@@ -471,19 +472,26 @@ config lives in [`monitoring/`](../monitoring/):
 
 - `monitoring/alerts.yml` — Prometheus alert rules (WAL append failure, sink
   flush failure, feed silent/stale, book mismatch, crossed book, sequence gaps,
-  unknown messages, WAL consumer lag). Load via `rule_files:` and route the
-  `critical` severity to PagerDuty/Slack through Alertmanager.
-- `monitoring/RUNBOOK.md` — one on-call action section per alert.
+  unknown messages, WAL consumer lag). Load via `rule_files:`.
+- `monitoring/alertmanager.yml` — Alertmanager **routing**: `critical` →
+  `pagerduty-critical` (pages, re-pages hourly), `warning` → `slack-warning`,
+  `info` → `slack-info`, with a critical-inhibits-lower rule. Secret-free — the
+  PagerDuty routing key and Slack webhook are read at runtime from files mounted
+  at `/etc/alertmanager/secrets/` (`pagerduty_routing_key`, `slack_webhook_url`),
+  so the config is safe to commit and validate in CI.
+- `monitoring/RUNBOOK.md` — one on-call action section per alert, plus the alert
+  routing table.
 - `monitoring/grafana-dashboard.json` — importable dashboard (message rate, feed
   staleness, WAL lag, recv→durable p50/p99, durability/storage failures,
   data-quality events, snapshots/deltas).
 - `monitoring/alerts_test.yml` — `promtool` rule unit tests that simulate
   incidents offline (e.g. WAL append failing, silent/stale feed, crossed book,
-  WAL lag) and assert the matching alert fires. The CI `monitoring` job runs both
-  `promtool check rules monitoring/alerts.yml` and
-  `promtool test rules monitoring/alerts_test.yml`, so rule rot is caught without
-  a live Prometheus. (Live PagerDuty paging-within-seconds still needs a running
-  Alertmanager.)
+  WAL lag) and assert the matching alert fires. The CI `monitoring` job runs
+  `promtool check rules` + `promtool test rules` AND `amtool check-config
+  monitoring/alertmanager.yml` + severity→receiver routing assertions, so both
+  rule rot and routing drift are caught without a live Prometheus/Alertmanager.
+  (Only the live PagerDuty/Slack integration secrets and a running Alertmanager
+  remain environment-specific — the routing logic itself is now verified offline.)
 
 ### Time discipline (NTP/PTP)
 
