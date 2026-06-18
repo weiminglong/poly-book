@@ -218,6 +218,8 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
+- `tfsec` + `terraform fmt`/`validate` — Terraform static security scan and
+  validation of `infra/` (`supply-chain` workflow, `iac-scan` job)
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
   validation and offline incident unit tests; `amtool check-config` + routing
   assertions — Alertmanager routing validation (`monitoring` job)
@@ -284,11 +286,16 @@ Terraform in `infra/` provisions the AWS resources for the deployment target:
 - optional **single-node ClickHouse** on ECS+EFS (`clickhouse.tf`, opt-in via
   `enable_clickhouse_service`; prefer managed ClickHouse for production), with
   Cloud Map private DNS for `serve` discovery
-- S3 for Parquet storage (SSE-KMS, lifecycle, access logging)
-- VPC, subnets, IAM (incl. scoped EFS mount perms), and CloudWatch resources
+- S3 for Parquet storage (SSE-KMS CMK, versioning, lifecycle, access logging to a
+  hardened SSE-S3 log bucket)
+- VPC (with Flow Logs), subnets, security groups (metrics port in-VPC only; EFS
+  egress scoped to the VPC), IAM (incl. scoped EFS mount perms), ECR (immutable
+  tags, scan-on-push), and CloudWatch resources
 
 > **Status (audit P2-INFRA-1):** the `serve`/EFS/ClickHouse/on-demand topology
-> passes `terraform validate` + `fmt` but has **not** been `terraform apply`ed
+> passes `terraform validate` + `fmt` **and a `tfsec` static security scan** (CI
+> `iac-scan` job; intentional trade-offs are documented inline with
+> `#tfsec:ignore:<AVD-ID>` + rationale) but has **not** been `terraform apply`ed
 > against a live account. Applying it, plus a Spot-reclaim and a restart/failover
 > drill, is the remaining verification.
 

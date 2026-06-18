@@ -137,7 +137,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta, query guard, WS deser, WAL codec decode, fixed-point parse)
 - `miri` — undefined behavior checks on pb-types, pb-book
 
-Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny).
+Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny + `iac-scan`: `tfsec` static security scan of `infra/` plus `terraform fmt`/`validate`).
 
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)

@@ -22,11 +22,15 @@ resource "aws_security_group" "efs" {
     description     = "NFS from ECS tasks"
   }
 
+  # EFS mount targets only answer NFS from in-VPC tasks; they never initiate
+  # outbound traffic to the internet. Scope egress to the VPC CIDR instead of
+  # 0.0.0.0/0 so a compromised mount-target ENI cannot exfiltrate.
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [aws_vpc.main.cidr_block]
+    description = "In-VPC only (mount targets do not egress to the internet)"
   }
 
   lifecycle {
