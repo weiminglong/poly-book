@@ -803,6 +803,78 @@ mod tests {
         );
     }
 
+    /// Local failover DRILL: measures the durability-layer component of the
+    /// failover RTO — the wall-clock from "primary process gone" to "standby has
+    /// acquired the WAL lease, recovered the tail, resumed appends, and re-read
+    /// the full history". This is the part the CODE controls; the full deployment
+    /// RTO additionally includes container scheduling + health-check time, which
+    /// needs a real cluster to measure (audit P3-HA-1). Run on the target
+    /// hardware via `just failover-drill` to get a baseline. `#[ignore]`d so it
+    /// never gates CI on machine-dependent timing; asserts only correctness.
+    #[test]
+    #[ignore = "measurement drill; run via `just failover-drill` (prints RTO components)"]
+    fn measure_failover_handoff_rto() {
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            // Small segments so a realistic backlog spans many segments, exercising
+            // multi-segment tail recovery on the standby.
+            segment_size: 256 * 1024,
+            max_segments: 4096,
+            ..WalConfig::default()
+        };
+
+        // Primary durably writes a realistic backlog, then "crashes" (drop).
+        const RECORDS: usize = 50_000;
+        let payload = [0xACu8; 96];
+        {
+            let mut primary = WalWriter::open(config.clone()).unwrap();
+            for _ in 0..RECORDS {
+                primary.append(&payload).unwrap();
+            }
+            primary.sync().unwrap();
+        }
+
+        // t0 = "primary gone". Standby acquires the lease + recovers the tail.
+        let t0 = Instant::now();
+        let mut standby = WalWriter::open(config.clone()).unwrap();
+        let t_open = t0.elapsed();
+
+        // Resume: first durable append on the new writer.
+        let t1 = Instant::now();
+        standby.append(b"standby-resumed").unwrap();
+        standby.sync().unwrap();
+        let t_resume = t1.elapsed();
+
+        // Re-hydrate: a fresh consumer reads the full history to the tail.
+        let t2 = Instant::now();
+        let mut reader = WalReader::open(config, "drill-consumer").unwrap();
+        let mut count = 0usize;
+        while reader.next().unwrap().is_some() {
+            count += 1;
+        }
+        let t_read = t2.elapsed();
+        let total = t0.elapsed();
+
+        // Correctness (machine-independent): every record survived the handoff.
+        assert_eq!(
+            count,
+            RECORDS + 1,
+            "all primary records plus the standby's resume record must be readable"
+        );
+
+        eprintln!(
+            "failover handoff RTO (durability layer, {RECORDS} records):\n  \
+             lease acquire + tail recovery: {t_open:?}\n  \
+             resume first durable append:   {t_resume:?}\n  \
+             re-hydrate read to tail:       {t_read:?}\n  \
+             TOTAL code-path handoff:       {total:?}\n  \
+             (deploy RTO additionally includes container scheduling + health checks)"
+        );
+    }
+
     #[test]
     fn writer_resumes_from_last_segment() {
         let dir = tempfile::tempdir().unwrap();

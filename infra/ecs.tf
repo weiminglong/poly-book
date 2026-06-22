@@ -1,9 +1,11 @@
 resource "aws_ecs_cluster" "main" {
   name = var.project_name
 
+  # Container Insights: cluster-level CPU/mem/network/storage metrics for the
+  # capture tasks, so resource pressure is observable alongside the app metrics.
   setting {
     name  = "containerInsights"
-    value = "disabled"
+    value = "enabled"
   }
 }
 

@@ -71,9 +71,35 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
 
 # Server access logging to a dedicated, hardened log bucket so reads/writes/
 # deletes of captured market data are auditable (audit finding A.134).
+#
+# This bucket holds short-lived (90-day), append-only S3 access logs delivered by
+# the AWS log-delivery service. The following tfsec checks are intentionally
+# waived for it (not the data bucket, which has all of them):
+#   - versioning: access logs are immutable single-writer deliveries; versioning
+#     adds cost/noise with nothing to protect against.
+#   - self server-access-logging: a log bucket logging itself is a recursive loop.
+#   - customer-managed KMS: SSE-S3 (AES256, below) is the right tier for logs;
+#     the log-delivery service writes plainly and a CMK adds key-policy/cost
+#     overhead disproportionate to 90-day operational logs.
+#tfsec:ignore:AVD-AWS-0090
+#tfsec:ignore:AVD-AWS-0089
 resource "aws_s3_bucket" "logs" {
   bucket_prefix = "${var.project_name}-logs-"
   force_destroy = false
+}
+
+# Encrypt the access-log bucket at rest with SSE-S3 (AES256). The S3 log-delivery
+# service writes objects here, so SSE-S3 (not a CMK) is the compatible default —
+# a CMK is the right tier for the data bucket, not 90-day operational logs.
+#tfsec:ignore:AVD-AWS-0132
+resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
+  bucket = aws_s3_bucket.logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "logs" {

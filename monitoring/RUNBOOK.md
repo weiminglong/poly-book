@@ -10,6 +10,25 @@ feed live?** (capture) → **are sinks/serve keeping up?** (derived views). The 
 is the source of truth: as long as it is appending and fsyncing, storage and the
 read model can always be rebuilt.
 
+## Alert routing
+
+Where each alert is delivered is defined in [`alertmanager.yml`](alertmanager.yml)
+and routed by the `severity` label:
+
+| severity | receiver | cadence |
+|----------|----------|---------|
+| `critical` | `pagerduty-critical` (pages on-call) | page in 10s, re-page hourly |
+| `warning` | `slack-warning` (`#poly-book-alerts`) | re-notify every 12h |
+| `info` | `slack-info` (`#poly-book-info`) | re-notify at most daily |
+
+A firing `critical` alert inhibits the `warning`/`info` alerts of the same
+`alertname`, so an incident pages once instead of as a storm. The config carries
+**no secrets**: the PagerDuty routing key and Slack webhook are read at runtime
+from files the deploy mounts at `/etc/alertmanager/secrets/` —
+`pagerduty_routing_key` and `slack_webhook_url`. CI validates the structure and
+the severity→receiver mapping offline with `amtool` (`monitoring` job); the live
+PagerDuty/Slack integration and a running Alertmanager remain environment setup.
+
 ---
 
 ## WalAppendFailing

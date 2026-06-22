@@ -29,3 +29,50 @@ jobs:
 
       - name: Check dependencies and licenses
         run: cargo deny check advisories bans licenses sources
+
+  iac-scan:
+    name: Terraform IaC scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+
+      # Static security scan of the Terraform: catches misconfigurations that
+      # `terraform validate` cannot (public ingress, unencrypted buckets, mutable
+      # image tags, over-broad egress/IAM). Intentional trade-offs are documented
+      # with inline `#tfsec:ignore:<AVD-ID>` + rationale in the .tf files.
+      - name: Install tfsec
+        run: |
+          curl -fsSL -o /tmp/tfsec \
+            "https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64"
+          chmod +x /tmp/tfsec
+          sudo mv /tmp/tfsec /usr/local/bin/tfsec
+      - name: tfsec
+        run: tfsec infra/ --minimum-severity LOW
+
+      # Provider-aware lint (invalid instance types, deprecated arguments, type
+      # errors) — a class tfsec (security) and `terraform validate` (syntax) miss.
+      # Downloaded directly (like tfsec/promtool/amtool) to avoid depending on a
+      # third-party action SHA.
+      - name: Install tflint
+        run: |
+          curl -fsSL -o /tmp/tflint.zip \
+            "https://github.com/terraform-linters/tflint/releases/download/v0.63.1/tflint_linux_amd64.zip"
+          unzip -o /tmp/tflint.zip -d /tmp >/dev/null
+          sudo mv /tmp/tflint /usr/local/bin/tflint
+      - name: tflint
+        run: |
+          tflint --chdir=infra --init
+          tflint --chdir=infra
+
+      - name: terraform fmt
+        run: terraform -chdir=infra fmt -check -recursive
+
+      - name: terraform validate
+        run: |
+          terraform -chdir=infra init -backend=false -input=false
+          terraform -chdir=infra validate
