@@ -27,7 +27,7 @@ resource "aws_subnet" "public" {
   # deliberately omits a NAT gateway to avoid its hourly + per-GB cost for a
   # single capture task. Direct inbound exposure is contained by the task
   # security group (only the metrics port, and only from inside the VPC) and the
-  # app's loopback binding + optional bearer auth (P2-SEC-2). Revisit with private
+  # app's loopback binding + optional bearer auth. Revisit with private
   # subnets + NAT if the task count or inbound surface grows.
   #tfsec:ignore:aws-ec2-no-public-ip-subnet
   map_public_ip_on_launch = true

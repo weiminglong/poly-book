@@ -101,7 +101,7 @@ pb-service trait method
   `ClickHouseReader::read_integrity_aggregates` (`count()`/`countIf` over
   `book_events` and `replay_validations`) plus `read_ingest_events` (the bounded
   continuity list), then `assemble_integrity_summary`. It never materializes the
-  full book/trade window just to count it (audit A.42). The Parquet backend, which
+  full book/trade window just to count it. The Parquet backend, which
   already holds the full window, still uses `build_integrity_summary`.
 
 ## Docs to Update After Changes

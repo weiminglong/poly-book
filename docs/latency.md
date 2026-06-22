@@ -19,7 +19,7 @@ WebSocket frame arrival
     ├─ Dispatcher normalize       ~480 ns/entry (measured, full async pipeline)
     │   └─ FixedPrice::try_from   ~30 ns
     │   └─ FxHashMap lookup       ~10 ns
-    │   └─ shadow-book apply +    ~included    (A.74 cross-check vs venue
+    │   └─ shadow-book apply +    ~included    (cross-check vs venue
     │      best_bid/ask mismatch                best_bid/ask per price_change entry)
     │   └─ Channel send           ~50–100 ns
     │   (`cargo bench -p pb-feed`: ~2.1M price_change entries/s incl. JSON parse,

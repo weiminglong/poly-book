@@ -1,11 +1,11 @@
-# promtool rule unit tests for alerts.yml (audit P3-MON-1).
+# promtool rule unit tests for alerts.yml.
 #
 # Run: promtool test rules monitoring/alerts_test.yml
 #
 # These simulate incidents offline by feeding synthetic series and asserting the
 # corresponding alert fires (and that a healthy signal does NOT fire). This is the
-# "a simulated incident fires the alert" half of P3-MON-1 that does not need a
-# live Prometheus/Alertmanager; live PagerDuty paging-within-seconds still needs a
+# "a simulated incident fires the alert" half of the monitoring story that does
+# not need a live Prometheus/Alertmanager; live PagerDuty paging still needs a
 # running stack.
 rule_files:
   - alerts.yml

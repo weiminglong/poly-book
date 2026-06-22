@@ -7,7 +7,7 @@ resource "aws_ecr_repository" "app" {
   name = var.project_name
   # Immutable tags so a pushed tag can never be silently overwritten with a
   # different image (supply-chain integrity). The deploy already pulls by digest
-  # (A.51), so immutability does not constrain rollouts.
+  #, so immutability does not constrain rollouts.
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
 

@@ -47,7 +47,7 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
           "s3:PutObject",
           "s3:ListBucket",
           # Required by the `reconcile` command, which replaces stale Parquet
-          # partitions (delete-then-write) when rebuilding from the WAL (A.27).
+          # partitions (delete-then-write) when rebuilding from the WAL.
           "s3:DeleteObject"
         ]
         Resource = [
@@ -58,7 +58,7 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
       {
         # The data bucket is SSE-KMS encrypted, so the task must use the CMK to
         # read (Decrypt) and write (GenerateDataKey) objects. Scoped to this one
-        # key, not "*" (audit finding A.134).
+        # key, not "*".
         Effect = "Allow"
         Action = [
           "kms:Decrypt",
@@ -72,7 +72,7 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
 
 # EFS access for the durable WAL volume. Required because the WAL EFS access
 # point is mounted with IAM authorization (`iam = "ENABLED"`); without this the
-# ingest/serve tasks cannot mount it (audit P1-INFRA-1 / P2-INFRA-1).
+# ingest/serve tasks cannot mount it.
 resource "aws_iam_role_policy" "ecs_task_efs" {
   name = "${var.project_name}-efs-access"
   role = aws_iam_role.ecs_task.id
@@ -157,8 +157,8 @@ resource "aws_iam_role_policy" "github_actions" {
       },
       {
         # RegisterTaskDefinition / DescribeTaskDefinition do not support
-        # resource-level permissions in IAM, so they must use "*" (audit finding
-        # A.133 — this is an AWS limitation, not over-permissioning).
+        # resource-level permissions in IAM, so they must use "*" (this is an AWS
+        # limitation, not over-permissioning).
         Effect = "Allow"
         Action = [
           "ecs:RegisterTaskDefinition",
@@ -170,7 +170,7 @@ resource "aws_iam_role_policy" "github_actions" {
         # UpdateService / DescribeServices DO support resource-level permissions,
         # so scope them to just the poly-book services — a compromised pipeline can
         # no longer repoint or redeploy arbitrary ECS services in the account
-        # (A.133). Both the ingest (`app`) and `serve` services are deployable.
+        #. Both the ingest (`app`) and `serve` services are deployable.
         Effect   = "Allow"
         Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
         Resource = [aws_ecs_service.app.id, aws_ecs_service.serve.id]

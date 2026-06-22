@@ -1,13 +1,13 @@
 resource "aws_s3_bucket" "data" {
   bucket_prefix = "${var.project_name}-data-"
   # Never auto-delete a populated market-data bucket on `terraform destroy`
-  # (audit finding A.134) — this is the system's durable history.
+  # — this is the system's durable history.
   force_destroy = false
 }
 
 # Versioning protects against accidental overwrite/delete of captured data and is
 # a prerequisite for recovery from the deterministic-filename overwrite class of
-# bug (audit finding A.134).
+# bug.
 resource "aws_s3_bucket_versioning" "data" {
   bucket = aws_s3_bucket.data.id
   versioning_configuration {
@@ -44,7 +44,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
 # Customer-managed KMS key for the data bucket. Unlike SSE-S3 (AES256), a CMK
 # gives key-level access control and a CloudTrail audit of every decrypt, and lets
-# access be revoked via the key policy (audit finding A.134).
+# access be revoked via the key policy.
 resource "aws_kms_key" "s3" {
   description             = "${var.project_name} S3 market-data bucket encryption"
   deletion_window_in_days = 30
@@ -70,7 +70,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
 }
 
 # Server access logging to a dedicated, hardened log bucket so reads/writes/
-# deletes of captured market data are auditable (audit finding A.134).
+# deletes of captured market data are auditable.
 #
 # This bucket holds short-lived (90-day), append-only S3 access logs delivered by
 # the AWS log-delivery service. The following tfsec checks are intentionally

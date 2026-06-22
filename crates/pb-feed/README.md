@@ -97,9 +97,9 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
   against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
   divergence emits an `IngestEventKind::BookMismatch` event (a queryable data
-  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt updates
-  (A.74/A.109). Shadow books are dropped on continuity reset. Frames that match
-  no known message type increment `pb_unknown_messages_dropped_total` (A.110).
+  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt
+  updates. Shadow books are dropped on continuity reset. Frames that match no
+  known message type increment `pb_unknown_messages_dropped_total`.
 - Self-healing: on a detected divergence the dispatcher requests a resnapshot
   (`with_resnapshot_tx`); `run_resnapshot_worker` (debounced per asset) fetches a
   fresh REST book and re-injects it as a synthetic WS `book` message via the

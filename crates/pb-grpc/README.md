@@ -53,12 +53,11 @@ listen_addr = "0.0.0.0:50051"
   the response is size-capped, so this is a contract-consistency guard, not a DoS fix.
 - The server caps gRPC message size at 16 MiB (`max_encoding_message_size` /
   `max_decoding_message_size`); the default permits multi-GB messages, so a wide
-  query could otherwise serialize an enormous response and OOM serve (HFT-review
-  finding). Pairs with the `ClickHouseReader` per-read row cap (`MAX_READ_ROWS`).
+  query could otherwise serialize an enormous response and OOM serve. Pairs with
+  the `ClickHouseReader` per-read row cap (`MAX_READ_ROWS`).
 - `ExecutionTimelineRequest` carries `offset` and `descending` fields for
   server-side pagination (mirrors HTTP `offset`/`order`), so callers can page
-  through the full window instead of being capped at the first/last `limit` events
-  (A.65).
+  through the full window instead of being capped at the first/last `limit` events.
 - Proto definitions live in `proto/workstation.proto`
 
 ## Docs to Update After Changes

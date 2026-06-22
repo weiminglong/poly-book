@@ -279,7 +279,7 @@ Terraform in `infra/` provisions the AWS resources for the deployment target:
 - ECR for image storage
 - ECS Fargate compute — the ingest service keeps an **on-demand base**
   (`ingest_on_demand_base`) with Spot only for overflow, so a Spot reclaim never
-  drops all capture (audit P2-INFRA-1)
+  drops all capture
 - a read-only **`serve`** API service (`serve.tf`) on the shared WAL
 - **EFS** (`efs.tf`) for the durable write-ahead log, mounted into both ingest
   and serve (survives task restarts / host loss; pairs with the `--standby`
@@ -293,7 +293,7 @@ Terraform in `infra/` provisions the AWS resources for the deployment target:
   egress scoped to the VPC), IAM (incl. scoped EFS mount perms), ECR (immutable
   tags, scan-on-push), and CloudWatch resources
 
-> **Status (audit P2-INFRA-1):** the `serve`/EFS/ClickHouse/on-demand topology
+> **Status:** the `serve`/EFS/ClickHouse/on-demand topology
 > passes `terraform validate` + `fmt` **and a `tfsec` static security scan** (CI
 > `iac-scan` job; intentional trade-offs are documented inline with
 > `#tfsec:ignore:<AVD-ID>` + rationale) but has **not** been `terraform apply`ed
@@ -414,8 +414,8 @@ history (it prints a per-phase breakdown and asserts no records were lost across
 the handoff). On a dev laptop this is tens of milliseconds for a 50k-record
 backlog; run it on the target instance type for a real baseline.
 
-**Still deferred** (needs a real multi-replica deployment to author and verify,
-tracked under audit P3-HA-1 / A.78): a redundant second *feed* with arbitration
+**Still deferred** (needs a real multi-replica deployment to author and verify):
+a redundant second *feed* with arbitration
 (the standby connects to the feed only after it promotes, so there is a capture
 gap equal to the promotion latency), and the *full* wall-clock RTO from a live
 failover drill — which adds container scheduling + health-check time on top of the
@@ -525,7 +525,7 @@ the reconstructed book is deterministic regardless of wall-clock skew. The clock
   timestamps run >2 s ahead of receive time — resync NTP (see RUNBOOK).
 - **Partition placement**: a wildly-wrong clock would file events into the wrong
   hour partition; out-of-range timestamps are quarantined to `invalid_timestamp`
-  rather than silently misfiled (A.123).
+  rather than silently misfiled.
 
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have

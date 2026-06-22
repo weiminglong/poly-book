@@ -1,4 +1,4 @@
-# Optional single-node ClickHouse on ECS + EFS (audit P2-INFRA-1).
+# Optional single-node ClickHouse on ECS + EFS.
 #
 # AUTHORED BUT NOT YET APPLIED against a live AWS account: passes
 # `terraform validate`/`fmt`, not `apply`ed or load-tested. Gated on

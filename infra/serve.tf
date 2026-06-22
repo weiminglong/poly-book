@@ -1,4 +1,4 @@
-# Read-only `serve` API service (audit P2-INFRA-1).
+# Read-only `serve` API service.
 #
 # AUTHORED BUT NOT YET APPLIED against a live AWS account: passes
 # `terraform validate`/`fmt`, not `apply`ed. The documented topology is
@@ -20,7 +20,7 @@ resource "aws_ecs_task_definition" "serve" {
     {
       name = "${var.project_name}-serve"
       # Bootstrap placeholder; the deploy workflow pins an immutable digest and
-      # the service ignores task_definition changes (audit A.51).
+      # the service ignores task_definition changes.
       image     = "${aws_ecr_repository.app.repository_url}:latest"
       essential = true
 

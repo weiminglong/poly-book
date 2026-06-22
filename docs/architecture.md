@@ -190,7 +190,7 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 ## Flow Control & Backpressure
 
 Components communicate over bounded `tokio::mpsc` channels, so the policy for what
-happens when a consumer falls behind is explicit (audit finding A.79):
+happens when a consumer falls behind is explicit:
 
 - **The WAL is the only unconditionally-blocking consumer.** The ingest loop
   awaits each `event_rx.recv()` and appends to the WAL before fan-out; if the WAL
@@ -208,7 +208,7 @@ happens when a consumer falls behind is explicit (audit finding A.79):
 - **Capacities** are currently fixed (event/raw channels 2048, sink fan-out
   10000). They should be sized from measured rotation-burst depth using the depth
   gauge above; multi-replica writer leasing / feed redundancy (HA failover) is a
-  separate, deferred phase (P3-HA-1).
+  separate, deferred phase.
 
 ## Key Design Decisions
 

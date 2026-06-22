@@ -1,4 +1,4 @@
-# EFS for the durable write-ahead log (audit P1-INFRA-1 / P2-INFRA-1).
+# EFS for the durable write-ahead log.
 #
 # AUTHORED BUT NOT YET APPLIED against a live AWS account: this passes
 # `terraform validate`/`fmt` but has not been `terraform apply`ed or load-tested.
