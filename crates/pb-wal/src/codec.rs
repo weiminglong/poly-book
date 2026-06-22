@@ -15,7 +15,7 @@ use crate::WalError;
 
 /// Current serialization version.
 ///
-/// v2 added `EventProvenance.ingest_ordinal` (audit A.116). bincode is not
+/// v2 added `EventProvenance.ingest_ordinal`. bincode is not
 /// self-describing, so a v1 payload (6 provenance fields) cannot be safely
 /// decoded into the v2 struct (7 fields) — the trailing read would consume
 /// unrelated bytes. We therefore reject v1 explicitly rather than risk silent
@@ -44,7 +44,8 @@ pub fn decode(data: &[u8]) -> Result<PersistedRecord, WalError> {
     match version {
         2 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
         1 => Err(WalError::Codec(
-            "record written by a pre-A.116 binary (v1); drain the WAL before upgrading".to_string(),
+            "record written by an older binary (codec v1); drain the WAL before upgrading"
+                .to_string(),
         )),
         other => Err(WalError::Codec(format!(
             "unsupported record version: {other}"
@@ -65,7 +66,7 @@ mod tests {
     /// A fully-fixed record (no f64, no None-vs-Some ambiguity) for the golden
     /// byte fixture. bincode is positional, so any field reorder/insert in the
     /// persisted types silently changes this layout — the golden test catches it
-    /// (audit finding P1-TEST-1).
+    ///.
     fn golden_book_record() -> PersistedRecord {
         PersistedRecord::Book(BookEvent {
             asset_id: AssetId::new("tok1"),
@@ -91,7 +92,7 @@ mod tests {
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
         // Frozen v2 on-disk layout. If a persisted-type field is reordered/added,
         // this fails — forcing a deliberate codec version bump + migration rather
-        // than a silent format change (P1-TEST-1).
+        // than a silent format change.
         const GOLDEN_V2_HEX: &str = "02000000000400000000000000746f6b3101000000000000000600000000000000302e353030300a000000000000003130302e30303030303000401e18240a0600c0fd0e18240a0600000000000105000000000000006576742d3100012a00000000000000010700000000000000";
         assert_eq!(hex, GOLDEN_V2_HEX, "WAL codec v2 layout changed");
     }

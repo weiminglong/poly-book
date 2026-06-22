@@ -19,7 +19,7 @@ use pb_types::event::ReplayMode;
 use proto::workstation_service_server::{WorkstationService, WorkstationServiceServer};
 
 /// Maximum gRPC message size (encode + decode). Bounds response serialization so
-/// a wide query cannot OOM the serve process (HFT-review finding); large enough
+/// a wide query cannot OOM the serve process; large enough
 /// for legitimate reconstruct/timeline responses.
 const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -63,7 +63,7 @@ fn continuity_to_proto(event: &pb_service::ContinuityEvent) -> proto::Continuity
 /// exposes (`complete` / `best_effort`, see pb-api `CompletenessLabel`). The gRPC
 /// surface previously emitted a divergent four-value domain
 /// (full/partial/sparse/empty), so a client could not treat the two surfaces
-/// interchangeably (HFT-review #15).
+/// interchangeably.
 fn completeness_to_str(level: CompletenessLevel) -> &'static str {
     match level {
         CompletenessLevel::Full => "complete",
@@ -121,7 +121,7 @@ impl WorkstationService for GrpcWorkstationService {
         let mode = parse_replay_mode(&req.mode)?;
         let asset_id = pb_types::AssetId::new(&*req.asset_id);
         // Mirror the HTTP guard: an explicit depth of 0 is invalid (it would
-        // request zero levels). None means "service default" (HFT-review #24).
+        // request zero levels). None means "service default".
         let depth = match req.depth {
             Some(0) => {
                 return Err(Status::invalid_argument("depth must be greater than zero"));
@@ -158,7 +158,7 @@ impl WorkstationService for GrpcWorkstationService {
             best_ask: result.best_ask.map(|(p, s)| price_level_to_proto(p, s)),
             mid_price: result.mid_price,
             spread: result.spread,
-            // Saturate rather than silently truncate usize->u32 (HFT-review #26);
+            // Saturate rather than silently truncate usize->u32;
             // a depth above u32::MAX is absurd but truncation would corrupt it.
             bid_depth: u32::try_from(result.bid_depth).unwrap_or(u32::MAX),
             ask_depth: u32::try_from(result.ask_depth).unwrap_or(u32::MAX),
@@ -293,7 +293,7 @@ pub async fn start_grpc_server(
     let service = GrpcWorkstationService::new(replay, integrity, execution, max_depth);
     // Bound the response encode size. The default permits multi-GB messages, so a
     // wide reconstruct/timeline query against a busy asset could try to serialize
-    // an enormous response and OOM the serve process (HFT-review finding). 16 MiB
+    // an enormous response and OOM the serve process. 16 MiB
     // comfortably holds legitimate responses while capping a runaway one; it pairs
     // with the per-read LIMITs pushed into the ClickHouse reader.
     let workstation = WorkstationServiceServer::new(service)
@@ -303,7 +303,7 @@ pub async fn start_grpc_server(
 
     // Bind up front so a bind failure (e.g. port in use) is returned to the
     // caller instead of being swallowed inside the spawned task while we log
-    // "bound" and let `serve` run on silently without gRPC (audit finding A.112).
+    // "bound" and let `serve` run on silently without gRPC.
     let incoming = tonic::transport::server::TcpIncoming::bind(addr)?;
     info!(%addr, "gRPC server bound");
 
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn completeness_to_str_matches_http_two_value_domain() {
         // Must mirror the HTTP CompletenessLabel domain (complete / best_effort)
-        // so the two surfaces are interchangeable (HFT-review #15).
+        // so the two surfaces are interchangeable.
         assert_eq!(completeness_to_str(CompletenessLevel::Full), "complete");
         assert_eq!(
             completeness_to_str(CompletenessLevel::Partial),
@@ -930,7 +930,7 @@ mod tests {
         assert_eq!(resp.asset_id, "test-asset");
         assert_eq!(resp.start_us, start_us);
         assert_eq!(resp.end_us, end_us);
-        // completeness mirrors the HTTP two-value domain (HFT-review #15).
+        // completeness mirrors the HTTP two-value domain.
         assert!(["complete", "best_effort"].contains(&resp.completeness.as_str()));
 
         shutdown.cancel();

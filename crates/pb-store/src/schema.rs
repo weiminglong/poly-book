@@ -13,7 +13,7 @@ use crate::error::StoreError;
 
 /// On-disk Parquet schema version, written into every file's schema metadata so
 /// the reader can reject an incompatible (pre-split, or future) layout instead of
-/// silently returning empty rows (audit findings P1-TEST-1 / A.137).
+/// silently returning empty rows.
 pub const PB_SCHEMA_VERSION: &str = "2";
 
 /// Attach the schema-version marker to a set of fields.
@@ -38,7 +38,7 @@ pub fn book_event_schema() -> Schema {
         Field::new("source_event_id", DataType::Utf8, true),
         Field::new("source_session_id", DataType::Utf8, true),
         // Monotonic ingest ordinal — replay's authoritative arrival-order
-        // tiebreaker (A.116). Nullable for rows written before this column.
+        // tiebreaker. Nullable for rows written before this column.
         Field::new("ingest_ordinal", DataType::UInt64, true),
     ])
 }

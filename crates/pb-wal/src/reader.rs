@@ -125,7 +125,7 @@ impl WalReader {
                         // reader parses it in place, and after a torn-tail recovery
                         // truncates+rewrites the tail the reader resumes from this
                         // boundary instead of a stale end-of-cache offset that the
-                        // truncation invalidated (review-pass-6). The infinite-reload
+                        // truncation invalidated. The infinite-reload
                         // guard lives in `top_up_current_segment`, which keys growth
                         // off the cached data length (not `current_offset`), so this
                         // cannot spin.
@@ -141,7 +141,7 @@ impl WalReader {
                 // startup before the writer created segment 0, or the segment
                 // was pruned out from under us. Try to (re)load before giving
                 // up so the live tail recovers instead of stalling forever
-                // (audit finding A.32).
+                //.
                 if self.reload_when_unloaded()? {
                     continue;
                 }
@@ -288,7 +288,7 @@ impl WalReader {
     /// This stats the file first and returns `false` without reading anything
     /// when it has not grown — so a caught-up reader polling every 50 ms does
     /// O(0) I/O instead of re-reading the entire (up to 64 MB) segment on every
-    /// poll (audit finding A.31). When the file has grown, only the new suffix
+    /// poll. When the file has grown, only the new suffix
     /// `[prev_len, file_len)` is read and appended to the cached buffer, never
     /// the whole file.
     ///
@@ -311,7 +311,7 @@ impl WalReader {
             // stale bytes onto bytes the writer has since rewritten, corrupting the
             // parse. Discard the cache and reload the whole segment so it matches
             // the file, and clamp the parse offset if it landed past the new EOF
-            // (review-pass-6).
+            //.
             let reloaded = self.load_segment(self.current_segment_id)?;
             if self.current_offset as u64 > file_len {
                 self.current_offset = file_len as usize;
@@ -340,7 +340,7 @@ impl WalReader {
     /// Recover when `current_data` is `None`: either an empty WAL directory at
     /// startup (the writer has not created segment 0 yet) or the current
     /// segment was pruned. Refreshes the listing and reloads, rather than
-    /// returning `Ok(None)` forever (audit finding A.32).
+    /// returning `Ok(None)` forever.
     fn reload_when_unloaded(&mut self) -> Result<bool, WalError> {
         self.available_segments = segment::list_segment_ids(&self.config.base_path)?;
         let path = segment::segment_path(&self.config.base_path, self.current_segment_id);

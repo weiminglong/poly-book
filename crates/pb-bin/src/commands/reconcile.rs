@@ -3,7 +3,7 @@ use config::Config;
 
 use super::pipeline;
 
-/// Rebuild Parquet storage partitions from the durable WAL (audit finding A.27).
+/// Rebuild Parquet storage partitions from the durable WAL.
 ///
 /// The Parquet sink buffers up to a flush interval (default 5 minutes) in memory;
 /// a crash, OOM, or SIGKILL loses that window from storage. The WAL captures the

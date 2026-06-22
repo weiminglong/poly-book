@@ -15,7 +15,7 @@ const SIZE_SCALE: u64 = 1_000_000;
 /// overflows `u128`. Using `u128` plus checked arithmetic means the result is
 /// exact for every value representable by `FixedPrice`/`FixedSize` — the old
 /// `f64` path silently lost precision above 2^53 and saturated huge sizes to
-/// `u64::MAX` (audit findings A.82/A.125/A.155).
+/// `u64::MAX`.
 fn parse_scaled_decimal(s: &str, decimals: u32) -> Option<u128> {
     if s.is_empty() {
         return None;
@@ -92,7 +92,7 @@ fn write_fixed_decimal(buf: &mut [u8], integer: u64, fraction: u64, decimals: u3
 /// The inner field is private so the `[0, SCALE]` range invariant cannot be
 /// violated by constructing `FixedPrice(raw)` or assigning `.0` directly — an
 /// out-of-range value would serialize successfully but fail to deserialize,
-/// poisoning persisted records (audit finding A.154). Construct via [`new`],
+/// poisoning persisted records. Construct via [`new`],
 /// [`from_f64`], or `TryFrom<&str>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FixedPrice(u32);
@@ -223,7 +223,7 @@ impl FixedSize {
         }
         let scaled = (v * SIZE_SCALE as f64).round();
         // `as u64` saturates on overflow; reject instead of silently clamping
-        // to u64::MAX (audit finding A.82).
+        // to u64::MAX.
         if scaled > u64::MAX as f64 {
             return Err(TypesError::SizeParse {
                 input: v.to_string(),
@@ -841,7 +841,7 @@ mod proptests {
 
         /// Exact Display→parse roundtrip across the ENTIRE u64 range, including
         /// values above 2^53 that f64 cannot represent. This is the property the
-        /// old f64-based parser violated (A.125): the WAL codec and checkpoint
+        /// old f64-based parser violated: the WAL codec and checkpoint
         /// JSON both round-trip sizes through this path.
         #[test]
         fn fixed_size_display_parse_roundtrip_full_u64(raw in 0u64..=u64::MAX) {

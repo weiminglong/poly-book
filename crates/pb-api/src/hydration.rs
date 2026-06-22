@@ -92,7 +92,7 @@ pub async fn hydrate<R: pb_replay::EventReader>(
     // Phase 2: Replay WAL tail from the minimum checkpoint offset, using the
     // operator-configured WalConfig so the global-offset math matches the
     // writer's `global_offset()` (a hardcoded default segment size mis-skipped
-    // records under a non-default `wal.segment_size_mb` — audit finding A.156).
+    // records under a non-default `wal.segment_size_mb`).
     if let Some(cfg) = wal_config {
         if cfg.base_path.exists() {
             let (wal_records_replayed, wal_end_position) =
@@ -243,7 +243,7 @@ mod tests {
         // A non-default (tiny) segment size forces rotation. The skip math must
         // use the configured segment size, not the 64 MB default — otherwise the
         // global-offset comparison is wrong and records are mis-skipped or
-        // double-applied (audit finding A.156).
+        // double-applied.
         let dir = tempfile::tempdir().unwrap();
         let config = pb_wal::WalConfig {
             base_path: dir.path().to_path_buf(),

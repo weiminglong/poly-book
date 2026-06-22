@@ -77,7 +77,7 @@ impl IntegrityService for ClickHouseIntegrityService {
         let reader = ClickHouseReader::new(&self.url, &self.database);
         // Push the heavy counts (book events, validations) to the server with
         // count()/countIf() instead of streaming every row back to count it
-        // client-side (audit A.42). Only the bounded ingest-event list is
+        // client-side. Only the bounded ingest-event list is
         // materialized, since it feeds both the per-kind tallies and the
         // continuity_events array.
         let (aggregates, ingest_events) = tokio::try_join!(

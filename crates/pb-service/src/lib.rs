@@ -106,7 +106,7 @@ pub(crate) fn build_integrity_summary(
 ///
 /// This is the shared core used by both backends. The ClickHouse path computes
 /// `book_event_count`/validation counts server-side with `count()`/`countIf()`
-/// (audit A.42) and only materializes the small ingest-event list, so it never
+/// and only materializes the small ingest-event list, so it never
 /// transfers full book/trade rows just to count them.
 pub(crate) fn assemble_integrity_summary(
     asset_id: &AssetId,
@@ -192,7 +192,7 @@ pub(crate) fn build_execution_timeline(
     // offset/limit. With `descending` + `offset = 0` this yields the most recent
     // `limit` events; increasing `offset` pages backwards in time. Ascending
     // order pages forward from the window start. `total_count` always reports the
-    // true filtered total so callers know more exist beyond the page (A.65).
+    // true filtered total so callers know more exist beyond the page.
     if descending {
         events.reverse();
     }
@@ -371,7 +371,7 @@ pub trait ExecutionService: Send + Sync {
     ///
     /// `offset` skips that many events from the start of the ordered page and
     /// `descending` selects most-recent-first ordering, together providing
-    /// server-side pagination over the full window (A.65).
+    /// server-side pagination over the full window.
     #[allow(clippy::too_many_arguments)]
     fn timeline(
         &self,
@@ -399,7 +399,7 @@ pub struct ExecutionTimeline {
 /// Maximum queryable time window. Bounds work (and `hour_paths` iteration) so a
 /// hostile `end_us` cannot drive billions of iterations / OOM the process. This
 /// lives in the service layer rather than the HTTP handler so gRPC inherits it
-/// too (audit findings A.22/A.64).
+/// too.
 pub const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
 
 /// Maximum number of execution events returned in a single timeline query.
@@ -489,7 +489,7 @@ impl ExecutionService for AnyExecutionService {
     ) -> Result<ExecutionTimeline, ServiceError> {
         validate_time_window(start_us, end_us)?;
         // Clamp the caller-supplied limit so a gRPC client cannot request an
-        // unbounded result set (A.64). 0 is treated as "use the max".
+        // unbounded result set. 0 is treated as "use the max".
         let limit = if limit == 0 {
             MAX_EXECUTION_LIMIT
         } else {

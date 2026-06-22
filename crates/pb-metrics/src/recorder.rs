@@ -112,13 +112,13 @@ pub fn record_message_received(event_type: &'static str) {
 
 /// A WebSocket frame that did not deserialize into any known message type was
 /// dropped. Previously silent (debug-only), so genuine silent loss of new/unknown
-/// venue message types was invisible to operators (audit finding A.110).
+/// venue message types was invisible to operators.
 pub fn record_unknown_message_dropped() {
     counter!("pb_unknown_messages_dropped_total").increment(1);
 }
 
 /// The reconstructed top-of-book diverged from the venue-stated best_bid/best_ask
-/// after applying a delta — a silently dropped/corrupt update (A.74/A.109).
+/// after applying a delta — a silently dropped/corrupt update.
 pub fn record_book_mismatch() {
     counter!("pb_book_mismatches_total").increment(1);
 }
@@ -126,21 +126,21 @@ pub fn record_book_mismatch() {
 /// A self-heal resnapshot request was dropped because the request channel was
 /// full. The book divergence is still recorded, but the corrective resnapshot for
 /// that asset was not enqueued, so an operator needs visibility that self-heal was
-/// skipped (HFT-review finding: previously a silent `let _ = try_send`).
+/// skipped (previously a silent `let _ = try_send`).
 pub fn record_resnapshot_request_dropped() {
     counter!("pb_resnapshot_requests_dropped_total").increment(1);
 }
 
 /// A WebSocket subscriber fell behind the broadcast buffer (lagged past capacity)
 /// and was force-resynced with a fresh snapshot. Rising counts mean clients can't
-/// keep up with the update rate (HFT-review finding: lag was warn-only, unmetered).
+/// keep up with the update rate (lag was previously warn-only and unmetered).
 pub fn record_ws_broadcast_lagged() {
     counter!("pb_ws_broadcast_lagged_total").increment(1);
 }
 
 /// A message's venue (exchange) timestamp was implausibly ahead of our receive
 /// timestamp — evidence of clock skew between our host and the venue, which would
-/// corrupt exchange-time replay ordering (audit finding A.76). The observed skew
+/// corrupt exchange-time replay ordering. The observed skew
 /// (µs) is also recorded as a histogram for distribution analysis.
 pub fn record_clock_skew(skew_us: u64) {
     counter!("pb_clock_skew_events_total").increment(1);
@@ -148,15 +148,14 @@ pub fn record_clock_skew(skew_us: u64) {
 }
 
 /// End-to-end latency (µs) from feed receive to durable WAL append, the headline
-/// ingest-path latency the audit found missing (A.113). Bucketed via the `_us`
+/// ingest-path latency, otherwise not directly measured. Bucketed via the `_us`
 /// histogram-bucket policy.
 pub fn record_recv_to_durable_us(latency_us: u64) {
     histogram!("pb_recv_to_durable_us").record(latency_us as f64);
 }
 
 /// Current queued depth of a bounded internal channel, labelled by name. Rising
-/// depth means a downstream consumer is falling behind (backpressure); the audit
-/// found no visibility into channel queue depth (A.79).
+/// depth means a downstream consumer is falling behind (backpressure), which is otherwise not directly observable.
 pub fn set_channel_depth(channel: &'static str, depth: usize) {
     gauge!("pb_channel_depth", "channel" => channel).set(depth as f64);
 }
@@ -189,7 +188,7 @@ pub fn record_wal_append_failure() {
 /// skipped. This should be near-impossible (CRC passed but the codec rejected the
 /// payload — a version mismatch or astronomically-unlikely CRC collision); the
 /// live read model has silently diverged from the WAL for that record, so it must
-/// be loud and alertable rather than a silent skip (HFT-review finding).
+/// be loud and alertable rather than a silent skip.
 pub fn record_wal_decode_error() {
     counter!("pb_wal_decode_errors_total").increment(1);
 }

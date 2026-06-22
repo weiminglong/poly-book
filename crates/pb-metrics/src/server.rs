@@ -7,7 +7,7 @@ use crate::error::MetricsError;
 
 /// Explicit histogram buckets for microsecond-resolution latency metrics
 /// (`*_us`). Without explicit buckets the exporter emits rolling summaries whose
-/// quantiles cannot be aggregated across processes (audit finding A.114).
+/// quantiles cannot be aggregated across processes.
 const US_BUCKETS: &[f64] = &[
     10.0,
     50.0,
@@ -33,7 +33,7 @@ const MS_BUCKETS: &[f64] = &[
 /// Install the Prometheus metrics recorder globally, with explicit, unit-aware
 /// histogram buckets so latency quantiles are real Prometheus histograms
 /// (cross-process aggregatable) rather than per-process rolling summaries
-/// (audit finding A.114). Must be called before `register_metrics()` or any
+///. Must be called before `register_metrics()` or any
 /// `record_*` functions.
 pub fn install_recorder() -> Result<PrometheusHandle, MetricsError> {
     PrometheusBuilder::new()
@@ -47,7 +47,7 @@ pub fn install_recorder() -> Result<PrometheusHandle, MetricsError> {
 
 /// Spawn a background task that calls `run_upkeep` on a fixed interval so idle
 /// histogram/summary state is drained and bucket memory cannot grow unbounded if
-/// scraping stalls (audit finding A.115). Returns the task handle.
+/// scraping stalls. Returns the task handle.
 pub fn spawn_upkeep(handle: PrometheusHandle, interval: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -130,7 +130,7 @@ mod tests {
     fn us_suffix_metrics_render_as_bucketed_histograms() {
         // A `*_us` histogram must render as a real Prometheus histogram with
         // `_bucket{le=...}` series (cross-process aggregatable), not a summary
-        // (audit finding A.114).
+        //.
         let recorder = PrometheusBuilder::new()
             .set_buckets_for_metric(Matcher::Suffix("_us".to_string()), US_BUCKETS)
             .unwrap()

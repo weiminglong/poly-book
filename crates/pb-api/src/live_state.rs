@@ -222,7 +222,7 @@ impl LiveState {
 
     /// Run the crossed/locked-book invariant check on an asset's current book
     /// and surface a violation (metric + warning) instead of silently serving a
-    /// crossed book (audit finding A.105).
+    /// crossed book.
     fn check_book_integrity(&mut self, asset_id: &str) {
         let state = self.ensure_asset(asset_id);
         if let Err(err) = state.book.check_integrity() {
@@ -454,7 +454,7 @@ impl LiveState {
             slug: None,
             sequence: state.book.sequence.raw(),
             last_update_us: state.book.last_update_us,
-            // True totals, not the depth-capped array lengths (HFT-review #4).
+            // True totals, not the depth-capped array lengths.
             bid_depth: state.book.bid_depth(),
             ask_depth: state.book.ask_depth(),
             bids: state
@@ -687,8 +687,7 @@ impl LiveReadModel {
                     _ = token.cancelled() => {
                         // Drain records already buffered in the channel before
                         // exiting, so a shutdown does not abandon in-flight feed
-                        // updates the producers had already sent (HFT-review #2;
-                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // updates the producers had already sent (mirrors the storage-sink drain pattern). Bounded by the
                         // current buffer — no new records arrive after cancellation.
                         while let Ok(record) = rx.try_recv() {
                             if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
@@ -743,8 +742,7 @@ impl LiveReadModel {
                     _ = token.cancelled() => {
                         // Drain records already buffered in the channel before
                         // exiting, so a shutdown does not abandon in-flight feed
-                        // updates the producers had already sent (HFT-review #2;
-                        // mirrors the storage-sink drain pattern). Bounded by the
+                        // updates the producers had already sent (mirrors the storage-sink drain pattern). Bounded by the
                         // current buffer — no new records arrive after cancellation.
                         while let Ok(record) = rx.try_recv() {
                             if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
@@ -788,7 +786,7 @@ impl LiveReadModel {
     /// Apply a record through the projector. Returns `false` if the projector
     /// task is dead (the command channel is closed or the ack was dropped), so
     /// the WAL tailer can stop committing consumer positions for records that
-    /// were never applied (audit finding A.45) instead of silently advancing.
+    /// were never applied instead of silently advancing.
     pub async fn apply_record(&self, record: PersistedRecord) -> bool {
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
@@ -1088,7 +1086,7 @@ mod tests {
     #[tokio::test]
     async fn crossed_book_on_delta_is_detected_and_surfaced() {
         // A delta that lifts the best bid above the best ask produces a crossed
-        // book, which must be flagged (A.105) rather than served silently.
+        // book, which must be flagged rather than served silently.
         let model = LiveReadModel::new(FeedMode::FixedTokens);
         model.set_active_assets(vec!["tok1".to_string()]).await;
         model
@@ -1115,7 +1113,7 @@ mod tests {
         // A snapshot GROUP that is itself crossed (best bid >= best ask) must be
         // flagged when it materializes. This is the snapshot path
         // (materialize_pending_for_asset -> check_book_integrity), distinct from
-        // the delta path covered above (HFT-review coverage gap).
+        // the delta path covered above.
         let model = LiveReadModel::new(FeedMode::FixedTokens);
         model.set_active_assets(vec!["tok1".to_string()]).await;
         // Crossed snapshot: bid 0.60 sits above ask 0.50.

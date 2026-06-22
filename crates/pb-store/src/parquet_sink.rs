@@ -13,7 +13,7 @@ use crate::writer::ParquetRecordWriter;
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(300);
 /// Bounded flush retries before giving up, so a single transient object-store
 /// write failure does not drop the buffered batch or kill the pipeline
-/// (audit findings A.5/A.12/A.26).
+///.
 const MAX_FLUSH_RETRIES: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
@@ -58,7 +58,7 @@ impl ParquetSink {
                     // Drain records still queued in the channel before the final
                     // flush, so a graceful stop does not abandon records the
                     // upstream already sent but the sink had not yet received
-                    // (audit finding A.153). Bounded so a stuck upstream cannot
+                    //. Bounded so a stuck upstream cannot
                     // block shutdown forever.
                     let drain_complete =
                         self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
@@ -70,7 +70,7 @@ impl ParquetSink {
                         // The drain hit its deadline with records still queued: an
                         // incomplete shutdown that abandons data. Surface it as an
                         // error so the supervisor records the failure instead of a
-                        // clean stop (HFT-review finding; mirrors ClickHouseSink).
+                        // clean stop (mirrors ClickHouseSink).
                         // The abandoned records remain durable in the WAL and are
                         // recoverable via `reconcile`.
                         let remaining = self.rx.len();
@@ -109,11 +109,11 @@ impl ParquetSink {
     /// Drain records still queued in the channel into `buffer` on shutdown, up to
     /// a deadline. The upstream drops its sender during a coordinated shutdown, so
     /// `recv()` returns `None` once the backlog is drained; the timeout guards
-    /// against an upstream that never closes (audit finding A.153).
+    /// against an upstream that never closes.
     ///
     /// Returns `true` if the channel drained to completion (`recv() → None`), or
     /// `false` if the deadline was hit with records potentially still queued — the
-    /// caller surfaces that as an incomplete-shutdown error (HFT-review finding).
+    /// caller surfaces that as an incomplete-shutdown error.
     async fn drain_channel(
         &mut self,
         buffer: &mut Vec<PersistedRecord>,
@@ -145,7 +145,7 @@ impl ParquetSink {
     /// Flush the buffer with bounded exponential-backoff retries. The buffer is
     /// retained (not cleared) across retries and on terminal failure, so a
     /// transient object-store write error does not drop the batch or instantly
-    /// kill the pipeline (audit findings A.5/A.12/A.26).
+    /// kill the pipeline.
     async fn flush(&self, buffer: &mut Vec<PersistedRecord>) -> Result<(), StoreError> {
         let mut attempt = 0u32;
         loop {

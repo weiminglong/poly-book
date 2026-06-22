@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(timeline.total_count, 5);
         assert_eq!(timeline.events.len(), 2);
         // Descending (most-recent-first) paging returns the two newest events,
-        // newest first, not the two oldest (A.65).
+        // newest first, not the two oldest.
         assert_eq!(timeline.events[0].order_id, "order-4");
         assert_eq!(timeline.events[1].order_id, "order-3");
     }

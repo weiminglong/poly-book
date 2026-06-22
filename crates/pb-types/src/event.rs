@@ -56,7 +56,7 @@ pub struct EventProvenance {
     /// point, strictly increasing in true arrival order across snapshots and
     /// reconnects (unlike `sequence`, which resets to 0 on every snapshot). This
     /// is the authoritative replay tiebreaker so a same-microsecond pre-snapshot
-    /// delta sorts before its snapshot (audit finding A.116). `None` for records
+    /// delta sorts before its snapshot. `None` for records
     /// produced before this field existed or outside the ingest path (e.g. replay
     /// reconstructs `IngestEvent`s for surfaced gaps).
     #[serde(default)]
@@ -128,7 +128,7 @@ pub enum IngestEventKind {
     SourceReset,
     /// The reconstructed top-of-book diverged from the venue-stated
     /// `best_bid`/`best_ask` after applying a delta — evidence of a silently
-    /// dropped/corrupt update (audit findings A.74/A.109).
+    /// dropped/corrupt update.
     BookMismatch,
 }
 
@@ -254,7 +254,7 @@ impl LatencyTrace {
 
     /// True if the present stage timestamps are non-decreasing in causal order.
     /// A violation means a consumer would compute a negative stage duration
-    /// (audit finding A.62).
+    ///.
     pub fn is_monotonic(&self) -> bool {
         let mut last: Option<u64> = None;
         for stage in self.present_stages() {
@@ -394,7 +394,7 @@ impl PersistedRecord {
     }
 
     /// The feed-receive timestamp (µs) for records that carry provenance, used to
-    /// measure end-to-end recv→durable latency at ingest (audit finding A.113).
+    /// measure end-to-end recv→durable latency at ingest.
     /// `ReplayValidation`/`ExecutionEvent` have no feed-receive provenance.
     pub fn recv_timestamp_us(&self) -> Option<u64> {
         match self {
@@ -409,7 +409,7 @@ impl PersistedRecord {
     /// Mutable access to the record's `EventProvenance`, if it carries one.
     /// `ReplayValidation` and `ExecutionEvent` have no provenance and return
     /// `None`. Used at the single ingest serialization point to stamp the
-    /// monotonic `ingest_ordinal` (audit A.116).
+    /// monotonic `ingest_ordinal`.
     pub fn provenance_mut(&mut self) -> Option<&mut EventProvenance> {
         match self {
             PersistedRecord::Book(event) => Some(&mut event.provenance),

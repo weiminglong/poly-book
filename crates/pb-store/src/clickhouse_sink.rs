@@ -12,7 +12,7 @@ use crate::writer::ClickHouseRecordWriter;
 const DEFAULT_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BATCH_SIZE: usize = 10_000;
 /// Bounded flush retries before giving up, so a single transient insert failure
-/// no longer tears down the whole ingest pipeline (audit findings A.5/A.12/A.26).
+/// no longer tears down the whole ingest pipeline.
 const MAX_FLUSH_RETRIES: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
@@ -33,8 +33,8 @@ impl ClickHouseSink {
         }
     }
 
-    /// Override the batch size and flush interval from config (audit finding
-    /// A.54 — these keys were previously documented but ignored). Zero values
+    /// Override the batch size and flush interval from config
+    /// (these keys were previously documented but ignored). Zero values
     /// fall back to the defaults.
     pub fn with_batch_config(mut self, batch_size: usize, batch_interval: Duration) -> Self {
         if batch_size > 0 {
@@ -70,7 +70,7 @@ impl ClickHouseSink {
                 _ = token.cancelled() => {
                     // Drain records still queued in the channel before the final
                     // flush so a graceful stop does not abandon records already
-                    // sent by the upstream (audit finding A.153). Bounded so a
+                    // sent by the upstream. Bounded so a
                     // stuck upstream cannot block shutdown forever.
                     let drain_complete =
                         self.drain_channel(&mut buffer, Duration::from_secs(10)).await;
@@ -82,7 +82,7 @@ impl ClickHouseSink {
                         // The drain hit its deadline with records still queued: this
                         // is an incomplete shutdown that abandons data. Surface it as
                         // an error so the supervisor records the failure instead of
-                        // reporting a clean stop (HFT-review finding). The abandoned
+                        // reporting a clean stop. The abandoned
                         // records remain durable in the WAL and are recoverable via
                         // `reconcile`.
                         let remaining = self.rx.len();
@@ -125,12 +125,12 @@ impl ClickHouseSink {
 
     /// Drain records still queued in the channel into `buffer` on shutdown, up to
     /// a deadline, so a graceful stop does not abandon already-sent records
-    /// (audit finding A.153). The upstream drops its sender during shutdown, so
+    ///. The upstream drops its sender during shutdown, so
     /// `recv()` returns `None` once drained; the timeout guards a stuck upstream.
     ///
     /// Returns `true` if the channel drained to completion (`recv() → None`), or
     /// `false` if the deadline was hit with records potentially still queued — the
-    /// caller surfaces that as an incomplete-shutdown error (HFT-review finding).
+    /// caller surfaces that as an incomplete-shutdown error.
     async fn drain_channel(
         &mut self,
         buffer: &mut Vec<PersistedRecord>,
@@ -171,7 +171,7 @@ impl ClickHouseSink {
     /// retained (not cleared) across retries and on terminal failure, so a
     /// transient ClickHouse error does not drop the batch or instantly kill the
     /// pipeline — only after `MAX_FLUSH_RETRIES` consecutive failures does this
-    /// return an error (audit findings A.5/A.12/A.26).
+    /// return an error.
     async fn flush(&self, buffer: &mut Vec<PersistedRecord>) -> Result<(), StoreError> {
         let mut attempt = 0u32;
         loop {

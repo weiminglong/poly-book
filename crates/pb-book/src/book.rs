@@ -23,7 +23,7 @@ pub struct L2Book {
     total_ask_raw: u64,
     /// Whether any snapshot/delta has established a sequence yet. Distinguishes
     /// "no sequence seen" from a legitimate sequence value of 0, so gap detection
-    /// is not silently disabled right after a snapshot/checkpoint (A.148).
+    /// is not silently disabled right after a snapshot/checkpoint.
     seq_initialized: bool,
 }
 
@@ -61,7 +61,7 @@ impl L2Book {
         // at this price in the map, and `total_*_raw` is maintained as the exact
         // sum of all stored sizes. So `old_raw <= total_*_raw` is a structural
         // invariant and the subtraction cannot underflow — no checked arithmetic
-        // is needed here (HFT-review verified this is not reachable from feed data,
+        // is needed here (this is not reachable from feed data,
         // since old_raw is sourced from the map, never the incoming delta).
         for &(price, size) in bids {
             if !size.is_zero() {
@@ -173,13 +173,13 @@ impl L2Book {
     /// Gap detection is active once any snapshot/delta has established a
     /// sequence, including when that sequence is 0 — previously the `> 0`
     /// sentinel disabled detection exactly post-snapshot/post-checkpoint where
-    /// `sequence == 0` is legitimate (A.148).
+    /// `sequence == 0` is legitimate.
     pub fn check_sequence(&self, incoming: Sequence) -> Result<(), BookError> {
         // wrapping_add, not `+ 1`: with overflow-checks = true (release profile,
         // ADR-0007) a plain `+ 1` panics when the stored/replayed sequence is
         // u64::MAX. Sequence values can come from corrupt storage or a hostile
         // feed, so harden the comparison rather than risk a panic on the
-        // replay/ingest path (HFT-review finding). Wrapping is the correct
+        // replay/ingest path. Wrapping is the correct
         // "next sequence" semantics at the boundary.
         let expected = self.sequence.raw().wrapping_add(1);
         if self.seq_initialized && incoming.raw() != expected {
@@ -392,7 +392,7 @@ mod tests {
     fn check_sequence_wraps_at_u64_max() {
         // With overflow-checks = true, a plain `sequence + 1` would panic when the
         // stored sequence is u64::MAX. wrapping_add makes the next expected
-        // sequence 0 — no panic, correct wrap semantics (HFT-review finding).
+        // sequence 0 — no panic, correct wrap semantics.
         let mut book = L2Book::new(AssetId::new("wrap"));
         book.apply_snapshot(&[], &[], Sequence::new(u64::MAX), 1);
         assert!(book.check_sequence(Sequence::new(0)).is_ok());
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn check_sequence_detects_gap_right_after_snapshot_at_zero() {
         // A snapshot establishes sequence 0; a first delta of 5 (not 1) is a gap
-        // that the old `> 0` sentinel silently ignored (A.148).
+        // that the old `> 0` sentinel silently ignored.
         let mut book = L2Book::new(AssetId::new("seq"));
         book.apply_snapshot(&[], &[], Sequence::new(0), 1_000);
         assert!(book.check_sequence(Sequence::new(1)).is_ok());
@@ -1240,7 +1240,7 @@ mod proptests {
         /// `best_bid >= best_ask`. Bids and asks are drawn from the SAME
         /// overlapping price range so crossings actually occur — the
         /// disjoint-range tests above can never produce one, leaving the
-        /// detector untested (audit finding A.159).
+        /// detector untested.
         #[test]
         fn check_integrity_detects_crossings(
             bid_prices in prop_vec(1u32..=10_000u32, 1..20),

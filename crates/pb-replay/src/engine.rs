@@ -116,7 +116,7 @@ impl<R: EventReader> ReplayEngine<R> {
         // bound re-read the reference checkpoint itself and an empty
         // `[reference_ts, reference_ts]` window — so the book was seeded from
         // the very thing it was compared against and `matched` was always true
-        // (audit findings A.8/A.23).
+        //.
         let reference_us = reference.checkpoint_timestamp_us;
         let seed = self
             .reader
@@ -201,7 +201,7 @@ fn reconstruct_book(
         // the venue snapshot time), so comparing it directly against an event's
         // recv-clock `event_ordering_ts` in RecvTime mode mixed domains and, under
         // recv-vs-exchange skew, could skip or double-apply deltas straddling the
-        // boundary (audit P1-REPLAY-2). `checkpoint_ordering_ts` projects the
+        // boundary. `checkpoint_ordering_ts` projects the
         // checkpoint into the active replay clock domain.
         let boundary = checkpoint_ordering_ts(&checkpoint, mode);
         window
@@ -235,7 +235,7 @@ fn reconstruct_book(
                     // without it, a *pre-reset* snapshot sharing the same ordering
                     // timestamp as the chosen post-reset snapshot would be collected
                     // and applied too, mixing pre/post-reset state into the rebuilt
-                    // book (HFT-review: reset-boundary leak). Most reachable in
+                    // book (prevents a reset-boundary leak). Most reachable in
                     // ExchangeTime mode, where the venue can repeat an exchange
                     // timestamp across a reconnect.
                     && reset_boundary_us
@@ -298,7 +298,7 @@ fn reconstruct_book(
                     });
                     // Do NOT touch live metrics here: this is offline replay, and
                     // incrementing pb_gaps_detected_total polluted live
-                    // observability (A.152). The gap is recorded in
+                    // observability. The gap is recorded in
                     // continuity_events for the replay caller.
                 }
                 book.apply_delta(
@@ -311,7 +311,7 @@ fn reconstruct_book(
                     // snapshot/checkpoint apply paths. Stamping the raw recv-clock
                     // time here instead mixed domains in `book.last_update_us` —
                     // wrong in ExchangeTime mode and inconsistent with the
-                    // checkpoint fix (review-pass-6).
+                    // checkpoint fix.
                     current_time,
                 );
             }
@@ -320,7 +320,7 @@ fn reconstruct_book(
     }
 
     // Surface a crossed/locked reconstructed book to the replay caller as a
-    // continuity marker (A.53). Offline analysis only — no live metric.
+    // continuity marker. Offline analysis only — no live metric.
     if book.check_integrity().is_err() {
         continuity_events.push(IngestEvent {
             asset_id: Some(asset_id.clone()),
@@ -361,13 +361,13 @@ fn latest_reset_boundary_us(events: &[IngestEvent], target_timestamp_us: u64) ->
 /// monotonic counter stamped at ingest in true arrival order — so a
 /// same-microsecond pre-snapshot delta (lower ordinal) sorts *before* its
 /// snapshot (higher ordinal), which `sequence` could not express because it
-/// resets to 0 on every snapshot (audit finding A.116). Events lacking an
-/// ordinal (legacy data written before A.116) sort after those that have one at
+/// resets to 0 on every snapshot. Events lacking an
+/// ordinal (legacy data written before the ordinal existed) sort after those that have one at
 /// the same timestamp and fall back to `sequence` plus content tiebreakers
 /// (side, price, size, source event id) so the order is still a deterministic
 /// total order regardless of the concurrent, unordered Parquet read order
 /// (`buffer_unordered`) — without which two replays of the same window could
-/// diverge (audit finding A.117).
+/// diverge.
 fn sort_book_events(events: &mut [BookEvent], mode: ReplayMode) {
     events.sort_by(|a, b| {
         let (a_primary, a_secondary) = ordering_keys(a, mode);
@@ -467,7 +467,7 @@ fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint, mode: Replay
     // `checkpoint_timestamp_us` here while deltas stamp the recv-clock time mixed
     // the two domains in one field, so a hydrate-only reconstruct (or the first
     // crossed-book continuity marker) reported a timestamp from the wrong clock
-    // under recv/exchange skew (review-pass-6).
+    // under recv/exchange skew.
     book.apply_snapshot(
         &bids,
         &asks,
@@ -554,7 +554,7 @@ mod sort_tests {
     }
 
     /// Different read orders of the same multiset of events must produce an
-    /// identical sorted order (deterministic replay — A.117).
+    /// identical sorted order (deterministic replay).
     #[test]
     fn sort_is_deterministic_across_input_permutations() {
         // A batch of events that collide on (recv_ts, sequence) so only the
@@ -633,7 +633,7 @@ mod sort_tests {
     /// In RecvTime mode the checkpoint boundary must be compared in the recv
     /// clock. A delta received *before* the checkpoint arrived (recv-clock) must
     /// not be applied on top of it, even though its recv timestamp is after the
-    /// checkpoint's exchange-clock `checkpoint_timestamp_us` (audit P1-REPLAY-2).
+    /// checkpoint's exchange-clock `checkpoint_timestamp_us`.
     #[test]
     fn checkpoint_boundary_uses_recv_clock_in_recv_mode() {
         use pb_types::event::{BookCheckpoint, MarketDataWindow, PriceLevel};
@@ -691,7 +691,7 @@ mod sort_tests {
     /// The hydrated book's `last_update_us` must be stamped in the ACTIVE replay
     /// clock domain, not the raw exchange-clock `checkpoint_timestamp_us`. Before
     /// the fix it mixed domains: recv-mode hydration reported the exchange time
-    /// (review-pass-6).
+    ///.
     #[test]
     fn apply_checkpoint_stamps_active_clock_domain() {
         use pb_types::event::{BookCheckpoint, PriceLevel};
@@ -736,7 +736,7 @@ mod sort_tests {
     /// ExchangeTime mode the venue can repeat an exchange timestamp across a
     /// reconnect, so two snapshots straddling a SourceReset can share
     /// `snapshot_time` while differing in recv time — the collection filter must
-    /// re-check the reset boundary (HFT-review: reset-boundary leak).
+    /// re-check the reset boundary (prevents a reset-boundary leak).
     #[test]
     fn reset_boundary_excludes_pre_reset_snapshot_sharing_exchange_ts() {
         use pb_types::event::{IngestEvent, IngestEventKind, MarketDataWindow};
@@ -815,7 +815,7 @@ mod sort_tests {
     /// ExchangeTime replay mode (the `event_ordering_ts == exchange_timestamp_us`
     /// branch) had no coverage. When the host and venue clocks are synced
     /// (recv_ts == exchange_ts), ExchangeTime reconstruction must produce the same
-    /// book as RecvTime (HFT-review coverage gap).
+    /// book as RecvTime (a previously-uncovered case).
     #[test]
     fn exchange_time_and_recv_time_agree_when_clocks_synced() {
         use pb_types::event::MarketDataWindow;
@@ -868,7 +868,7 @@ mod sort_tests {
 
     /// A same-microsecond delta that arrived *before* the snapshot (lower ingest
     /// ordinal) must sort before the snapshot, even though its `sequence` is
-    /// higher than the snapshot's reset-to-0 sequence (audit finding A.116).
+    /// higher than the snapshot's reset-to-0 sequence.
     #[test]
     fn pre_snapshot_delta_sorts_before_snapshot_via_ingest_ordinal() {
         // Same recv_ts. Delta arrived first (ordinal 7) with sequence 42; the
@@ -913,7 +913,7 @@ mod sort_tests {
     }
 
     /// Without the ingest ordinal (legacy data), the snapshot's reset sequence
-    /// (0) makes the pre-snapshot delta sort AFTER it — the exact A.116 bug. This
+    /// (0) makes the pre-snapshot delta sort AFTER it — the exact ordering bug. This
     /// documents why the ordinal is required (it is not a regression: legacy data
     /// has no better signal).
     #[test]

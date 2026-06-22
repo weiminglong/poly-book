@@ -14,7 +14,7 @@ const DEFAULT_BASE_BACKOFF_MS: u64 = 100;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
 /// A session that stayed connected at least this long is considered stable, and
 /// resets the reconnect backoff so the next disconnect retries quickly instead
-/// of inheriting an ever-growing delay (audit finding A.106).
+/// of inheriting an ever-growing delay.
 const STABLE_SESSION_MS: u64 = 30_000;
 
 #[derive(Debug, Clone)]
@@ -155,7 +155,7 @@ impl WsClient {
         // Pass no explicit connector: with the `rustls-tls-webpki-roots` feature
         // tokio-tungstenite builds a default rustls connector using the bundled
         // Mozilla root store, so we depend only on rustls (no openssl/native-tls
-        // C dependency — audit finding P2-BUILD-3).
+        // C dependency).
         let (ws_stream, _) =
             connect_async_tls_with_config(&self.config.ws_url, None, true, None).await?;
         let (mut sink, mut stream) = ws_stream.split();
@@ -176,7 +176,7 @@ impl WsClient {
         // Liveness watchdog: if no frame (data OR pong) arrives within this
         // window, the TCP connection is likely half-open and would otherwise
         // stall the feed silently for many minutes. Force a reconnect instead
-        // (audit finding A.107).
+        //.
         let read_idle_timeout = Duration::from_secs(ping_secs.saturating_mul(3));
         let mut watchdog = tokio::time::interval(Duration::from_secs(ping_secs));
         let mut last_activity = Instant::now();
@@ -263,7 +263,7 @@ impl WsClient {
 /// Exponential backoff with jitter. The exponential term is capped to leave
 /// headroom below `reconnect_max_delay_ms` so that jitter still varies the delay
 /// at the cap — otherwise every client reconnects at exactly the max, defeating
-/// jitter precisely when a thundering herd matters most (audit finding A.150).
+/// jitter precisely when a thundering herd matters most.
 fn backoff_ms(config: &WsConfig, attempt: u32) -> u64 {
     let max = config.reconnect_max_delay_ms;
     let exp = config
@@ -355,7 +355,7 @@ mod tests {
 
         // At attempt 10, base * 2^10 = 102,400 >> max=500. The result must stay
         // at/below max but still be jittered (not collapsed to exactly max), so
-        // it falls in the reserved top-quarter band [0.75*max, max] (A.150).
+        // it falls in the reserved top-quarter band [0.75*max, max].
         let result = backoff_ms(&config, 10);
         assert!(result <= 500, "backoff exceeded max: {result}");
         assert!(result >= 375, "backoff not in jitter band: {result}");

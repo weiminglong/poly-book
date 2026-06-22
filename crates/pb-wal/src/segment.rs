@@ -22,7 +22,7 @@ const BUF_WRITER_CAPACITY: usize = 64 * 1024;
 /// Including the length field in the checksum means a corrupted length is
 /// detected as a CRC mismatch instead of being silently trusted — a flipped
 /// length byte can no longer cause the reader to misparse the rest of the
-/// segment (see audit finding A.126).
+/// segment.
 #[inline]
 pub fn frame_crc(len: u32, payload: &[u8]) -> u32 {
     let crc = crc32c::crc32c(&len.to_le_bytes());
@@ -97,7 +97,7 @@ impl Segment {
     /// the file is truncated back to the end of the last valid frame so new
     /// appends are correctly framed. Without this, a stale length field in the
     /// torn tail would point into freshly appended data and desync the reader,
-    /// silently losing every post-restart record (audit finding A.30).
+    /// silently losing every post-restart record.
     pub fn open_append(id: u64, dir: &Path) -> Result<Self, WalError> {
         let path = segment_path(dir, id);
         let mut file = OpenOptions::new()

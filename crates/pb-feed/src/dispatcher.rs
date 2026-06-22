@@ -56,11 +56,11 @@ pub struct Dispatcher {
     asset_id_cache: FxHashMap<Arc<str>, AssetId>,
     /// Per-asset shadow book maintained purely to cross-check the venue-stated
     /// `best_bid`/`best_ask` after each delta and detect silent feed corruption
-    /// (audit findings A.74/A.109). Not used for serving — that book is
+    ///. Not used for serving — that book is
     /// reconstructed downstream from the WAL.
     validation_books: FxHashMap<Arc<str>, L2Book>,
     /// Optional channel on which the dispatcher requests a REST resnapshot for an
-    /// asset whose book diverged from the venue (A.74). A resnapshot worker
+    /// asset whose book diverged from the venue. A resnapshot worker
     /// fetches a fresh snapshot and re-injects it. Sends are non-blocking (drop
     /// if full) so detection never backpressures ingest.
     resnapshot_tx: Option<mpsc::Sender<Arc<str>>>,
@@ -83,7 +83,7 @@ impl Dispatcher {
     }
 
     /// Wire a channel on which the dispatcher requests a REST resnapshot when it
-    /// detects a book divergence (A.74). Without it, divergences are still
+    /// detects a book divergence. Without it, divergences are still
     /// detected, metered, and persisted as `BookMismatch` events.
     pub fn with_resnapshot_tx(mut self, tx: mpsc::Sender<Arc<str>>) -> Self {
         self.resnapshot_tx = Some(tx);
@@ -195,7 +195,7 @@ impl Dispatcher {
             Err(e) => {
                 // A frame that matches no known message type is dropped. Meter it
                 // so silent loss of new/unknown venue message types is visible
-                // (audit finding A.110) instead of vanishing at debug level.
+                // instead of vanishing at debug level.
                 pb_metrics::record_unknown_message_dropped();
                 debug!("skipping non-event message: {e}");
                 return Ok(());
@@ -216,7 +216,7 @@ impl Dispatcher {
                 // trades in the same millisecond produce equal-timestamp
                 // snapshots whose later one carries the newer state. Dropping
                 // equal timestamps (the old `<=`) silently lost that state in
-                // exactly the high-activity bursts that matter (A.21).
+                // exactly the high-activity bursts that matter.
                 if exchange_ts > 0 {
                     if let Some(&last_ts) = self.last_snapshot_ts.get(asset_id.as_str()) {
                         if exchange_ts < last_ts {
@@ -269,9 +269,9 @@ impl Dispatcher {
                 // downstream (which would be indistinguishable from a complete one)
                 // and must not poison the staleness tracker, so on error we emit a
                 // continuity-reset marker and leave all tracker state untouched
-                // (A.108). Building snap_bids/snap_asks here (rather than a combined
+                //. Building snap_bids/snap_asks here (rather than a combined
                 // `levels` vec that is then re-partitioned) removes a full Vec
-                // allocation and a re-iteration on the snapshot path (HFT-review #13).
+                // allocation and a re-iteration on the snapshot path.
                 let mut snap_bids: Vec<(FixedPrice, FixedSize)> =
                     Vec::with_capacity(book.bids.len());
                 let mut snap_asks: Vec<(FixedPrice, FixedSize)> =
@@ -335,7 +335,7 @@ impl Dispatcher {
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
 
                 // Rebuild the shadow book from this snapshot so subsequent deltas
-                // can be cross-checked against the venue best bid/ask (A.74). Uses
+                // can be cross-checked against the venue best bid/ask. Uses
                 // the per-side vectors built during conversion — no re-partition.
                 self.validation_books
                     .entry(asset_id.0.clone())
@@ -389,7 +389,7 @@ impl Dispatcher {
                     // the whole price_change batch (which would also drop the
                     // valid entries after it). Deltas are independent level
                     // updates, so this matches the existing bad-side handling
-                    // (A.108).
+                    //.
                     let (price, size) = match (
                         FixedPrice::try_from(entry.price),
                         FixedSize::try_from(entry.size),
@@ -423,7 +423,7 @@ impl Dispatcher {
                     self.send(PersistedRecord::Book(event)).await?;
 
                     // Cross-check the venue-stated best bid/ask against our shadow
-                    // book after applying the same delta (A.74/A.109). Only when a
+                    // book after applying the same delta. Only when a
                     // snapshot has seeded the book — otherwise we cannot compare.
                     let mismatch =
                         if let Some(book) = self.validation_books.get_mut(asset_id.as_str()) {
@@ -435,12 +435,12 @@ impl Dispatcher {
                     if let Some(details) = mismatch {
                         pb_metrics::record_book_mismatch();
                         warn!(asset_id = %asset_id, %details, "venue book mismatch detected");
-                        // Request a REST resnapshot to self-heal (A.74). Non-blocking:
+                        // Request a REST resnapshot to self-heal. Non-blocking:
                         // dropping never backpressures ingest. A `Full` channel means
                         // a request is already pending for *some* asset, but if many
                         // assets diverge at once the dropped request may be for a
                         // distinct asset whose self-heal is now skipped — so meter the
-                        // drop instead of silently discarding it (HFT-review finding).
+                        // drop instead of silently discarding it.
                         if let Some(tx) = &self.resnapshot_tx {
                             if let Err(e) = tx.try_send(asset_id.0.clone()) {
                                 if matches!(e, mpsc::error::TrySendError::Full(_)) {
@@ -608,7 +608,7 @@ impl Dispatcher {
 
 /// Parse a venue timestamp into microseconds. Delegates to the single shared
 /// converter so the dispatcher and the REST backfill agree on every resolution
-/// (seconds/ms/µs/ns) and on the zero case (audit findings A.119/A.147). Absent
+/// (seconds/ms/µs/ns) and on the zero case. Absent
 /// or non-numeric input becomes `0` (the "unknown timestamp" sentinel).
 fn parse_timestamp_us(ts: Option<&str>) -> u64 {
     pb_types::time::parse_to_micros(ts).unwrap_or(0)
@@ -618,7 +618,7 @@ fn parse_timestamp_us(ts: Option<&str>) -> u64 {
 /// is treated as clock skew. Normally network + processing latency makes recv
 /// *later* than exchange (`exchange_ts <= recv_ts`); the venue being meaningfully
 /// ahead means our host clock is behind the venue's, which corrupts exchange-time
-/// replay ordering (audit finding A.76).
+/// replay ordering.
 const CLOCK_SKEW_TOLERANCE_US: u64 = 2_000_000; // 2s
 
 /// Returns the skew (µs) when `exchange_us` is implausibly ahead of `recv_us`
@@ -634,7 +634,7 @@ fn clock_skew_us(recv_us: u64, exchange_us: u64) -> Option<u64> {
 /// Whether our top-of-book price disagrees with the venue-stated one. A venue
 /// value of `"0"` (or absent/unparseable) means "no level on that side": that
 /// only conflicts when *we* still hold one. A non-zero venue value must equal our
-/// top exactly. Returns `false` when there is nothing to compare (A.74).
+/// top exactly. Returns `false` when there is nothing to compare.
 fn top_price_mismatch(ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
     let Some(venue_str) = venue else {
         return false;
@@ -651,7 +651,7 @@ fn top_price_mismatch(ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
 
 /// Compare the shadow book's best bid/ask against the venue-stated values after a
 /// delta. Returns a human-readable description of the divergence, or `None` if
-/// they agree / there is nothing to compare (audit findings A.74/A.109).
+/// they agree / there is nothing to compare.
 fn detect_book_mismatch(
     book: &L2Book,
     venue_best_bid: Option<&str>,
@@ -762,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn same_millisecond_snapshot_is_accepted_not_dropped() {
         // Two snapshots with equal exchange timestamps (two trades within the
-        // same millisecond): the second must be applied, not dropped (A.21).
+        // same millisecond): the second must be applied, not dropped.
         let (_raw_tx, raw_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
@@ -841,7 +841,7 @@ mod tests {
     async fn snapshot_with_unparseable_level_emits_reset_not_partial() {
         // A snapshot whose second level is unparseable must produce ZERO book
         // events (no partial snapshot) and a single continuity-reset marker,
-        // and must not advance the staleness tracker (A.108).
+        // and must not advance the staleness tracker.
         let (_raw_tx, raw_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
@@ -872,7 +872,7 @@ mod tests {
     #[tokio::test]
     async fn price_change_skips_bad_entry_keeps_valid_ones() {
         // A price_change batch with one unparseable entry must still emit the
-        // valid deltas around it (A.108), not abort the whole batch.
+        // valid deltas around it, not abort the whole batch.
         let (_raw_tx, raw_rx) = mpsc::channel(16);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
@@ -1265,7 +1265,7 @@ mod tests {
 
         // A continuity reset (e.g. on ReconnectSuccess) must clear the interning
         // cache too, otherwise it grows unbounded over a long-lived process with
-        // continuous market rollover (review-pass-5 finding).
+        // continuous market rollover.
         dispatcher.reset_continuity_state();
         assert!(
             dispatcher.asset_id_cache.is_empty(),
@@ -1726,7 +1726,7 @@ mod tests {
         );
     }
 
-    // ---- venue book-mismatch validation (A.74/A.109) ----
+    // ---- venue book-mismatch validation ----
 
     #[test]
     fn clock_skew_detection() {
@@ -1853,7 +1853,7 @@ mod tests {
 
     #[tokio::test]
     async fn book_mismatch_with_full_resnapshot_channel_still_emits_event_and_does_not_error() {
-        // HFT-review finding: a full resnapshot channel must not abort dispatch and
+        // A full resnapshot channel must not abort dispatch and
         // must not suppress the durable BookMismatch event — the drop is metered
         // (pb_resnapshot_requests_dropped_total) but the ingest event still lands.
         let (_raw_tx, raw_rx) = mpsc::channel(8);

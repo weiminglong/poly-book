@@ -106,7 +106,7 @@ impl ExecutionAppendPayload {
 /// Plausible microsecond-timestamp range, roughly [2001, 2100). A millisecond
 /// (~1.7e12) or second (~1.7e9) value falls below the minimum and would be filed
 /// into a 1970-era partition, making the event invisible to every time-windowed
-/// query (audit finding A.61).
+/// query.
 const MIN_EVENT_TS_US: u64 = 1_000_000_000_000_000;
 const MAX_EVENT_TS_US: u64 = 4_102_444_800_000_000;
 
@@ -141,7 +141,7 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
         let size = value.size.as_deref().map(FixedSize::try_from).transpose()?;
 
         // A (partial) fill that carries no price or size is malformed — it would
-        // record a trade with unknown economics (part of A.144).
+        // record a trade with unknown economics.
         if matches!(
             kind,
             ExecutionEventKind::Fill | ExecutionEventKind::PartialFill
@@ -159,7 +159,7 @@ impl TryFrom<ExecutionAppendInput> for ExecutionEvent {
             value.exchange_fill_us,
         );
         // Reject a causally-inverted latency trace, which would otherwise render
-        // as negative stage durations downstream (A.62).
+        // as negative stage durations downstream.
         if !latency.is_monotonic() {
             bail!("latency stage timestamps are not in non-decreasing causal order");
         }
@@ -194,7 +194,7 @@ fn is_terminal_kind(kind: ExecutionEventKind) -> bool {
 }
 
 /// Validate the order-lifecycle coherence of a batch of execution events
-/// (audit finding A.144). Events are grouped per `order_id` and checked in
+///. Events are grouped per `order_id` and checked in
 /// timestamp order for illegal transitions:
 ///
 /// - an event after a terminal event (fill/ack/cancel after Fill/CancelAck/
@@ -335,7 +335,7 @@ pub async fn run(settings: Config, args: ExecutionAppendArgs) -> Result<()> {
     };
 
     // Reject incoherent order lifecycles within the batch unless explicitly
-    // bypassed for partial-history backfills (A.144).
+    // bypassed for partial-history backfills.
     if skip_lifecycle_checks {
         tracing::warn!("skipping order-lifecycle validation (--skip-lifecycle-checks)");
     } else {
@@ -458,13 +458,13 @@ mod tests {
     #[test]
     fn rejects_millisecond_and_second_timestamps() {
         // Millisecond (~1.75e12) and second (~1.75e9) values would land in a
-        // 1970 partition; both must be rejected (A.61).
+        // 1970 partition; both must be rejected.
         assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000_000)).is_err());
         assert!(ExecutionEvent::try_from(input_with_ts(1_750_000_000)).is_err());
         assert!(ExecutionEvent::try_from(input_with_ts(0)).is_err());
     }
 
-    // --- Order-lifecycle validation (A.144) ---
+    // --- Order-lifecycle validation ---
 
     fn exec(
         order_id: &str,

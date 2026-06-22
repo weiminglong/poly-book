@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS execution_events (
 PARTITION BY event_date
 -- Lead with event_timestamp_us: the execution timeline always filters by a time
 -- range (order_id is optional), so this matches the dominant query and avoids a
--- full scan on time-range lookups (audit finding A.38, clickhouse rule
+-- full scan on time-range lookups (clickhouse rule
 -- schema-pk-prioritize-filters).
 ORDER BY (event_timestamp_us, order_id)
 SETTINGS non_replicated_deduplication_window = 1000
@@ -160,7 +160,7 @@ const MAX_PLAUSIBLE_PARTITION_US: u64 = 10_000_000_000_000_000;
 /// Timestamps outside a wide plausible band — or not representable as a datetime
 /// — are routed to a dedicated `invalid_timestamp` partition with a warning,
 /// instead of being silently misfiled into the 1970-01-01 partition by
-/// `unwrap_or_default()` (audit finding A.123). This keeps corrupt/unstamped
+/// `unwrap_or_default()`. This keeps corrupt/unstamped
 /// records visible and quarantined rather than corrupting a real date partition.
 pub(crate) fn partition_hour_key(partition_ts_us: u64) -> String {
     if !(MIN_PLAUSIBLE_PARTITION_US..=MAX_PLAUSIBLE_PARTITION_US).contains(&partition_ts_us) {
@@ -229,7 +229,7 @@ impl ParquetRecordWriter {
     }
 
     /// Rebuild Parquet partitions from an authoritative record stream (the WAL),
-    /// so a storage window lost to a crash mid-buffer can be recovered (A.27).
+    /// so a storage window lost to a crash mid-buffer can be recovered.
     ///
     /// For every `(dataset, asset, hour)` group present in `records`, the existing
     /// Parquet files for that group are deleted and replaced with the complete
@@ -270,7 +270,7 @@ impl ParquetRecordWriter {
     }
 
     /// Delete all existing Parquet files for one `(dataset, asset, hour)` group so
-    /// it can be rewritten authoritatively from the WAL (A.27). Files are named
+    /// it can be rewritten authoritatively from the WAL. Files are named
     /// `{asset}_{ts}_{hash}.parquet`, so we match on the `{asset}_` prefix within
     /// the hour directory to avoid touching other assets in the same hour.
     async fn delete_group(
@@ -339,7 +339,7 @@ impl ParquetRecordWriter {
         // Append a content-derived suffix so two batches that land in the same
         // (asset, hour) bucket with the same first-record timestamp (quiet books,
         // checkpoints, execution-append re-runs) do not silently overwrite each
-        // other (A.122). Identical content hashes to the same name, making a true
+        // other. Identical content hashes to the same name, making a true
         // retry idempotent. The 64-bit DefaultHasher gives a ~2^-64 collision per
         // pair; including the byte length as well means a silent overwrite would
         // additionally require two distinct batches of the *same length* — which is
@@ -381,19 +381,19 @@ struct BookEventRow {
     exchange_timestamp_us: u64,
     asset_id: String,
     // Enum8 columns are serialized as their i8 discriminant over RowBinary;
-    // sending a Rust String here is rejected by ClickHouse (audit finding A.4).
+    // sending a Rust String here is rejected by ClickHouse.
     event_kind: i8,
     side: i8,
     price: u32,
     size: u64,
     // Non-nullable so it can stay in the sorting key without allow_nullable_key
-    // (audit finding A.3). Book events always carry a sequence; 0 if absent.
+    //. Book events always carry a sequence; 0 if absent.
     sequence: u64,
     source: String,
     source_event_id: Option<String>,
     source_session_id: Option<String>,
     // Monotonic ingest ordinal — replay's authoritative arrival-order tiebreaker
-    // (A.116). Nullable for rows written before this column existed.
+    //. Nullable for rows written before this column existed.
     ingest_ordinal: Option<u64>,
 }
 
@@ -555,22 +555,22 @@ impl ClickHouseRecordWriter {
         // non_replicated_deduplication_window, re-inserting the identical batch
         // (an operator retry, or a partial-failure re-send) is deduplicated
         // server-side per table instead of double-counting rows — the at-least-
-        // once-without-duplicates property the audit required (A.60/A.124).
+        // once-without-duplicates property the pipeline requires.
         let dedup_token = {
             use std::hash::{Hash, Hasher};
             // Propagate a serialization failure rather than collapsing to empty
             // bytes (`unwrap_or_default`): two different batches that both failed
             // to serialize would otherwise hash identically, and ClickHouse's
             // dedup window would silently drop the second batch — losing rows
-            // (HFT-review finding). A failed dedup token means the whole flush
+            //. A failed dedup token means the whole flush
             // fails and the records stay in the WAL for retry/reconcile.
             let bytes = serde_json::to_vec(records)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             bytes.hash(&mut hasher);
             format!("{:016x}", hasher.finish())
         };
-        // Insert client carries: the dedup token (A.60/A.124) and async-insert
-        // settings (A.40). On quiet assets the sink's 1s timer flushes far fewer
+        // Insert client carries: the dedup token and async-insert
+        // settings. On quiet assets the sink's 1s timer flushes far fewer
         // than the recommended min batch, which would create many tiny parts;
         // async_insert lets the server coalesce them, and wait_for_async_insert=1
         // keeps the call durable (it returns only once the data is written).

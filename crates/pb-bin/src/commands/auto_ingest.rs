@@ -81,7 +81,7 @@ pub async fn run(
 
     // Open the WAL writer. auto-ingest is the production rotating-market mode,
     // so it must persist to the WAL like `ingest` does — otherwise the
-    // documented ingest→serve topology has no live tail (audit finding A.75/A.98).
+    // documented ingest→serve topology has no live tail.
     // A failure to open the durability backbone is fatal.
     let wal_config = pipeline::wal_config_from_settings(&settings);
     let wal_flush_interval = Duration::from_millis(wal_config.flush_interval_ms);
@@ -108,10 +108,10 @@ pub async fn run(
         let mut wal_unsynced = false;
         // Monotonic ingest ordinal — this drain loop is the single serialization
         // point for all market generations, so the counter is globally monotonic
-        // across rotations, giving replay a true-arrival total order (A.116).
+        // across rotations, giving replay a true-arrival total order.
         let mut ingest_ordinal: u64 = 0;
         // Receive timestamp (µs) of the most recent record, for the feed-staleness
-        // gauge published on the flush tick (HFT-review: gauge was never set).
+        // gauge published on the flush tick (the gauge was previously never set).
         let mut last_recv_us: u64 = 0;
 
         loop {
@@ -119,9 +119,9 @@ pub async fn run(
                 biased;
                 _ = prune_tick.tick() => {
                     // Reclaim WAL segments all consumers have advanced past
-                    // (A.17/A.20/A.47). Blocking FS syscalls (read_dir + metadata +
+                    //. Blocking FS syscalls (read_dir + metadata +
                     // remove_file) run via block_in_place so they do not stall the
-                    // runtime worker (HFT-review #9).
+                    // runtime worker.
                     let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
                     if let Err(e) =
                         tokio::task::block_in_place(|| wal_writer.prune_with_backpressure(&consumers))
@@ -132,7 +132,7 @@ pub async fn run(
                 }
                 _ = flush_tick.tick() => {
                     // Publish feed staleness so the FeedStale alert can fire
-                    // (HFT-review: the gauge was defined + alerted but never set).
+                    // (the gauge was defined and alerted on but never set).
                     if last_recv_us > 0 {
                         let staleness_s =
                             now_micros().saturating_sub(last_recv_us) as f64 / 1_000_000.0;
@@ -152,7 +152,7 @@ pub async fn run(
                 _ = sync_tick.tick() => {
                     if wal_unsynced {
                         // fdatasync is a blocking syscall; block_in_place keeps it
-                        // off the runtime's task-scheduling path (HFT-review #8).
+                        // off the runtime's task-scheduling path.
                         if let Err(e) = tokio::task::block_in_place(|| wal_writer.sync()) {
                             tracing::error!(error = %e, "WAL sync failed — aborting ingest");
                             drain_wal_failed.store(true, Ordering::SeqCst);
@@ -178,13 +178,13 @@ pub async fn run(
                 last_recv_us = last_recv_us.max(recv);
             }
             // Stamp the monotonic ingest ordinal before persistence so replay can
-            // order same-microsecond events by true arrival (A.116).
+            // order same-microsecond events by true arrival.
             if let Some(prov) = event.provenance_mut() {
                 prov.ingest_ordinal = Some(ingest_ordinal);
                 ingest_ordinal += 1;
             }
             // Stamp the WAL offset onto checkpoints just before writing so serve
-            // can resume tailing from the checkpoint (A.13/A.52).
+            // can resume tailing from the checkpoint.
             if let pb_types::PersistedRecord::Checkpoint(ref mut checkpoint) = event {
                 checkpoint.wal_offset = Some(wal_writer.global_offset());
             }
@@ -201,7 +201,7 @@ pub async fn run(
                     }
                     wal_unflushed = true;
                     wal_unsynced = true;
-                    // Record end-to-end recv→durable(WAL append) latency (A.113).
+                    // Record end-to-end recv→durable(WAL append) latency.
                     if let Some(recv) = event.recv_timestamp_us() {
                         if recv > 0 {
                             pb_metrics::record_recv_to_durable_us(
@@ -321,7 +321,7 @@ pub async fn run(
 
         // Subscribe to the NEW market while the OLD one keeps running, so the
         // expiring market's final ~10 seconds are still captured instead of
-        // being dropped by an early unsubscribe (audit finding A.19/A.75).
+        // being dropped by an early unsubscribe.
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<pb_feed::FeedMessage>(2_048);
         let new_token = shutdown.child_token();
 
@@ -344,7 +344,7 @@ pub async fn run(
 
         // Cut over the previous market only after its bucket boundary (when it
         // actually expires), then join its tasks so they are not orphaned
-        // (audit finding A.50).
+        //.
         if let Some(old) = front.take() {
             let wait = target_bucket.saturating_sub(current_unix_secs());
             if wait > 0 {

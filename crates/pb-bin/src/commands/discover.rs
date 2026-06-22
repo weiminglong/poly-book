@@ -12,7 +12,7 @@ use super::market_discovery::{extract_discovery, populate_registry};
 fn current_btc_5m_slug() -> String {
     // Saturate to 0 on a pre-epoch clock rather than panic (matches
     // pipeline::now_micros). A broken clock yields a bogus slug that simply finds
-    // no market — strictly better than crashing the discover command (HFT-review).
+    // no market — strictly better than crashing the discover command.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

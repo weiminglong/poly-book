@@ -11,7 +11,7 @@ pub struct WalWriter {
     next_segment_id: u64,
     /// Holds the exclusive advisory lock on the WAL directory for this writer's
     /// lifetime. Dropping it (or process exit) releases the lock — flock is
-    /// crash-safe, leaving no stale lock to clear (audit finding A.128).
+    /// crash-safe, leaving no stale lock to clear.
     _lock: std::fs::File,
 }
 
@@ -23,7 +23,7 @@ impl WalWriter {
 
         // Acquire an exclusive, non-blocking advisory lock so a second writer on
         // the same directory fails fast instead of interleaving appends and
-        // corrupting the WAL (A.128).
+        // corrupting the WAL.
         let lock_path = config.base_path.join(".wal.lock");
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -144,7 +144,7 @@ impl WalWriter {
         // to determine which segments fall within the retention window. The
         // window is bounded by BOTH the lag-byte budget and a hard segment-count
         // cap (`max_segments`) so the WAL cannot grow without bound even when the
-        // byte budget is generous (audit finding A.20). The active segment always
+        // byte budget is generous. The active segment always
         // counts toward the cap, so at most `max_segments` total segments remain.
         let mut retained_bytes: u64 = 0;
         let mut retained_count: usize = 1; // the active segment is always retained
@@ -223,7 +223,7 @@ impl WalWriter {
         self.active = Segment::create(id, &self.config.base_path)?;
         // fsync the directory so the new segment's directory entry is durable;
         // otherwise a power loss right after rotation can make the freshly
-        // created segment vanish (audit finding A.29).
+        // created segment vanish.
         segment::fsync_dir(&self.config.base_path)?;
         info!(segment_id = id, "rotated to new WAL segment");
         Ok(())
@@ -251,7 +251,7 @@ impl WalWriter {
             // CONSERVATIVELY — exactly like a missing file above — by keeping all
             // segments. Silently skipping it left `min_seg` at u64::MAX, so a sole
             // corrupt consumer let prune delete segments it still needed, losing
-            // that consumer's data (review-pass-6).
+            // that consumer's data.
             let parsed = content
                 .trim()
                 .split_once(':')

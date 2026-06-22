@@ -3,7 +3,7 @@
 //! The dispatcher is the ingest CPU stage between wire deserialization and the
 //! WAL: it parses each raw WS frame, normalizes it into `PersistedRecord`s,
 //! maintains a per-asset shadow `L2Book`, and cross-checks our reconstructed
-//! top-of-book against the venue-stated best bid/ask (A.74). That shadow-book
+//! top-of-book against the venue-stated best bid/ask. That shadow-book
 //! cross-check is new cost that was previously only estimated in docs/latency.md;
 //! this measures the real per-`price_change`-entry throughput end-to-end through
 //! the public async pipeline (channels included).
