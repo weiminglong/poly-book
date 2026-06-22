@@ -103,6 +103,7 @@ pub async fn run(
                 replay_service.clone(),
                 integrity_service.clone(),
                 execution_service.clone(),
+                max_depth,
                 shutdown.child_token(),
             )
             .await

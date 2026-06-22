@@ -46,6 +46,11 @@ listen_addr = "0.0.0.0:50051"
   chokepoint), so gRPC inherits the same 24h window cap and result-limit clamp as
   HTTP — a hostile far-future `end_us` can no longer drive `hour_paths` into
   billions of iterations and OOM the process.
+- `Reconstruct` validates `depth` against `max_depth` (passed to
+  `start_grpc_server`/`GrpcWorkstationService::new` from `api.max_depth`), mirroring
+  the HTTP `validate_depth` guard so both surfaces reject the same oversized depth
+  (`depth == 0` and `depth > max_depth`). The reconstruct result is book-bounded and
+  the response is size-capped, so this is a contract-consistency guard, not a DoS fix.
 - The server caps gRPC message size at 16 MiB (`max_encoding_message_size` /
   `max_decoding_message_size`); the default permits multi-GB messages, so a wide
   query could otherwise serialize an enormous response and OOM serve (HFT-review
@@ -66,5 +71,6 @@ listen_addr = "0.0.0.0:50051"
 
 ## Tests
 
-21 tests covering all `CompletenessLevel` variants, `parse_replay_mode`,
-proto message mapping, error-to-gRPC-status mapping, and RPC handler tests.
+22 tests covering all `CompletenessLevel` variants, `parse_replay_mode`,
+proto message mapping, error-to-gRPC-status mapping, the `depth > max_depth`
+rejection, and RPC handler tests.

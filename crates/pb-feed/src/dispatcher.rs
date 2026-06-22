@@ -181,6 +181,12 @@ impl Dispatcher {
         // Drop shadow books: after a continuity reset the next snapshot rebuilds
         // them, and validating deltas against a pre-reset book would false-alarm.
         self.validation_books.clear();
+        // Also drop the interning cache. It is keyed by asset_id like the maps
+        // above and was the one per-asset map not reset here, so on a long-lived
+        // process with continuous 5-min market rollover it grew unbounded (one
+        // Arc<str> per distinct asset ever seen). Clearing on reconnect bounds it;
+        // assets still active after the reset are simply re-interned on first use.
+        self.asset_id_cache.clear();
     }
 
     async fn dispatch_raw(&mut self, raw: &WsRawMessage) -> Result<(), FeedError> {
@@ -538,7 +544,11 @@ impl Dispatcher {
     fn next_sequence_for(&mut self, asset_id: &AssetId) -> Sequence {
         if let Some(seq) = self.asset_sequences.get_mut(asset_id.as_str()) {
             let current = *seq;
-            *seq += 1;
+            // wrapping_add (not `+= 1`) to match L2Book::check_sequence / Sequence::next:
+            // overflow-checks=true (ADR-0007) would otherwise panic at u64::MAX. This
+            // internal counter cannot realistically reach it, but the wrap keeps the
+            // sequence-arithmetic convention uniform and panic-free.
+            *seq = seq.wrapping_add(1);
             Sequence::new(current)
         } else {
             self.asset_sequences.insert(asset_id.0.clone(), 1);
@@ -1252,6 +1262,15 @@ mod tests {
         for _ in 0..3 {
             assert!(event_rx.try_recv().is_ok());
         }
+
+        // A continuity reset (e.g. on ReconnectSuccess) must clear the interning
+        // cache too, otherwise it grows unbounded over a long-lived process with
+        // continuous market rollover (review-pass-5 finding).
+        dispatcher.reset_continuity_state();
+        assert!(
+            dispatcher.asset_id_cache.is_empty(),
+            "asset_id_cache must be cleared by reset_continuity_state"
+        );
     }
 
     // ---- Dispatcher: empty dispatcher lookups ----
