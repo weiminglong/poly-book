@@ -215,12 +215,14 @@ async fn require_auth(
     }
 }
 
-/// Length-independent constant-time byte comparison (avoids token-timing leaks).
+/// Constant-time byte comparison that avoids a per-byte timing oracle on the
+/// token: it never short-circuits on a content mismatch, so for equal-length
+/// inputs the time is independent of how many bytes match. The length difference
+/// is folded into the result instead of an early `return`, so a wrong-length
+/// guess takes the same code path as a wrong-content one (the secret's *length*
+/// is not treated as sensitive — only its contents).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
+    let mut diff = (a.len() != b.len()) as u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;
     }

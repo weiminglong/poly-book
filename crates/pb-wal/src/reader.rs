@@ -119,13 +119,16 @@ impl WalReader {
                         continue;
                     }
                     Err(WalError::TruncatedRecord { .. }) => {
-                        // Truncated record at end of segment — advance.
-                        // Move offset to end of current data so that
-                        // advance_segment's reload-current-segment path
-                        // only reports new data if the file actually grew.
-                        if let Some(d) = &self.current_data {
-                            self.current_offset = d.len();
-                        }
+                        // An incomplete frame at the tail. Leave `current_offset`
+                        // at the START of this frame (do NOT jump to end-of-cache):
+                        // that way, when the writer later completes the frame the
+                        // reader parses it in place, and after a torn-tail recovery
+                        // truncates+rewrites the tail the reader resumes from this
+                        // boundary instead of a stale end-of-cache offset that the
+                        // truncation invalidated (review-pass-6). The infinite-reload
+                        // guard lives in `top_up_current_segment`, which keys growth
+                        // off the cached data length (not `current_offset`), so this
+                        // cannot spin.
                         if !self.advance_segment()? {
                             return Ok(None);
                         }
@@ -301,7 +304,21 @@ impl WalReader {
             Err(_) => return Ok(false),
         };
         let prev_len = self.current_data.as_ref().map_or(0, |d| d.len()) as u64;
-        if file_len <= prev_len {
+        if file_len < prev_len {
+            // The segment is SHORTER than what we cached: it was truncated under
+            // us (a writer's torn-tail recovery in a multi-process/replica setup).
+            // Reading only the suffix past the now-invalid `prev_len` would splice
+            // stale bytes onto bytes the writer has since rewritten, corrupting the
+            // parse. Discard the cache and reload the whole segment so it matches
+            // the file, and clamp the parse offset if it landed past the new EOF
+            // (review-pass-6).
+            let reloaded = self.load_segment(self.current_segment_id)?;
+            if self.current_offset as u64 > file_len {
+                self.current_offset = file_len as usize;
+            }
+            return Ok(reloaded);
+        }
+        if file_len == prev_len {
             // Stat-only fast path: nothing new to read.
             return Ok(false);
         }

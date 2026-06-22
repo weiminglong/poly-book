@@ -340,7 +340,10 @@ impl ParquetRecordWriter {
         // (asset, hour) bucket with the same first-record timestamp (quiet books,
         // checkpoints, execution-append re-runs) do not silently overwrite each
         // other (A.122). Identical content hashes to the same name, making a true
-        // retry idempotent.
+        // retry idempotent. The 64-bit DefaultHasher gives a ~2^-64 collision per
+        // pair; including the byte length as well means a silent overwrite would
+        // additionally require two distinct batches of the *same length* — which is
+        // free and preserves idempotency (identical content has identical length).
         let content_hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -348,8 +351,14 @@ impl ParquetRecordWriter {
             hasher.finish()
         };
         let path = format!(
-            "{}/{}/{}/{}_{}_{:016x}.parquet",
-            self.base_path, dataset, hour_key, asset, first_ts_us, content_hash
+            "{}/{}/{}/{}_{}_{:016x}_{}.parquet",
+            self.base_path,
+            dataset,
+            hour_key,
+            asset,
+            first_ts_us,
+            content_hash,
+            buf.len()
         );
 
         let object_path = ObjectPath::from(path.as_str());
