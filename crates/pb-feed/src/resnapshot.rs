@@ -1,4 +1,4 @@
-//! REST resnapshot worker (audit finding A.74 self-healing).
+//! REST resnapshot worker (self-healing book recovery).
 //!
 //! When the dispatcher detects that our reconstructed book diverged from the
 //! venue-stated best bid/ask, it requests a resnapshot for that asset. This
@@ -85,8 +85,8 @@ pub async fn run_resnapshot_worker(
                 }
                 // Evict entries older than the debounce window: they no longer
                 // affect debouncing, so retaining them would grow the map without
-                // bound as markets rotate over a long-running ingest (HFT-review
-                // #8). n is small, so the O(n) sweep per request is negligible.
+                // bound as markets rotate over a long-running ingest.
+                // n is small, so the O(n) sweep per request is negligible.
                 last_fetch.retain(|_, t| now.duration_since(*t) < RESNAPSHOT_DEBOUNCE);
                 last_fetch.insert(asset.clone(), now);
                 match rest.fetch_book(&asset).await {
@@ -137,7 +137,7 @@ mod tests {
     fn rest_book_round_trips_to_ws_book_message() {
         // The synthetic message must parse back as a WsMessage::Book with every
         // field intact — this is what guarantees the dispatcher handles a
-        // re-injected resnapshot exactly like a live snapshot (A.74).
+        // re-injected resnapshot exactly like a live snapshot.
         let raw = rest_book_to_raw_message(&sample_response(), 123);
         assert_eq!(raw.recv_timestamp_us, 123);
 

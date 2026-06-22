@@ -39,7 +39,7 @@ pub async fn run(
         .parse()?;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
     // Clamp default_depth to max_depth: a default above the max would request more
-    // levels than any query is allowed to return (HFT-review: config invariant).
+    // levels than any query is allowed to return (a config invariant).
     let default_depth =
         (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
     let stale_after_secs = settings
@@ -128,7 +128,7 @@ pub async fn run(
                 pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
                 1,
             ) as u64,
-            // Optional bearer-token auth (A.158/P2-SEC-2); empty/unset = open.
+            // Optional bearer-token auth; empty/unset = open.
             auth_token: settings
                 .get_string("api.auth_token")
                 .ok()
@@ -175,8 +175,7 @@ enum TailOutcome {
 /// The tailer is self-healing: instead of dying permanently on a transient
 /// reader-open failure or a segment-gap resync, it retries the open with
 /// exponential backoff and re-hydrates the read model on a gap, reflecting
-/// not-ready via `needs_resync` while it cannot serve fresh data (audit finding
-/// P2-SUP-1). A closed projector is treated as terminal — reopening cannot
+/// not-ready via `needs_resync` while it cannot serve fresh data. A closed projector is treated as terminal — reopening cannot
 /// revive it, so the tailer marks not-ready and stops for the process
 /// supervisor to restart serve.
 #[allow(clippy::too_many_arguments)]
@@ -329,7 +328,7 @@ async fn tail_session(
                     } else {
                         // The projector is dead. Stop committing positions —
                         // otherwise we would advance the consumer position past
-                        // records that were never applied (A.45).
+                        // records that were never applied.
                         break TailOutcome::ProjectorDead;
                     }
                 }
@@ -339,8 +338,7 @@ async fn tail_session(
                     // (rather than break to Resync) to guarantee forward progress —
                     // re-hydration would replay and re-hit the same poison frame,
                     // wedging the tailer in an infinite resync loop. But the skip
-                    // must be loud and alertable, not a silent warn (HFT-review
-                    // finding): operators reconcile from the WAL if it recurs.
+                    // must be loud and alertable, not a silent warn: operators reconcile from the WAL if it recurs.
                     pb_metrics::record_wal_decode_error();
                     tracing::error!(
                         error = %e,

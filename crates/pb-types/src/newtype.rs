@@ -51,7 +51,7 @@ impl Sequence {
     pub const fn next(self) -> Self {
         // wrapping_add, not `+ 1`: with overflow-checks = true a plain `+ 1`
         // panics at u64::MAX. Sequence is a wrap-aware counter, so wrapping is the
-        // correct boundary behavior and removes the panic (HFT-review finding).
+        // correct boundary behavior and removes the panic.
         Self(self.0.wrapping_add(1))
     }
 
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn sequence_next_wraps_at_max() {
         // wrapping_add: with overflow-checks = true a plain `+ 1` would panic at
-        // u64::MAX (HFT-review finding). Sequence is a wrap-aware counter.
+        // u64::MAX. Sequence is a wrap-aware counter.
         assert_eq!(Sequence::new(u64::MAX).next().raw(), 0);
         assert_eq!(Sequence::new(5).next().raw(), 6);
     }

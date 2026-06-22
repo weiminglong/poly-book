@@ -242,7 +242,7 @@ async fn replay_engine_reconstruct_from_snapshot() {
 async fn reconstruct_flags_crossed_book_in_continuity() {
     // A snapshot with bid 0.60 and ask 0.50 reconstructs to a crossed book; the
     // engine must surface it as a continuity marker rather than silently
-    // returning a crossed book (A.53).
+    // returning a crossed book.
     let snapshot_ts = BASE_TS;
     let target_ts = BASE_TS + 100_000;
     let market_data = MarketDataWindow {
@@ -588,7 +588,7 @@ async fn replay_engine_validate_matching_checkpoint() {
 
 #[tokio::test]
 async fn replay_engine_validate_detects_divergence() {
-    // Regression test for the vacuous-validation bug (A.8/A.23): the reconstructed
+    // Regression test for the vacuous-validation bug: the reconstructed
     // book must be compared against an INDEPENDENT reference checkpoint, so a
     // replay that diverges from the reference is reported as a mismatch. Under
     // the old code (which seeded reconstruction from the reference checkpoint
@@ -779,7 +779,7 @@ async fn parquet_reader_reads_book_events() {
 #[tokio::test]
 async fn parquet_reader_preserves_ingest_ordinal() {
     // The ingest ordinal must survive the Parquet write→read round-trip so replay
-    // can use it as the authoritative arrival-order tiebreaker (A.116).
+    // can use it as the authoritative arrival-order tiebreaker.
     let dir = TempDir::new().unwrap();
     let base_path = dir.path();
     let t0 = BASE_TS;
@@ -1087,12 +1087,12 @@ fn parse_timestamp_us_microseconds() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden replay determinism regression (P3-CHG-1)
+// Golden replay determinism regression
 // ---------------------------------------------------------------------------
 
 /// A fixed, deterministic set of book events written to Parquet, with explicit
 /// ingest ordinals — including a same-microsecond pre-snapshot delta that must
-/// sort before its snapshot (A.116). Replaying this fixture must always produce
+/// sort before its snapshot. Replaying this fixture must always produce
 /// the same book; a book-logic change that alters the output will fail this test.
 fn golden_book_records() -> Vec<pb_types::PersistedRecord> {
     fn ev(
@@ -1123,7 +1123,7 @@ fn golden_book_records() -> Vec<pb_types::PersistedRecord> {
         ev(BookEventKind::Snapshot, Side::Ask, 5100, 200, t, 0, 2),
         // A delta that arrived BEFORE a re-snapshot at the same microsecond
         // (ordinal 3 < 4): it must be applied first, then overwritten by the
-        // snapshot — i.e. it must NOT win the tie (A.116).
+        // snapshot — i.e. it must NOT win the tie.
         ev(BookEventKind::Delta, Side::Bid, 5000, 999, t + 10, 7, 3),
         ev(BookEventKind::Snapshot, Side::Bid, 5000, 110, t + 10, 0, 4),
         ev(BookEventKind::Snapshot, Side::Bid, 4900, 80, t + 10, 0, 5),
@@ -1180,7 +1180,7 @@ async fn golden_replay_is_deterministic_across_runs_and_input_order() {
     write_parquet_records(dir2.path(), &records).await;
     let r2 = replay_golden(dir2.path()).await;
 
-    // Run 3: reversed write order — the deterministic total order (A.117) must
+    // Run 3: reversed write order — the deterministic total order must
     // still yield byte-identical book state.
     let mut reversed = records.clone();
     reversed.reverse();

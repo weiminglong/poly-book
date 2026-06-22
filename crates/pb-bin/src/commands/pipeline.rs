@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 /// lag checks, allocates absurd buffers, or never fires intervals. A value below
 /// `min` (e.g. a `0` flush interval that would busy-loop, or a `0` segment size)
 /// is equally pathological. This clamps to `min` and warns rather than letting a
-/// hostile/typo'd config produce undefined behavior (HFT-review: config bounds).
+/// hostile/typo'd config produce undefined behavior (config-bounds validation).
 pub(crate) fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
     let v = settings.get_int(key).unwrap_or(default);
     if v < min {
@@ -73,7 +73,7 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
     pb_metrics::register_metrics();
 
     // Drain idle histogram state periodically so bucket memory stays bounded even
-    // if scraping stalls (audit finding A.115).
+    // if scraping stalls.
     pb_metrics::spawn_upkeep(handle.clone(), Duration::from_secs(5));
 
     let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
@@ -101,7 +101,7 @@ pub struct SinkHandles {
 /// exit as fatal (cancel the shutdown token and return a non-zero error)
 /// instead of silently continuing with a dead component or exiting 0.
 ///
-/// This addresses the audit finding that there was no task supervision anywhere:
+/// This addresses a gap where there was no task supervision anywhere:
 /// a single transient sink error caused its task to end while the ingest loop
 /// kept running and the process ultimately exited 0, masking real data loss.
 #[derive(Default)]
@@ -175,7 +175,7 @@ impl Supervisor {
 ///
 /// A path with a URL scheme (`s3://bucket/prefix`, `gs://...`, `file://...`) is
 /// wired to the matching `object_store` backend; a plain path is a local
-/// filesystem directory. This is the fix for the critical finding (A.1) where an
+/// filesystem directory. This fixes a bug where an
 /// `s3://...` base path was silently handled by `LocalFileSystem` and written to
 /// a local directory literally named `s3:` on ephemeral container storage.
 ///
@@ -364,14 +364,14 @@ pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
 ///
 /// Without `standby`, this is the fail-fast behavior: a second writer on the same
 /// WAL directory returns the `WriterLocked` error immediately (the single-writer
-/// flock; audit A.128). With `standby`, a `WriterLocked` is treated as "the
+/// flock). With `standby`, a `WriterLocked` is treated as "the
 /// primary is alive" — the process polls the lock on `poll` and promotes itself to
 /// primary writer the moment the lock is released (the primary exits/dies),
 /// resuming on the shared WAL with no data loss (the takeover semantics are
 /// covered by `pb_wal`'s `standby_writer_takes_over_shared_wal_after_primary_exit`
 /// test). Returns `Ok(None)` if `shutdown` fires while still waiting.
 ///
-/// NOTE (audit P3-HA-1): this is automatic *writer* promotion only. Redundant
+/// NOTE: this is automatic *writer* promotion only. Redundant
 /// feed connectivity with arbitration, and a measured wall-clock failover RTO,
 /// require a real multi-replica deployment and are not exercised here.
 pub async fn open_wal_writer_with_standby(
@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(exited, Some("short-lived"));
     }
 
-    // --- Standby writer promotion (P3-HA-1) ---
+    // --- Standby writer promotion ---
 
     fn standby_wal_config(dir: &std::path::Path) -> pb_wal::WalConfig {
         pb_wal::WalConfig {
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn build_object_store_s3_url_does_not_create_local_dir() {
         // An s3:// path must be parsed as an S3 store, never silently turned into
-        // a local directory named "s3:" (critical finding A.1).
+        // a local directory named "s3:".
         let result = build_object_store("s3://test-bucket/orderbook");
         assert!(
             result.is_ok(),

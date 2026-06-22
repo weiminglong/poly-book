@@ -10,7 +10,7 @@ use pb_types::wire::{ClobMarketInfo, GammaEvent, RestBookResponse};
 /// TCP connect timeout for REST calls.
 const REST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Overall per-request timeout. Without this a hung venue request stalls
-/// discovery/backfill (and `auto-ingest` market rotation) indefinitely (A.111).
+/// discovery/backfill (and `auto-ingest` market rotation) indefinitely.
 const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ impl RestClient {
         // Propagate a build failure rather than falling back to Client::new(),
         // which would silently drop the connect/request timeouts and allow an
         // upstream REST call to hang indefinitely — unacceptable for an HFT feed
-        // (HFT-review). build() only fails if the TLS backend can't initialize.
+        //. build() only fails if the TLS backend can't initialize.
         let client = Client::builder()
             .connect_timeout(REST_CONNECT_TIMEOUT)
             .timeout(REST_REQUEST_TIMEOUT)
@@ -62,7 +62,7 @@ impl RestClient {
         // Build the URL via parse_with_params, which percent-encodes the value, so
         // a token_id containing `&`/`?`/`#` cannot inject extra query params; log
         // the id as a structured field rather than interpolated into the URL
-        // (HFT-review #14 defense-in-depth).
+        // (defense-in-depth).
         let url = reqwest::Url::parse_with_params(
             &format!("{}/book", self.config.clob_base_url),
             &[("token_id", token_id)],
@@ -97,7 +97,7 @@ impl RestClient {
         self.rate_limiter.acquire().await;
         pb_metrics::record_rest_request();
         // parse_with_params percent-encodes the slug so it cannot inject extra
-        // query params (HFT-review #14 defense-in-depth).
+        // query params (defense-in-depth).
         let url = reqwest::Url::parse_with_params(
             &format!("{}/events", self.config.gamma_base_url),
             &[("slug", slug)],

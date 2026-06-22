@@ -24,7 +24,7 @@ pub struct SlugMapping {
 
 // Saturate to 0 on a pre-epoch clock rather than panic (matches
 // pipeline::now_micros), so a transient clock fault cannot crash the always-on
-// discovery/backfill paths (HFT-review).
+// discovery/backfill paths.
 pub fn current_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

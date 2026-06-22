@@ -5,7 +5,7 @@
 //! ad-hoc converters (the dispatcher and the REST backfill) handled only the
 //! millisecond case, so a seconds-resolution value was under-scaled into a 1970
 //! partition and a nanosecond value was kept as an absurd far-future microsecond
-//! (audit findings A.119/A.147). This module is the single converter used by both
+//!. This module is the single converter used by both
 //! paths, classifying by magnitude against the contemporary epoch.
 
 /// Normalize a raw integer timestamp to **microseconds**, inferring its source

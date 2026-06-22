@@ -46,7 +46,7 @@ jobs:
           # Resolve the immutable content digest of the image we just pushed and
           # deploy by digest (repo@sha256:...) instead of the mutable :sha tag, so
           # the running task is pinned to exact bytes that cannot be overwritten
-          # by a later push to the same tag (audit A.51).
+          # by a later push to the same tag.
           IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
             "$ECR_REGISTRY/poly-book:$IMAGE_TAG")
           echo "Pinned image: $IMAGE_DIGEST"
@@ -55,7 +55,7 @@ jobs:
       # Canary gate: before rolling the image out to the fleet, prove the exact
       # pushed artifact actually boots and its CLI is wired (catches the
       # broken-image class — unbuildable binary, missing runtime lib, bad entry
-      # point — that the audit flagged, A.51/P3-CHG-1). A failure here stops the
+      # point). A failure here stops the
       # deploy before any ECS task is touched. The ECS deployment circuit breaker
       # (infra/ecs.tf) is the second, runtime safety net that auto-rolls-back a
       # revision whose tasks fail to stabilize.

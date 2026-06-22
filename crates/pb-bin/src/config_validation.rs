@@ -3,7 +3,7 @@
 //! Config is loaded from `config/default.toml` plus `PB__`-prefixed environment
 //! overrides and read ad-hoc via `settings.get_*` / `cfg_int_min`. A misspelled
 //! key (e.g. `wal.segment_size_md`) was previously silently ignored — the default
-//! was used and the operator's intent was lost with no feedback (HFT-review #9).
+//! was used and the operator's intent was lost with no feedback.
 //!
 //! This module warns (loudly, at startup) about any key present in the loaded
 //! config that the application does not recognize, so a typo is visible. It warns

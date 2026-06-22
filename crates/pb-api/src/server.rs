@@ -38,12 +38,12 @@ pub struct ApiConfig {
     /// Per-request wall-clock timeout for request/response HTTP routes, in
     /// seconds. Production defaults to `DEFAULT_HTTP_REQUEST_TIMEOUT_SECS` (30);
     /// tests set a large value so the timeout is not load-sensitive under the
-    /// parallel workspace test run (HFT-review: replay-test CI flake).
+    /// parallel workspace test run (replay-test CI flake).
     pub http_request_timeout_secs: u64,
     /// Optional bearer token. When `Some`, every API/stream route requires
     /// `Authorization: Bearer <token>`; health probes stay open. `None` (default)
-    /// keeps the read-only workstation open on its loopback bind (audit P2-SEC-2:
-    /// auth before reachable on any non-loopback interface).
+    /// keeps the read-only workstation open on its loopback bind;
+    /// auth is required before it is reachable on any non-loopback interface.
     pub auth_token: Option<String>,
 }
 
@@ -91,7 +91,7 @@ struct ExecutionQuery {
     start_us: u64,
     end_us: u64,
     limit: Option<usize>,
-    /// Server-side pagination offset into the ordered result set (A.65).
+    /// Server-side pagination offset into the ordered result set.
     offset: Option<usize>,
     /// Result ordering: `desc` (default, most recent first) or `asc`.
     order: Option<String>,
@@ -129,7 +129,7 @@ fn resolve_asset_id(state: &AppState, input: &str) -> String {
 /// to the long-lived WebSocket route, which must outlive any request timeout.
 pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Max in-flight HTTP API requests; excess requests wait for a slot. Bounds the
-/// blast radius of expensive historical/replay queries (A.92).
+/// blast radius of expensive historical/replay queries.
 const MAX_INFLIGHT_HTTP_REQUESTS: usize = 256;
 /// Max request body size for HTTP routes (the SQL workbench POST in particular).
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
@@ -184,7 +184,7 @@ pub fn router(state: AppState) -> Router {
 
 /// Require `Authorization: Bearer <token>` when `api.auth_token` is configured.
 /// A constant-time compare avoids leaking the token via timing. When no token is
-/// configured the workstation stays open on its loopback bind (audit P2-SEC-2).
+/// configured the workstation stays open on its loopback bind.
 async fn require_auth(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -230,7 +230,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Reject a request that exceeds `HTTP_REQUEST_TIMEOUT` with 504 instead of
-/// letting an expensive query run unbounded (A.92).
+/// letting an expensive query run unbounded.
 async fn http_request_timeout(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -249,7 +249,7 @@ async fn http_request_timeout(
     }
 }
 
-/// Cap the number of concurrent in-flight HTTP API requests (A.92).
+/// Cap the number of concurrent in-flight HTTP API requests.
 async fn http_concurrency_guard(req: Request<axum::body::Body>, next: Next) -> Response {
     let _permit = match http_concurrency_limiter().try_acquire() {
         Ok(permit) => permit,
@@ -310,7 +310,7 @@ async fn health_live() -> StatusCode {
 }
 
 /// Readiness: 200 only when hydrated and not awaiting resync, otherwise 503, so
-/// status-code-based probes (k8s, load balancers) work correctly (A.96).
+/// status-code-based probes (k8s, load balancers) work correctly.
 async fn health_ready(State(state): State<AppState>) -> Response {
     let snapshot = health_snapshot(&state);
     let status = if snapshot.ready {
@@ -513,7 +513,7 @@ async fn execution_orders(
     }
     let offset = query.offset.unwrap_or(0);
     // Default to most-recent-first, which is what an execution inspector usually
-    // wants; `order=asc` pages forward from the window start (A.65).
+    // wants; `order=asc` pages forward from the window start.
     let descending = match query.order.as_deref() {
         None | Some("desc") => true,
         Some("asc") => false,
@@ -613,7 +613,7 @@ async fn query_sql(
     })?;
 
     // Clamp the client-supplied row cap to the configured ceiling so a request
-    // cannot raise its own limit above the server policy (A.83/A.91).
+    // cannot raise its own limit above the server policy.
     let ceiling = state.config.query_max_rows.max(1);
     let max_rows = req
         .max_rows
@@ -687,7 +687,7 @@ async fn track_request_metrics(req: Request<axum::body::Body>, next: Next) -> Re
     // allocating a fresh String per request via to_string(): MatchedPath::as_str
     // borrows from `req`, which `next.run` consumes, so we must own the route
     // before the call — but the Arc clone avoids the per-request heap allocation
-    // on the API hot path (HFT-review #25).
+    // on the API hot path.
     let matched = req.extensions().get::<MatchedPath>().cloned();
     let start = Instant::now();
     let response = next.run(req).await;
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Force a resync requirement → not ready → 503, so status-code probes
-        // see the change (A.96).
+        // see the change.
         state.needs_resync.store(true, Ordering::Relaxed);
         let response = router(state)
             .oneshot(

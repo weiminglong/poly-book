@@ -47,7 +47,7 @@ pub async fn run(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
     let (_active_assets_tx, active_assets_rx) = tokio::sync::watch::channel(token_ids.clone());
     // Channel for resnapshot requests the dispatcher raises on a book divergence
-    // (A.74). Small + non-blocking: a backlog means a resnapshot is already
+    //. Small + non-blocking: a backlog means a resnapshot is already
     // pending, so dropped requests are harmless.
     let (resnapshot_tx, resnapshot_rx) = tokio::sync::mpsc::channel::<std::sync::Arc<str>>(64);
 
@@ -55,7 +55,7 @@ pub async fn run(
     // an unexpected exit (a sink failing, the feed dying, a panic) is detected
     // and turned into a coordinated, non-zero-exit shutdown instead of leaving
     // the pipeline running with a dead component or exiting 0 (task supervision
-    // was previously absent — the #2 audit finding).
+    // was previously absent).
     let mut supervisor = pipeline::Supervisor::new();
 
     let ws_client = pb_feed::WsClient::new(token_ids, raw_tx.clone())?.with_config(ws_config);
@@ -76,7 +76,7 @@ pub async fn run(
     });
 
     // Self-healing worker: on a detected book divergence, fetch a fresh REST
-    // snapshot and re-inject it into the feed (A.74). It reuses the dispatcher's
+    // snapshot and re-inject it into the feed. It reuses the dispatcher's
     // normal snapshot path via the shared raw channel.
     let resnapshot_rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(&settings))?
         .with_config(pipeline::rest_config_from_settings(&settings));
@@ -109,9 +109,9 @@ pub async fn run(
     let wal_sync_interval = std::time::Duration::from_millis(wal_config.sync_interval_ms);
     let wal_base_path = wal_config.base_path.clone();
     // The WAL is the durability backbone: a failure to open it is fatal, not a
-    // "continue without WAL" warning that silently disables durability (A.129).
+    // "continue without WAL" warning that silently disables durability.
     // With --standby, a process started against a WAL already held by an active
-    // writer waits and auto-promotes when that writer exits (P3-HA-1) instead of
+    // writer waits and auto-promotes when that writer exits instead of
     // failing fast on the single-writer flock.
     if standby {
         tracing::info!("standby mode: will wait for the active writer's WAL lock before ingesting");
@@ -164,11 +164,11 @@ pub async fn run(
 
     // Steady-state durability cadence: flush the BufWriter frequently so a
     // tailing serve reader sees records promptly, and fdatasync less often so
-    // the OS-crash data-loss window is bounded to ~one sync interval (A.11/A.29).
+    // the OS-crash data-loss window is bounded to ~one sync interval.
     let mut flush_tick = tokio::time::interval(wal_flush_interval);
     let mut sync_tick = tokio::time::interval(wal_sync_interval);
     // Periodically reclaim WAL segments all consumers have advanced past so disk
-    // usage stays bounded under 24/7 ingest (A.17/A.20/A.47).
+    // usage stays bounded under 24/7 ingest.
     let mut prune_tick = tokio::time::interval(std::time::Duration::from_secs(60));
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -177,7 +177,7 @@ pub async fn run(
     let mut wal_unsynced = false;
     // Monotonic ingest ordinal stamped on every record at this single
     // serialization point, giving replay a total order that respects true
-    // arrival even when per-asset `sequence` resets on snapshots (A.116).
+    // arrival even when per-asset `sequence` resets on snapshots.
     let mut ingest_ordinal: u64 = 0;
     // Set if a supervised background task exits unexpectedly: ingestion cannot
     // safely continue with a dead feed/dispatcher/sink, so we shut down and
@@ -185,7 +185,7 @@ pub async fn run(
     let mut supervision_failure: Option<&'static str> = None;
     // Receive timestamp (µs) of the most recent record, used to publish the feed
     // staleness gauge on the periodic flush tick so it RISES during feed silence
-    // (HFT-review: the gauge was defined + alerted on but never populated, so the
+    // (the gauge was defined and alerted on but never populated, so the
     // FeedStale alert could never fire). 0 until the first record, so a slow
     // startup connect does not report false staleness.
     let mut last_recv_us: u64 = 0;
@@ -205,7 +205,7 @@ pub async fn run(
                 break;
             }
             _ = flush_tick.tick() => {
-                // Sample the event-channel backpressure depth (A.79).
+                // Sample the event-channel backpressure depth.
                 pb_metrics::set_channel_depth("ingest_events", event_rx.len());
                 // Publish feed staleness so the FeedStale alert can fire. Only
                 // once a record has been seen, so startup is not flagged stale.
@@ -226,8 +226,8 @@ pub async fn run(
                     // fdatasync is a blocking syscall (ms-scale, worse on busy
                     // disks/EFS). block_in_place tells the multi-threaded runtime to
                     // relocate other tasks off this worker for the syscall's
-                    // duration so it does not tie up a runtime thread (HFT-review
-                    // #8). The single-writer flock invariant is preserved — the
+                    // duration so it does not tie up a runtime thread.
+                    // The single-writer flock invariant is preserved — the
                     // writer is still owned solely by this task.
                     tokio::task::block_in_place(|| wal_writer.sync())
                         .map_err(|e| anyhow::anyhow!("WAL sync failed: {e}"))?;
@@ -240,7 +240,7 @@ pub async fn run(
                 let consumers = pipeline::wal_consumer_position_files(&wal_base_path);
                 // prune does read_dir + per-segment metadata + remove_file (blocking
                 // FS syscalls); run it via block_in_place so it does not stall the
-                // runtime worker (HFT-review #9).
+                // runtime worker.
                 if let Err(e) =
                     tokio::task::block_in_place(|| wal_writer.prune_with_backpressure(&consumers))
                 {
@@ -261,15 +261,15 @@ pub async fn run(
             last_recv_us = last_recv_us.max(recv);
         }
         // Stamp the monotonic ingest ordinal before persistence so replay can
-        // order same-microsecond events by true arrival (A.116).
+        // order same-microsecond events by true arrival.
         if let Some(prov) = event.provenance_mut() {
             prov.ingest_ordinal = Some(ingest_ordinal);
             ingest_ordinal += 1;
         }
         // Stamp the WAL offset onto checkpoints just before they are written, so
         // a serve cold start can resume WAL tailing from the checkpoint instead
-        // of replaying the entire retained WAL (A.13/A.52 — checkpoints were
-        // always persisted with wal_offset = NULL).
+        // of replaying the entire retained WAL
+        // (older checkpoints were always persisted with wal_offset = NULL).
         if let pb_types::PersistedRecord::Checkpoint(ref mut checkpoint) = event {
             checkpoint.wal_offset = Some(wal_writer.global_offset());
         }
@@ -284,7 +284,7 @@ pub async fn run(
                 }
                 wal_unflushed = true;
                 wal_unsynced = true;
-                // Record end-to-end recv→durable(WAL append) latency (A.113).
+                // Record end-to-end recv→durable(WAL append) latency.
                 if let Some(recv) = event.recv_timestamp_us() {
                     if recv > 0 {
                         pb_metrics::record_recv_to_durable_us(now_micros().saturating_sub(recv));
@@ -302,7 +302,7 @@ pub async fn run(
     }
 
     // Drain events still buffered in the channel at shutdown so a graceful stop
-    // does not discard records the dispatcher already produced (A.44/A.97). The
+    // does not discard records the dispatcher already produced. The
     // feed and dispatcher share the shutdown token and are stopping, so this
     // drains the backlog rather than waiting for new events.
     // try_recv returns Err (Empty or Disconnected) once the backlog is drained,

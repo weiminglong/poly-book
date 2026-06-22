@@ -348,7 +348,7 @@ async fn writer_different_content_same_timestamp_does_not_overwrite() {
 
     // Two book events at the same timestamp (so same asset/hour/first_ts) but
     // different content must produce two distinct files, not silently overwrite
-    // each other (A.122).
+    // each other.
     let mut ev_a = make_book_event(FIXED_TS_US);
     ev_a.price = FixedPrice::new(5000).unwrap();
     let mut ev_b = make_book_event(FIXED_TS_US);
@@ -418,7 +418,7 @@ fn partition_hour_key_formats_valid_timestamp() {
 #[test]
 fn partition_hour_key_quarantines_out_of_range_timestamps() {
     // Zero / unstamped and absurd far-future values must NOT silently land in the
-    // 1970 partition (A.123) — they go to a dedicated quarantine partition.
+    // 1970 partition — they go to a dedicated quarantine partition.
     assert_eq!(crate::writer::partition_hour_key(0), "invalid_timestamp");
     assert_eq!(crate::writer::partition_hour_key(1), "invalid_timestamp");
     assert_eq!(
@@ -554,7 +554,7 @@ async fn reconcile_replaces_hour_partitions_idempotently() {
     }
 
     // Two separate live flushes for the same (asset, hour) produce two files
-    // that, read together, would double-count the window (the A.27 hazard).
+    // that, read together, would double-count the window (the double-count hazard).
     let r1 = PersistedRecord::Book(make_book_event(FIXED_TS_US));
     let r2 = PersistedRecord::Book(make_book_event(FIXED_TS_US + 1_000_000));
     writer.write_record(r1.clone()).await.unwrap();
@@ -784,7 +784,7 @@ async fn parquet_sink_flushes_on_cancellation() {
 #[tokio::test]
 async fn parquet_sink_drains_queued_records_on_shutdown() {
     // Records sitting in the channel when shutdown is requested must be drained
-    // and flushed, not abandoned (audit finding A.153).
+    // and flushed, not abandoned.
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);
     let (tx, rx) = mpsc::channel::<PersistedRecord>(32);

@@ -35,7 +35,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: ./.github/actions/setup-protobuf
       - run: cargo test --workspace --exclude pb-integration-tests
-      # Integration suite (A.135). The ClickHouse-backed cases are #[ignore]d and
+      # Integration suite. The ClickHouse-backed cases are #[ignore]d and
       # skipped here; the Parquet/hydration/replay roundtrips run.
       - run: cargo test -p pb-integration-tests
 
@@ -82,8 +82,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       # Validate the Prometheus alert rules parse (PromQL + structure) and that a
       # simulated incident fires each alert (offline rule unit tests). Catches
-      # alert-rule rot without needing a live Prometheus/Alertmanager (audit
-      # P3-MON-1).
+      # alert-rule rot without needing a live Prometheus/Alertmanager.
       - name: Install promtool
         env:
           PROM_VERSION: "3.1.0"
@@ -98,7 +97,7 @@ jobs:
         run: promtool test rules monitoring/alerts_test.yml
       # Validate the Alertmanager ROUTING config (where alerts page) the same way:
       # structure check + assert each severity routes to its intended receiver, so
-      # the routing cannot drift from the alert rules' severity labels (P3-MON-1).
+      # the routing cannot drift from the alert rules' severity labels.
       - name: Install amtool
         env:
           AM_VERSION: "0.28.1"
@@ -205,11 +204,11 @@ jobs:
         run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
       - name: Fuzz book delta (30s)
         run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
-      # Re-enabled after the query-guard hardening (A.89/P2-SEC-1): identifier
+      # Re-enabled after the query-guard hardening: identifier
       # blocklist + server-side readonly/limit enforcement.
       - name: Fuzz query guard (30s)
         run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
-      # The deserialization-path targets (audit P2-CI-1): a malformed WS frame or
+      # The deserialization-path targets: a malformed WS frame or
       # WAL codec frame must error, never panic the ingest/replay process.
       - name: Fuzz WS deserialization (30s)
         run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
@@ -229,7 +228,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: ./.github/actions/setup-protobuf
       # Compile the release profile (panic=abort, overflow-checks, LTO) so
-      # release-only breakage surfaces in CI, not at deploy time (A.35/A.90).
+      # release-only breakage surfaces in CI, not at deploy time.
       - run: cargo build --release --bin poly-book
 
   docker-build:
@@ -237,7 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      # Verify the production image actually builds (A.2/A.55/A.90).
+      # Verify the production image actually builds.
       - run: docker build -t poly-book:ci .
 
   miri:

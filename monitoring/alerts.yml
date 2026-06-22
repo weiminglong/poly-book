@@ -1,4 +1,4 @@
-# Prometheus alerting rules for poly-book (audit findings P2-OBS-1 / P3-MON-1).
+# Prometheus alerting rules for poly-book.
 #
 # Load via prometheus.yml:
 #   rule_files:
@@ -7,7 +7,7 @@
 #
 # Every alert references a RUNBOOK.md section so on-call has an immediate action.
 # `for:` durations are short (seconds) for the data-loss-class alerts so paging is
-# second-scale, per the P3-MON-1 requirement.
+# second-scale.
 groups:
   - name: poly-book-data-loss
     rules:

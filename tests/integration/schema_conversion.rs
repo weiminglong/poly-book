@@ -75,7 +75,7 @@ fn sample_records() -> Vec<PersistedRecord> {
 fn split_schemas_have_expected_fields() {
     let book_schema = book_event_schema();
     // 12 fields: the 11 original columns plus `ingest_ordinal`, the monotonic
-    // arrival-order tiebreaker added for replay determinism (A.116).
+    // arrival-order tiebreaker added for replay determinism.
     assert_eq!(book_schema.fields().len(), 12);
     assert!(book_schema.field_with_name("event_kind").is_ok());
     assert!(book_schema.field_with_name("source").is_ok());

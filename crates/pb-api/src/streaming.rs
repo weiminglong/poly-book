@@ -20,14 +20,14 @@ use crate::server::AppState;
 /// can't keep up and the buffer needs raising.
 const BROADCAST_CAPACITY: usize = 256;
 /// Max concurrent WebSocket sessions across all assets; excess upgrades are
-/// rejected with 503 so a fan-out flood cannot exhaust memory/sockets (A.94).
+/// rejected with 503 so a fan-out flood cannot exhaust memory/sockets.
 const MAX_WS_CONNECTIONS: usize = 512;
 /// Cap inbound WS message/frame size. This is a read-only stream; clients only
 /// ever send ping/close, so a small limit is safe and replaces the ~64 MB
-/// default (A.94).
+/// default.
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Server ping cadence and the idle deadline after which a session with no
-/// client traffic (pong/message) is closed, reaping half-open peers (A.94).
+/// client traffic (pong/message) is closed, reaping half-open peers.
 const WS_PING_INTERVAL: Duration = Duration::from_secs(20);
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -144,7 +144,7 @@ pub async fn ws_orderbook(
     // the read model), so `subscribe` returning None *is* "not active". Doing this
     // in one lock acquisition removes the prior TOCTOU where a rotation between a
     // separate is_asset_active check and the subscribe produced a spurious 503
-    // (HFT-review #3).
+    //.
     let rx = broadcast
         .subscribe(&asset_id)
         .ok_or_else(|| ApiError::NotFound(format!("asset not active: {raw_asset_id}")))?;
@@ -184,7 +184,7 @@ async fn handle_ws_session(
     _permit: OwnedSemaphorePermit,
 ) {
     // Send the initial full snapshot. Handle the two failure modes distinctly
-    // instead of silently entering the loop (HFT-review finding):
+    // instead of silently entering the loop:
     //   * AssetNotActive  -> the asset will never produce updates; close now
     //     rather than hold a connection slot until the idle timeout.
     //   * SnapshotNotReady -> a startup race; retry briefly. If still not ready,
@@ -264,7 +264,7 @@ async fn handle_ws_session(
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         // A subscriber that fell behind the broadcast buffer is a
                         // backpressure signal operators need to measure, not just a
-                        // log line (HFT-review finding: was warn-only/unmetered).
+                        // log line (was previously warn-only and unmetered).
                         pb_metrics::record_ws_broadcast_lagged();
                         warn!(asset_id, skipped, "ws subscriber lagged, sending resync snapshot");
                         if let Ok(snapshot) = live.snapshot(&asset_id, depth, stale_after_secs).await {

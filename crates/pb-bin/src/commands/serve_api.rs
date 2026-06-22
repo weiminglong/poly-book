@@ -36,7 +36,7 @@ pub async fn run(
         .parse()?;
     let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
     // Clamp default_depth to max_depth: a default above the max would request more
-    // levels than any query is allowed to return (HFT-review: config invariant).
+    // levels than any query is allowed to return (a config invariant).
     let default_depth =
         (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
     let stale_after_secs = settings
@@ -122,7 +122,7 @@ pub async fn run(
                 pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
                 1,
             ) as u64,
-            // Optional bearer-token auth (A.158/P2-SEC-2); empty/unset = open.
+            // Optional bearer-token auth; empty/unset = open.
             auth_token: settings
                 .get_string("api.auth_token")
                 .ok()

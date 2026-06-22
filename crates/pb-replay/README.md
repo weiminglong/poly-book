@@ -56,15 +56,15 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 - For integrity summaries, `ClickHouseReader::read_integrity_aggregates` pushes the
   heavy counts to the server (`count()` on `book_events`, `count()`/`countIf(matched)`
   on `replay_validations`) and `read_ingest_events` fetches only the bounded ingest
-  list. This avoids streaming every book/trade row back just to call `.len()` on it
-  (audit A.42); the two aggregate queries run concurrently via `try_join!`. The
+  list. This avoids streaming every book/trade row back just to call `.len()` on
+  it; the two aggregate queries run concurrently via `try_join!`. The
   returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
   `validation_match_count`.
 - Unbounded ClickHouse reads (`read_ingest_events`, `read_execution_events`) go
   through `bounded_client()`, which sets `max_result_rows = MAX_READ_ROWS` (5M) +
   `result_overflow_mode = 'throw'`, so a pathological window ERRORS loudly instead
-  of materializing millions of rows and OOM-ing the serve process (HFT-review
-  finding). Verified against a live server (TOO_MANY_ROWS_OR_BYTES on overflow).
+  of materializing millions of rows and OOM-ing the serve process. Verified
+  against a live server (TOO_MANY_ROWS_OR_BYTES on overflow).
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
@@ -78,20 +78,20 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   arrival-order tiebreaker stamped at ingest), then `sequence`, then content
   tiebreakers (side, price, size, source event id). Parquet files are read
   concurrently and may arrive out of order (`buffer_unordered`), so this total
-  order is what makes two replays of the same window byte-identical (A.117).
+  order is what makes two replays of the same window byte-identical.
   Because `ingest_ordinal` is monotonic in true arrival order (unlike `sequence`,
   which resets to 0 on each snapshot), a same-microsecond *pre-snapshot* delta
-  now sorts before its snapshot (A.116). Legacy rows without an ordinal fall back
+  now sorts before its snapshot. Legacy rows without an ordinal fall back
   to `sequence` + content tiebreakers.
 - Replay never mutates live observability: a sequence gap found during
   reconstruction is recorded in the returned continuity events, not pushed to the
-  live `pb_gaps_detected_total` recorder (A.152).
+  live `pb_gaps_detected_total` recorder.
 - **Single clock domain at the checkpoint boundary**: `checkpoint_timestamp_us`
   is an exchange-clock value, so the post-checkpoint cutoff projects the
   checkpoint into the active replay clock (`checkpoint_ordering_ts`) before
   comparing it against events — in RecvTime mode it uses the checkpoint's recv
   timestamp. Without this, recv-vs-exchange skew could skip or double-apply deltas
-  straddling the boundary (audit P1-REPLAY-2).
+  straddling the boundary.
 
 ## Docs to Update After Changes
 

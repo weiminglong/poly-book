@@ -5,7 +5,7 @@
 # where each firing alert is delivered, how it is grouped/throttled, and how a
 # critical alert suppresses redundant lower-severity noise. It is validated
 # offline in CI with `amtool check-config` + `amtool config routes test`
-# (audit P3-MON-1) so the routing cannot rot; only the live PagerDuty/Slack
+# so the routing cannot rot; only the live PagerDuty/Slack
 # integration secrets and a running Alertmanager remain environment-specific.
 #
 # Secrets are NEVER committed: PagerDuty routing keys and the Slack webhook are

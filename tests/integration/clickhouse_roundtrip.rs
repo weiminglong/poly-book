@@ -210,7 +210,7 @@ async fn clickhouse_rewriting_identical_batch_is_deduplicated() {
     // Re-inserting the identical batch (an operator retry, or a partial-failure
     // re-send) must NOT double-count rows — the at-least-once-without-duplicates
     // property from the dedup token + non_replicated_deduplication_window
-    // (A.60/A.124). Verified against a real ClickHouse server.
+    //. Verified against a real ClickHouse server.
     let (_container, client, _url, _db_name) = setup_clickhouse().await;
     let base_ts = 1_700_000_000_000_000;
     let asset_id = AssetId::new("clickhouse-dedup");
@@ -298,7 +298,7 @@ async fn clickhouse_checkpoint_and_validation_roundtrip() {
 #[tokio::test]
 #[ignore]
 async fn clickhouse_integrity_summary_counts_server_side() {
-    // Audit A.42: the integrity summary must compute book-event and validation
+    // The integrity summary must compute book-event and validation
     // counts with server-side count()/countIf() rather than streaming every row
     // back to count it client-side. This asserts the server-side aggregate
     // reader and the full summary path agree with directly-counted rows.

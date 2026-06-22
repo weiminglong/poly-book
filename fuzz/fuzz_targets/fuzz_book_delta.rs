@@ -117,7 +117,7 @@ fuzz_target!(|input: FuzzInput| {
         // check_integrity must agree with the raw best_bid/best_ask comparison
         // after every delta: it reports an error exactly when the book is
         // crossed (best_bid >= best_ask). Exercises the detector against
-        // adversarial delta sequences (audit finding A.159).
+        // adversarial delta sequences.
         let crossed = match (book.best_bid(), book.best_ask()) {
             (Some((b, _)), Some((a, _))) => b >= a,
             _ => false,

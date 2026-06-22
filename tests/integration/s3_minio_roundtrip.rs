@@ -1,6 +1,6 @@
 //! End-to-end persistence test against an S3-compatible object store (MinIO).
 //!
-//! This proves the audit P1-INFRA-1 / A.1 fix actually works against a real S3
+//! This proves the S3 object-store wiring works against a real S3
 //! API, not just that an `AmazonS3` type is constructed: an `s3://` base path is
 //! resolved with `object_store::parse_url_opts(url, std::env::vars())` (the same
 //! call `pb_bin::commands::pipeline::build_object_store` makes), the production
@@ -141,7 +141,7 @@ async fn s3_base_path_persists_parquet_and_survives_restart() {
     drop(tx);
     sink_handle.await.unwrap();
 
-    // The s3:// path must NOT have created a local directory named `s3:` (A.1).
+    // The s3:// path must NOT have created a local directory named `s3:`.
     assert!(
         !cwd_before.join("s3:").exists(),
         "an s3:// base path must never create a local s3: directory"

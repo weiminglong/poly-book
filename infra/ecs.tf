@@ -16,8 +16,8 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
 
   # A Spot reclaim must not drop capture. Keep a base of on-demand (FARGATE)
   # tasks always running, and only use FARGATE_SPOT for additional capacity above
-  # the base (audit P2-INFRA-1: a single FARGATE_SPOT task meant every routine
-  # Spot reclaim was a capture gap).
+  # the base (a single FARGATE_SPOT task would make every routine Spot reclaim a
+  # capture gap).
   default_capacity_provider_strategy {
     capacity_provider = "FARGATE"
     base              = var.ingest_on_demand_base
@@ -46,7 +46,7 @@ resource "aws_ecs_task_definition" "app" {
       # revision pinned to an immutable image digest (repo@sha256:...) via
       # .github/workflows/deploy.yml, and the service below ignores
       # task_definition changes, so the running task tracks the deploy-pinned
-      # digest and never resolves the mutable :latest tag at runtime (audit A.51).
+      # digest and never resolves the mutable :latest tag at runtime.
       image     = "${aws_ecr_repository.app.repository_url}:latest"
       essential = true
 
@@ -141,7 +141,7 @@ resource "aws_ecs_service" "app" {
 
   # Auto-roll-back a deployment whose new tasks fail to start/stabilize, instead
   # of leaving the service stuck on a broken task definition with no operator
-  # signal (audit finding P2-INFRA-1: no deployment circuit breaker).
+  # signal (no deployment circuit breaker).
   deployment_circuit_breaker {
     enable   = true
     rollback = true

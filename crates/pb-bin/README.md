@@ -9,7 +9,7 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover, P3-HA-1). |
+| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
 | `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
 | `replay` | Reconstruct historical orderbook state at a specific timestamp. |
 | `execution-replay` | Replay stored execution history independently of market-data replay. |
@@ -59,7 +59,7 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
 - **WAL→storage reconciliation**: `reconcile` reads the durable WAL and rebuilds
   the Parquet partitions it covers via `ParquetRecordWriter::write_batch_replacing`
   (per-`(dataset, asset, hour)` delete-then-write), so a storage window lost when
-  a crash dropped the in-memory Parquet buffer is recoverable from the WAL (A.27).
+  a crash dropped the in-memory Parquet buffer is recoverable from the WAL.
   Run it offline (ingest stopped); it is idempotent.
 
 ## Docs to Update After Changes

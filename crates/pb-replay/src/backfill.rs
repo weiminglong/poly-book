@@ -150,7 +150,7 @@ pub async fn fetch_snapshot(
 ) -> Result<RestBookResponse, ReplayError> {
     // Build the URL via parse_with_params (percent-encodes token_id so it cannot
     // inject extra query params), and keep only the base endpoint in error context
-    // rather than a full URL embedding the raw id (HFT-review #11 defense-in-depth).
+    // rather than a full URL embedding the raw id (defense-in-depth).
     let endpoint = format!("{}/book", base_url);
     let url =
         reqwest::Url::parse_with_params(&endpoint, &[("token_id", token_id)]).map_err(|e| {
@@ -193,7 +193,7 @@ fn parse_size(s: &str) -> Result<FixedSize, pb_types::TypesError> {
 
 /// Parse a snapshot timestamp into microseconds via the single shared converter,
 /// so backfill and the dispatcher agree on every resolution and the zero case
-/// (audit findings A.119/A.147).
+///.
 fn parse_timestamp_us(ts: Option<&str>) -> Option<u64> {
     pb_types::time::parse_to_micros(ts)
 }

@@ -62,7 +62,7 @@ const EXPECTED_PARQUET_SCHEMA_VERSION: &str = "2";
 
 /// Validate a Parquet file's `pb_schema_version`. A pre-split (unversioned) or
 /// future-versioned file is a typed error rather than a silent empty/mis-mapped
-/// read (audit findings P1-TEST-1 / A.137).
+/// read.
 fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
     match version {
         Some(v) if v == EXPECTED_PARQUET_SCHEMA_VERSION => Ok(()),
@@ -81,8 +81,7 @@ const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
 /// Hard backstop on rows returned by a single unbounded ClickHouse read
 /// (ingest/execution events). Applied via `max_result_rows` +
 /// `result_overflow_mode = 'throw'` so a pathological window ERRORS loudly
-/// instead of silently truncating or OOM-ing the serve process (HFT-review
-/// finding). Far above any legitimate window's row count.
+/// instead of silently truncating or OOM-ing the serve process. Far above any legitimate window's row count.
 const MAX_READ_ROWS: u64 = 5_000_000;
 
 impl ParquetReader {
@@ -179,7 +178,7 @@ impl ParquetReader {
         let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
 
         // Reject an incompatible on-disk layout instead of silently yielding
-        // empty or mis-mapped rows (audit findings P1-TEST-1 / A.137).
+        // empty or mis-mapped rows.
         check_schema_version(
             builder
                 .schema()
@@ -216,7 +215,7 @@ impl ParquetReader {
         // Files are read concurrently and may complete out of order. This is safe
         // for determinism because the replay engine sorts the merged events into a
         // total order (engine::sort_book_events) before applying them, so the
-        // unordered read order cannot affect reconstruction output (A.117).
+        // unordered read order cannot affect reconstruction output.
         let batches = stream::iter(paths.into_iter().map(|path| {
             let extractor = extractor.clone();
             async move { self.read_parquet_file(&path, extractor).await }
@@ -412,9 +411,9 @@ fn extract_book_events(
         .column_by_name("source_session_id")
         .ok_or_else(|| ReplayError::Other("missing source_session_id column".into()))?
         .as_string::<i32>();
-    // Optional for backward compatibility: Parquet files written before A.116 do
+    // Optional for backward compatibility: Parquet files written before the column existed do
     // not have this column. When absent, ingest_ordinal stays None and replay
-    // falls back to the sequence/content tiebreakers (A.117).
+    // falls back to the sequence/content tiebreakers.
     let ingest_ordinal_col = batch
         .column_by_name("ingest_ordinal")
         .map(|c| c.as_primitive::<UInt64Type>());
@@ -1087,7 +1086,7 @@ impl EventReader for ParquetReader {
             .await?;
         // Deterministic tie-break matching the ClickHouse reader's
         // `ORDER BY event_timestamp_us, order_id, event_kind`, so equal-timestamp
-        // events are stable and the two backends agree (audit finding A.63).
+        // events are stable and the two backends agree.
         events.sort_by(|a, b| {
             a.event_timestamp_us
                 .cmp(&b.event_timestamp_us)
@@ -1105,8 +1104,8 @@ pub struct ClickHouseReader {
 /// Server-side aggregate counts for an integrity summary window.
 ///
 /// These are computed with ClickHouse `count()`/`countIf()` so the summary never
-/// transfers full book/trade rows over the wire just to count them (audit A.42 /
-/// `query-mv-incremental`).
+/// transfers full book/trade rows over the wire just to count them
+/// (see `query-mv-incremental`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IntegrityAggregates {
     pub book_event_count: u64,
@@ -1124,7 +1123,7 @@ impl ClickHouseReader {
 
     /// A client clone that caps the result set at `MAX_READ_ROWS` and throws on
     /// overflow, so an unbounded read errors loudly instead of materializing
-    /// millions of rows and OOM-ing the serve process (HFT-review finding).
+    /// millions of rows and OOM-ing the serve process.
     fn bounded_client(&self) -> clickhouse::Client {
         self.client
             .clone()
@@ -1556,7 +1555,7 @@ impl EventReader for ClickHouseReader {
     ) -> Result<Vec<ExecutionEvent>, ReplayError> {
         let base_query = "SELECT event_timestamp_us, asset_id, order_id, client_order_id, venue_order_id, event_kind, side, price, size, status, reason, latency_json FROM execution_events WHERE event_timestamp_us >= ? AND event_timestamp_us <= ?";
         // Deterministic tie-break (event_timestamp_us, order_id, event_kind) so
-        // equal-timestamp events are stable and match the Parquet reader (A.63).
+        // equal-timestamp events are stable and match the Parquet reader.
         let query = if order_id.is_some() {
             format!(
                 "{base_query} AND order_id = ? ORDER BY event_timestamp_us, order_id, event_kind"

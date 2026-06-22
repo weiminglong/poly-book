@@ -33,7 +33,7 @@ impl IntoResponse for ApiError {
         // Client-facing message. For 4xx the message is a validation hint and is
         // safe to return; for 5xx the internal detail (ClickHouse URLs, storage
         // errors, etc.) must NOT leak to unauthenticated clients, so it is
-        // logged server-side and replaced with an opaque message (A.95).
+        // logged server-side and replaced with an opaque message.
         let (status, client_message) = match &self {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),

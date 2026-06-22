@@ -56,7 +56,7 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
         /// Start as a hot standby: wait for the active writer's WAL lock and
-        /// auto-promote when it is released (writer failover; audit P3-HA-1).
+        /// auto-promote when it is released (writer failover).
         #[arg(long, default_value_t = false)]
         standby: bool,
     },
@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
     // Load config first so we can use logging settings. An explicitly-passed
     // config path that does not exist is a hard error — silently falling back to
     // all-defaults (the old `required(false)` behavior) hides misconfiguration
-    // in production (audit finding A.102). The repo default path is allowed to be
+    // in production. The repo default path is allowed to be
     // absent so the binary still runs from an arbitrary CWD.
     const DEFAULT_CONFIG_PATH: &str = "config/default.toml";
     let config_is_default = cli.config == DEFAULT_CONFIG_PATH;
@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
         Some(level) => EnvFilter::new(&level),
     };
     // Honor `logging.format = "json"` so structured logging is actually possible
-    // (previously the key was dead config — audit finding A.87).
+    // (previously the key was dead config).
     let log_format = settings
         .get_string("logging.format")
         .unwrap_or_else(|_| "text".to_string());
@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
 
     // Surface typo'd / removed config keys now that tracing is up, so a silently
     // ignored setting is visible instead of leaving the operator's intent lost
-    // (audit/HFT-review #9).
+    //.
     config_validation::warn_unknown_config_keys(&settings);
 
     // Create shared slug registry
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     // Register the SIGTERM handler synchronously BEFORE spawning, so a failed
     // registration is a clean startup error (non-zero exit) rather than a panic
     // buried in a detached task that would silently break all shutdown signaling
-    // (HFT-review). The registered Signal is then moved into the listener task.
+    //. The registered Signal is then moved into the listener task.
     #[cfg(unix)]
     let mut sigterm = {
         use tokio::signal::unix::{signal, SignalKind};
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn ingest_toggles_can_be_disabled_and_presence_still_enables() {
-        // Default-true toggles must be disable-able with `=false` (A.103), while a
+        // Default-true toggles must be disable-able with `=false`, while a
         // bare `--clickhouse` still enables via default_missing_value.
         let cli = Cli::try_parse_from([
             "poly-book",

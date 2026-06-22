@@ -35,9 +35,9 @@ pub async fn run(
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
 
     // Start Parquet sink for backfilled data. build_object_store canonicalizes a
-    // local base path (fixing the relative-path bug A.28 where the raw "./data"
+    // local base path (fixing a relative-path bug where the raw "./data"
     // was percent-encoded by object_store and every flush failed) and wires an
-    // s3:// path to a real S3 store (A.1).
+    // s3:// path to a real S3 store.
     let configured = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());

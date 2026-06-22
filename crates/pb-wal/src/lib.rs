@@ -208,7 +208,7 @@ mod tests {
     /// appends a *shorter* real record, reload and surface the new record — not
     /// stay stuck on the stale cache. Before the fix, `top_up` treated
     /// `file_len <= prev_len` as "nothing new" and the reader never saw the
-    /// post-recovery data (review-pass-6).
+    /// post-recovery data.
     #[test]
     fn reader_reloads_after_torn_tail_truncation_to_shorter_segment() {
         let dir = tempfile::tempdir().unwrap();
@@ -515,7 +515,7 @@ mod tests {
             // Hard cap of 3 total segments.
             max_segments: 3,
             // Lag window large enough that the byte budget alone would retain
-            // everything — only the count cap should force pruning (A.20).
+            // everything — only the count cap should force pruning.
             max_consumer_lag_bytes: 1024 * 1024,
             position_commit_interval_ms: 1_000,
             flush_interval_ms: 20,
@@ -725,7 +725,7 @@ mod tests {
         };
         let _writer = WalWriter::open(config.clone()).unwrap();
         // A second concurrent writer on the same directory must be rejected
-        // rather than interleaving appends and corrupting the WAL (A.128).
+        // rather than interleaving appends and corrupting the WAL.
         let err = WalWriter::open(config).unwrap_err();
         assert!(matches!(err, WalError::WriterLocked { .. }), "got {err:?}");
     }
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn standby_writer_takes_over_shared_wal_after_primary_exit() {
-        // Writer-failover mechanism (audit P3-HA-1 / A.78): the flock makes a
+        // Writer-failover mechanism: the flock makes a
         // standby ingest writer fail fast while the primary is alive, and lets it
         // take over the *same* WAL after the primary exits — reading everything
         // the primary durably wrote (no data loss across the handoff) and
@@ -808,7 +808,7 @@ mod tests {
     /// acquired the WAL lease, recovered the tail, resumed appends, and re-read
     /// the full history". This is the part the CODE controls; the full deployment
     /// RTO additionally includes container scheduling + health-check time, which
-    /// needs a real cluster to measure (audit P3-HA-1). Run on the target
+    /// needs a real cluster to measure. Run on the target
     /// hardware via `just failover-drill` to get a baseline. `#[ignore]`d so it
     /// never gates CI on machine-dependent timing; asserts only correctness.
     #[test]
@@ -1266,7 +1266,7 @@ mod tests {
         // write that never got the "segment:offset" colon. Pruning must treat this
         // conservatively (keep every segment), exactly like a missing file. The
         // old code silently skipped it, leaving min_seg=u64::MAX so prune deleted
-        // every non-active segment the consumer still needed (review-pass-6).
+        // every non-active segment the consumer still needed.
         let pos = dir.path().join("consumer_corrupt.pos");
         std::fs::write(&pos, b"5").unwrap();
 

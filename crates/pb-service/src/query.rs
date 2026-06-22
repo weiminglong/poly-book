@@ -58,7 +58,7 @@ const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "
 /// file-read primitive (`file`, `url`, `s3`, `remote`, ...) — plus the `system`
 /// database (credential/metadata disclosure) and the file-exfiltration clauses
 /// (`INTO OUTFILE`, `SETTINGS`). A SELECT-rooted query with no write keyword
-/// otherwise reaches all of these (audit findings A.24/A.130). This blocklist
+/// otherwise reaches all of these. This blocklist
 /// is defense-in-depth alongside the server-side `readonly=2` enforcement.
 const FORBIDDEN_IDENTIFIERS: &[&str] = &[
     // I/O table functions.
@@ -408,8 +408,8 @@ impl QueryService for ClickHouseQueryService {
         // carries `?database=...`):
         //  - readonly=2 forbids any write/DDL and cannot be downgraded mid-query;
         //  - max_result_rows + result_overflow_mode=break cap returned rows
-        //    regardless of any LIMIT the user did or didn't write (A.83/A.120);
-        //  - max_execution_time bounds server-side runtime (A.121).
+        //    regardless of any LIMIT the user did or didn't write;
+        //  - max_execution_time bounds server-side runtime.
         let url = format!(
             "{}&readonly=2&max_result_rows={}&result_overflow_mode=break\
              &max_execution_time={}&cancel_http_readonly_queries_on_client_close=1",
@@ -420,7 +420,7 @@ impl QueryService for ClickHouseQueryService {
         let request = self.client.post(&url).body(guarded_sql);
 
         // Wrap send AND body download in one timeout, so a slow body stream
-        // can't bypass the deadline by trickling after headers arrive (A.121).
+        // can't bypass the deadline by trickling after headers arrive.
         let exec = async {
             let resp = request
                 .send()
@@ -467,7 +467,7 @@ impl QueryService for ClickHouseQueryService {
         // Escape the database name for a single-quoted ClickHouse string literal.
         // It comes from config (PB__STORAGE__CLICKHOUSE_DATABASE), not request
         // input, but interpolating it raw would let a compromised/malformed config
-        // value inject SQL here — defense-in-depth (HFT-review finding).
+        // value inject SQL here — defense-in-depth.
         let escaped_db = escape_ch_string_literal(&self.database);
         let sql = format!(
             "SELECT table_name, column_name, data_type \
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn guard_rejects_io_table_functions_and_system() {
         // SELECT-rooted SSRF / file-read / info-disclosure attempts must all be
-        // rejected by the identifier blocklist (A.24/A.130).
+        // rejected by the identifier blocklist.
         let guard = QueryGuard::default();
         let attacks = [
             "SELECT * FROM file('/etc/passwd', 'CSV')",

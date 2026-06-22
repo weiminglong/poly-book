@@ -14,12 +14,12 @@ defensible choice — fail-stop is preferable to a process limping on in a
 partially-broken state with a dead component silently dropping data. But it was
 previously undocumented, and the profile also set `strip = "symbols"` with no
 debug info, so a production abort emitted an unsymbolizable backtrace of raw
-addresses (audit finding A.35). A system whose bar is "correctness under every
+addresses. A system whose bar is "correctness under every
 failure mode" must be able to diagnose the failures it does fail-stop on.
 
 The native-CPU build flags that were checked into `.cargo/config.toml`
 (`target-cpu=native`) are removed for the same family of reasons — see ADR
-context in `.cargo/config.toml` and audit finding A.34.
+context in `.cargo/config.toml`.
 
 ## Decision
 - Keep `panic = "abort"` in `[profile.release]` as the intended fail-stop
@@ -34,7 +34,7 @@ context in `.cargo/config.toml` and audit finding A.34.
   source locations, at the cost of a larger binary (line tables are far smaller
   than full DWARF, so the increase is modest).
 - **Failure semantics divergence remains**: tests/CI run with unwinding, release
-  aborts. Mitigate by building `--release` in CI (see audit P2-CI-1) so
+  aborts. Mitigate by building `--release` in CI so
   release-only breakage surfaces before deploy, and by supervising the process so
   an abort is restarted.
 - **Reproducibility**: with `target-cpu=native` removed, release builds are
