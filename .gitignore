@@ -40,3 +40,8 @@ infra/terraform.tfvars
 perf.data
 perf.data.old
 flamegraph.svg
+
+# Ad-hoc compiled binaries: throwaway executables built at the repo root for
+# manual experiments (e.g. `rustc x.rs -o test_overflow`) must never be tracked.
+/test_overflow
+/verify
