@@ -311,6 +311,8 @@ Guard rails:
 - Dangling `FROM`, `JOIN`, and `DESCRIBE` table references return 400 before
   `LIMIT` normalization
 - `LIMIT` is injected if not present
+- The normalized SQL must itself pass the guard and remain stable across
+  repeated normalization
 - Queries time out after `api.query_timeout_secs` (default 30s)
 
 Response:

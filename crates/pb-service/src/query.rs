@@ -553,7 +553,16 @@ pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> 
     validate_read_only(sql)?;
     let upper = sanitize_sql(sql).sql.to_uppercase();
     validate_dataset_scope(upper.trim())?;
-    Ok(inject_limit(sql, guard.max_rows))
+    let guarded_sql = inject_limit(sql, guard.max_rows);
+    validate_read_only(&guarded_sql)?;
+    let guarded_upper = sanitize_sql(&guarded_sql).sql.to_uppercase();
+    validate_dataset_scope(guarded_upper.trim())?;
+    if inject_limit(&guarded_sql, guard.max_rows) != guarded_sql {
+        return Err(ServiceError::InvalidParams(
+            "SQL normalization is not stable".to_string(),
+        ));
+    }
+    Ok(guarded_sql)
 }
 
 /// Inject LIMIT clause if not present and max_rows is set.
@@ -1103,6 +1112,21 @@ mod tests {
                 assert!(
                     msg.contains("statement type is not allowed")
                         || msg.contains("SQL must not be empty"),
+                    "unexpected error: {msg}"
+                );
+            }
+            _ => panic!("expected InvalidParams"),
+        }
+    }
+
+    #[test]
+    fn guard_rejects_unstable_quoted_identifier_normalization() {
+        let guard = QueryGuard::default();
+        let err = guard_sql("\"\"\"\"WITH\"k;;;;; ;2\"k\"\"\"WITH\"k;", &guard).unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(
+                    msg.contains("unclosed") || msg.contains("normalization is not stable"),
                     "unexpected error: {msg}"
                 );
             }

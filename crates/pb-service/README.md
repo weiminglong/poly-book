@@ -84,7 +84,8 @@ pb-service trait method
   string literals before keyword checks, ignores quoted identifiers when
   identifying the statement root or write keywords, preserves quoted identifier
   tokens for blocklist checks, injects `LIMIT` if missing, and applies a
-  configurable timeout.
+  configurable timeout. The normalized SQL must itself pass the guard and remain
+  stable across repeated normalization.
 - `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
   targets exercise the same sanitizer and normalization path the runtime uses.
 - The guard rejects an identifier blocklist of I/O table functions (`file`,
