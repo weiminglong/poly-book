@@ -212,7 +212,7 @@ impl ParquetRecordWriter {
             groups
                 .entry((
                     record.dataset_name().to_string(),
-                    record.asset_partition().to_string(),
+                    pb_types::newtype::storage_key_for(record.asset_partition()),
                     hour_key,
                 ))
                 .or_default()
@@ -255,7 +255,7 @@ impl ParquetRecordWriter {
             groups
                 .entry((
                     record.dataset_name().to_string(),
-                    record.asset_partition().to_string(),
+                    pb_types::newtype::storage_key_for(record.asset_partition()),
                     hour_key,
                 ))
                 .or_default()
@@ -271,8 +271,9 @@ impl ParquetRecordWriter {
 
     /// Delete all existing Parquet files for one `(dataset, asset, hour)` group so
     /// it can be rewritten authoritatively from the WAL. Files are named
-    /// `{asset}_{ts}_{hash}.parquet`, so we match on the `{asset}_` prefix within
-    /// the hour directory to avoid touching other assets in the same hour.
+    /// `{asset}_{ts}_{hash}_{len}.parquet`; the asset key itself may contain
+    /// underscores, so matching must parse the filename suffix instead of using a
+    /// raw `{asset}_` prefix.
     async fn delete_group(
         &self,
         dataset: &str,
@@ -281,14 +282,13 @@ impl ParquetRecordWriter {
     ) -> Result<(), StoreError> {
         let dir = format!("{}/{}/{}", self.base_path, dataset, hour_key);
         let dir_path = ObjectPath::from(dir.as_str());
-        let file_prefix = format!("{asset}_");
         let existing = self.store.list(Some(&dir_path)).collect::<Vec<_>>().await;
         for meta in existing {
             let meta = meta?;
             let is_match = meta
                 .location
                 .filename()
-                .map(|name| name.starts_with(&file_prefix) && name.ends_with(".parquet"))
+                .map(|name| pb_types::newtype::storage_file_matches_asset(name, asset))
                 .unwrap_or(false);
             if is_match {
                 self.store.delete(&meta.location).await?;

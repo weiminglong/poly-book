@@ -37,6 +37,9 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   library crates use `thiserror`.
 - Graceful shutdown via `CancellationToken` propagated to all subsystems.
   Both SIGINT and SIGTERM are handled for container/production environments.
+- `serve` and `serve-api` reject non-loopback HTTP/WS or gRPC binds unless
+  `api.auth_token` / `PB__API__AUTH_TOKEN` is configured. Loopback remains open
+  for local workstation use.
 - In separated `serve` mode, startup hydrates from checkpoints + WAL, then
   resumes live WAL tailing from the exact post-hydration position rather than
   re-reading the entire log. The live consumer also commits its read position
@@ -46,6 +49,9 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   `Arc<Mutex<_>>` overhead).
 - `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic
   shared between `ingest` and `auto_ingest`.
+- ClickHouse URLs are redacted before logging so userinfo, passwords, query
+  parameters, and fragments are not emitted during backend probes or query
+  workbench startup.
 - Forwarder tasks use idiomatic `while let` receive loops instead of
   `tokio::select!` patterns.
 - **Task supervision**: long-lived background tasks (feed, dispatcher, storage

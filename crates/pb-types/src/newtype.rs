@@ -15,6 +15,59 @@ impl AssetId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Filesystem/object-store safe key for partition filenames.
+    pub fn storage_key(&self) -> String {
+        storage_key_for(self.as_str())
+    }
+}
+
+/// Percent-encode an asset partition for use in object-store filenames.
+///
+/// Keeps common safe ASCII unchanged for readable paths and encodes every other
+/// byte as `%XX`, including `/`, `\`, control bytes, `%`, and non-ASCII.
+pub fn storage_key_for(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Extract the encoded asset component from the current Parquet object filename
+/// format: `{asset}_{first_ts_us}_{content_hash}_{len}.parquet`.
+///
+/// The asset key itself may contain `_`, so callers must split from the right
+/// and validate the fixed suffix fields instead of using `starts_with`.
+pub fn storage_file_asset_key(file_name: &str) -> Option<&str> {
+    let stem = file_name.strip_suffix(".parquet")?;
+    let mut parts = stem.rsplitn(4, '_');
+    let len = parts.next()?;
+    let hash = parts.next()?;
+    let first_ts_us = parts.next()?;
+    let asset = parts.next()?;
+
+    if asset.is_empty()
+        || first_ts_us.is_empty()
+        || len.is_empty()
+        || !first_ts_us.bytes().all(|byte| byte.is_ascii_digit())
+        || !len.bytes().all(|byte| byte.is_ascii_digit())
+        || hash.len() != 16
+        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+
+    Some(asset)
+}
+
+pub fn storage_file_matches_asset(file_name: &str, asset_key: &str) -> bool {
+    storage_file_asset_key(file_name) == Some(asset_key)
 }
 
 impl fmt::Display for AssetId {
@@ -76,6 +129,27 @@ mod tests {
         let id = AssetId::new("abc123");
         assert_eq!(id.as_str(), "abc123");
         assert_eq!(format!("{id}"), "abc123");
+    }
+
+    #[test]
+    fn storage_key_percent_encodes_path_separators_and_percent() {
+        assert_eq!(storage_key_for("abc-123_DEF.4"), "abc-123_DEF.4");
+        assert_eq!(storage_key_for("../a/b%"), "..%2Fa%2Fb%25");
+        assert_eq!(AssetId::new("a\\b").storage_key(), "a%5Cb");
+    }
+
+    #[test]
+    fn storage_file_asset_match_is_exact_with_underscore_asset_ids() {
+        let foo = "foo_1700000000000000_0123456789abcdef_42.parquet";
+        let foo_bar = "foo_bar_1700000000000000_0123456789abcdef_42.parquet";
+
+        assert_eq!(storage_file_asset_key(foo), Some("foo"));
+        assert_eq!(storage_file_asset_key(foo_bar), Some("foo_bar"));
+        assert!(storage_file_matches_asset(foo, "foo"));
+        assert!(storage_file_matches_asset(foo_bar, "foo_bar"));
+        assert!(!storage_file_matches_asset(foo_bar, "foo"));
+        assert!(!storage_file_matches_asset(foo, "foo_bar"));
+        assert!(!storage_file_matches_asset("foo_bar.parquet", "foo"));
     }
 
     #[test]

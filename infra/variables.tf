@@ -69,10 +69,34 @@ variable "serve_tokens" {
   default     = ""
 }
 
+variable "serve_api_auth_token_secret_arn" {
+  description = "Secrets Manager or SSM parameter ARN injected as PB__API__AUTH_TOKEN for the externally bound serve API."
+  type        = string
+  default     = ""
+}
+
 variable "enable_clickhouse_service" {
   description = "Provision a single-node ClickHouse service on ECS+EFS. For production prefer managed ClickHouse and point PB__STORAGE__CLICKHOUSE_URL at it."
   type        = bool
   default     = false
+}
+
+variable "clickhouse_user" {
+  description = "Application ClickHouse username for the optional ECS ClickHouse service."
+  type        = string
+  default     = "poly_book"
+}
+
+variable "clickhouse_password_secret_arn" {
+  description = "Secrets Manager or SSM parameter ARN injected as CLICKHOUSE_PASSWORD for the optional ECS ClickHouse service."
+  type        = string
+  default     = ""
+}
+
+variable "clickhouse_app_url_secret_arn" {
+  description = "Secrets Manager or SSM parameter ARN injected as PB__STORAGE__CLICKHOUSE_URL for app/serve tasks when using the optional ECS ClickHouse service. The secret value should include credentials, e.g. http://poly_book:<password>@clickhouse.poly-book.internal:8123."
+  type        = string
+  default     = ""
 }
 
 variable "clickhouse_cpu" {

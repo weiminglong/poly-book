@@ -77,6 +77,10 @@ fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
 
 const PARQUET_READ_CONCURRENCY: usize = 8;
 const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
+/// Maximum historical checkpoint search window. Without this cap, a missing
+/// checkpoint expands the search toward epoch and can enumerate years of hourly
+/// object-store prefixes.
+pub const MAX_CHECKPOINT_LOOKBACK_US: u64 = 7 * 24 * 3_600 * 1_000_000;
 
 /// Hard backstop on rows returned by a single unbounded ClickHouse read
 /// (ingest/execution events). Applied via `max_result_rows` +
@@ -155,8 +159,8 @@ impl ParquetReader {
                     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                         continue;
                     };
-                    let expected = format!("{prefix}_");
-                    if !name.starts_with(&expected) {
+                    let expected = pb_types::newtype::storage_key_for(prefix);
+                    if !pb_types::newtype::storage_file_matches_asset(name, &expected) {
                         continue;
                     }
                 }
@@ -1043,7 +1047,10 @@ impl EventReader for ParquetReader {
             if start_us == 0 {
                 return Ok(None);
             }
-            window = window.saturating_mul(2);
+            if window >= MAX_CHECKPOINT_LOOKBACK_US {
+                return Ok(None);
+            }
+            window = window.saturating_mul(2).min(MAX_CHECKPOINT_LOOKBACK_US);
         }
     }
 
@@ -1337,10 +1344,12 @@ impl EventReader for ClickHouseReader {
         let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id, ingest_ordinal FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
         let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, trade_id";
         let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us, event_kind, sequence";
+        let client = self.bounded_client();
 
         let (book_rows, trade_rows, ingest_rows) = tokio::try_join!(
             async {
-                self.client
+                client
+                    .clone()
                     .query(book_query)
                     .bind(asset_id.as_str())
                     .bind(start_us)
@@ -1350,7 +1359,8 @@ impl EventReader for ClickHouseReader {
                     .map_err(ReplayError::from)
             },
             async {
-                self.client
+                client
+                    .clone()
                     .query(trade_query)
                     .bind(asset_id.as_str())
                     .bind(start_us)
@@ -1360,7 +1370,8 @@ impl EventReader for ClickHouseReader {
                     .map_err(ReplayError::from)
             },
             async {
-                self.client
+                client
+                    .clone()
                     .query(ingest_query)
                     .bind(start_us)
                     .bind(end_us)

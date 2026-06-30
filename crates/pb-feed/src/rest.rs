@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
+use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::FeedError;
@@ -12,6 +13,14 @@ const REST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Overall per-request timeout. Without this a hung venue request stalls
 /// discovery/backfill (and `auto-ingest` market rotation) indefinitely.
 const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum REST response body parsed as JSON.
+pub const MAX_REST_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum Gamma events accepted in a single discovery page.
+pub const MAX_GAMMA_EVENTS_PER_RESPONSE: usize = 1000;
+/// Maximum CLOB book levels accepted per side from REST.
+pub const MAX_REST_BOOK_LEVELS_PER_SIDE: usize = 10_000;
+/// Maximum outcome tokens accepted from one CLOB market metadata response.
+pub const MAX_CLOB_MARKET_TOKENS: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct RestConfig {
@@ -70,7 +79,17 @@ impl RestClient {
         debug!(token_id, "fetching book");
         let resp = self.client.get(url).send().await?;
         let resp = classify_response(resp)?;
-        let book = resp.json().await?;
+        let book: RestBookResponse = read_json_limited(resp, "clob book").await?;
+        if book.bids.len() > MAX_REST_BOOK_LEVELS_PER_SIDE
+            || book.asks.len() > MAX_REST_BOOK_LEVELS_PER_SIDE
+        {
+            return Err(FeedError::BookTooLarge {
+                label: "clob book",
+                bids: book.bids.len(),
+                asks: book.asks.len(),
+                limit: MAX_REST_BOOK_LEVELS_PER_SIDE,
+            });
+        }
         Ok(book)
     }
 
@@ -81,14 +100,22 @@ impl RestClient {
     ) -> Result<Vec<GammaEvent>, FeedError> {
         self.rate_limiter.acquire().await;
         pb_metrics::record_rest_request();
+        let request_limit = limit.min(MAX_GAMMA_EVENTS_PER_RESPONSE as u64);
         let url = format!(
-            "{}/events?active=true&closed=false&tag=crypto&offset={offset}&limit={limit}",
+            "{}/events?active=true&closed=false&tag=crypto&offset={offset}&limit={request_limit}",
             self.config.gamma_base_url
         );
         debug!(url, "discovering markets");
         let resp = self.client.get(&url).send().await?;
         let resp = classify_response(resp)?;
-        let events = resp.json().await?;
+        let events: Vec<GammaEvent> = read_json_limited(resp, "gamma events").await?;
+        if events.len() > MAX_GAMMA_EVENTS_PER_RESPONSE {
+            return Err(FeedError::ArrayTooLarge {
+                label: "gamma events",
+                len: events.len(),
+                limit: MAX_GAMMA_EVENTS_PER_RESPONSE,
+            });
+        }
         Ok(events)
     }
 
@@ -105,7 +132,14 @@ impl RestClient {
         debug!(slug, "discovering by slug");
         let resp = self.client.get(url).send().await?;
         let resp = classify_response(resp)?;
-        let events = resp.json().await?;
+        let events: Vec<GammaEvent> = read_json_limited(resp, "gamma events").await?;
+        if events.len() > MAX_GAMMA_EVENTS_PER_RESPONSE {
+            return Err(FeedError::ArrayTooLarge {
+                label: "gamma events",
+                len: events.len(),
+                limit: MAX_GAMMA_EVENTS_PER_RESPONSE,
+            });
+        }
         Ok(events)
     }
 
@@ -121,9 +155,52 @@ impl RestClient {
         debug!(url, "fetching clob market info");
         let resp = self.client.get(&url).send().await?;
         let resp = classify_response(resp)?;
-        let info = resp.json().await?;
+        let info: ClobMarketInfo = read_json_limited(resp, "clob market").await?;
+        if info.t.len() > MAX_CLOB_MARKET_TOKENS {
+            return Err(FeedError::ArrayTooLarge {
+                label: "clob market tokens",
+                len: info.t.len(),
+                limit: MAX_CLOB_MARKET_TOKENS,
+            });
+        }
         Ok(info)
     }
+}
+
+async fn read_json_limited<T: DeserializeOwned>(
+    mut resp: reqwest::Response,
+    label: &'static str,
+) -> Result<T, FeedError> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_REST_BODY_BYTES as u64 {
+            return Err(FeedError::PayloadTooLarge {
+                label,
+                len: len.min(usize::MAX as u64) as usize,
+                limit: MAX_REST_BODY_BYTES,
+            });
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        let next_len = body.len().saturating_add(chunk.len());
+        if next_len > MAX_REST_BODY_BYTES {
+            return Err(FeedError::PayloadTooLarge {
+                label,
+                len: next_len,
+                limit: MAX_REST_BODY_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.len() > MAX_REST_BODY_BYTES {
+        return Err(FeedError::PayloadTooLarge {
+            label,
+            len: body.len(),
+            limit: MAX_REST_BODY_BYTES,
+        });
+    }
+    serde_json::from_slice(&body).map_err(FeedError::Deserialize)
 }
 
 /// Classify an HTTP status code into the appropriate FeedError.
@@ -151,6 +228,7 @@ fn classify_response(resp: reqwest::Response) -> Result<reqwest::Response, FeedE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn test_classify_status_success() {
@@ -181,5 +259,41 @@ mod tests {
     fn test_classify_status_bad_gateway() {
         let err = classify_status(StatusCode::BAD_GATEWAY).unwrap_err();
         assert!(matches!(err, FeedError::HttpStatus { status: 502 }));
+    }
+
+    #[tokio::test]
+    async fn read_json_limited_rejects_oversized_content_length_before_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                MAX_REST_BODY_BYTES + 1
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let resp = reqwest::get(format!("http://{addr}/oversized"))
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_json_limited::<serde_json::Value>(resp, "test payload"),
+        )
+        .await
+        .expect("oversized Content-Length should be rejected before body read")
+        .unwrap_err();
+
+        server.abort();
+        assert!(matches!(
+            err,
+            FeedError::PayloadTooLarge {
+                label: "test payload",
+                len,
+                limit: MAX_REST_BODY_BYTES,
+            } if len == MAX_REST_BODY_BYTES + 1
+        ));
     }
 }

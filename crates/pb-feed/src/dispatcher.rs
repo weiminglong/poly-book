@@ -18,6 +18,11 @@ use pb_types::fixed::{FixedPrice, FixedSize};
 use pb_types::newtype::{AssetId, Sequence};
 use pb_types::wire::WsMessage;
 
+/// Maximum levels accepted per side in one venue book snapshot.
+pub const MAX_BOOK_LEVELS_PER_SIDE: usize = 10_000;
+/// Maximum price-change entries accepted in one venue message.
+pub const MAX_PRICE_CHANGES_PER_MESSAGE: usize = 20_000;
+
 fn record_label(record: &PersistedRecord) -> &'static str {
     match record {
         PersistedRecord::Book(event) => match event.kind {
@@ -211,6 +216,39 @@ impl Dispatcher {
                 }
                 let source_event_id = book.hash.map(str::to_string);
 
+                if book.bids.len() > MAX_BOOK_LEVELS_PER_SIDE
+                    || book.asks.len() > MAX_BOOK_LEVELS_PER_SIDE
+                {
+                    warn!(
+                        asset_id = %asset_id,
+                        bids = book.bids.len(),
+                        asks = book.asks.len(),
+                        limit = MAX_BOOK_LEVELS_PER_SIDE,
+                        "book snapshot exceeds level cap; emitting continuity reset"
+                    );
+                    pb_metrics::record_stale_snapshot_skipped();
+                    self.send(PersistedRecord::Ingest(IngestEvent {
+                        asset_id: Some(asset_id),
+                        kind: IngestEventKind::SourceReset,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id,
+                            None,
+                        ),
+                        expected_sequence: None,
+                        observed_sequence: None,
+                        details: Some(format!(
+                            "book snapshot dropped: bids={} asks={} exceeds per-side limit {}",
+                            book.bids.len(),
+                            book.asks.len(),
+                            MAX_BOOK_LEVELS_PER_SIDE
+                        )),
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+
                 // Skip only *strictly older* snapshots. Polymarket emits one
                 // `book` event per trade at millisecond resolution, so two
                 // trades in the same millisecond produce equal-timestamp
@@ -320,9 +358,42 @@ impl Dispatcher {
                     return Ok(());
                 }
 
-                // Full conversion succeeded — commit atomically: advance the
-                // staleness tracker, record the hash, reset the sequence
-                // counter, then emit the snapshot.
+                // Rebuild the shadow book from this snapshot so subsequent deltas
+                // can be cross-checked against the venue best bid/ask. Uses
+                // the per-side vectors built during conversion — no re-partition.
+                if let Err(e) = self
+                    .validation_books
+                    .entry(asset_id.0.clone())
+                    .or_insert_with(|| L2Book::new(asset_id.clone()))
+                    .try_apply_snapshot(&snap_bids, &snap_asks, Sequence::default(), exchange_ts)
+                {
+                    self.validation_books.remove(asset_id.as_str());
+                    warn!(
+                        asset_id = %asset_id,
+                        error = %e,
+                        "book snapshot rejected; emitting continuity reset"
+                    );
+                    pb_metrics::record_stale_snapshot_skipped();
+                    self.send(PersistedRecord::Ingest(IngestEvent {
+                        asset_id: Some(asset_id),
+                        kind: IngestEventKind::SourceReset,
+                        provenance: self.make_provenance(
+                            raw.recv_timestamp_us,
+                            exchange_ts,
+                            source_event_id,
+                            None,
+                        ),
+                        expected_sequence: None,
+                        observed_sequence: None,
+                        details: Some(format!("book snapshot dropped: {e}")),
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+
+                // Full conversion and shadow-book validation succeeded — commit
+                // atomically: advance the staleness tracker, record the hash,
+                // reset the sequence counter, then emit the snapshot.
                 if exchange_ts > 0 {
                     self.last_snapshot_ts
                         .insert(asset_id.0.clone(), exchange_ts);
@@ -333,14 +404,6 @@ impl Dispatcher {
                 }
                 pb_metrics::record_snapshot_reconciled();
                 self.asset_sequences.insert(asset_id.0.clone(), 0);
-
-                // Rebuild the shadow book from this snapshot so subsequent deltas
-                // can be cross-checked against the venue best bid/ask. Uses
-                // the per-side vectors built during conversion — no re-partition.
-                self.validation_books
-                    .entry(asset_id.0.clone())
-                    .or_insert_with(|| L2Book::new(asset_id.clone()))
-                    .apply_snapshot(&snap_bids, &snap_asks, Sequence::default(), exchange_ts);
 
                 // Emit bids then asks, preserving the original (bid-first) ordering
                 // so sequence assignment is unchanged.
@@ -371,6 +434,15 @@ impl Dispatcher {
                 }
             }
             WsMessage::PriceChange(pc) => {
+                if pc.price_changes.len() > MAX_PRICE_CHANGES_PER_MESSAGE {
+                    warn!(
+                        entries = pc.price_changes.len(),
+                        limit = MAX_PRICE_CHANGES_PER_MESSAGE,
+                        "price_change message exceeds entry cap; dropping"
+                    );
+                    pb_metrics::record_unknown_message_dropped();
+                    return Ok(());
+                }
                 let exchange_ts = parse_timestamp_us(pc.timestamp);
                 if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
                     pb_metrics::record_clock_skew(skew);
@@ -425,13 +497,45 @@ impl Dispatcher {
                     // Cross-check the venue-stated best bid/ask against our shadow
                     // book after applying the same delta. Only when a
                     // snapshot has seeded the book — otherwise we cannot compare.
-                    let mismatch =
-                        if let Some(book) = self.validation_books.get_mut(asset_id.as_str()) {
-                            book.apply_delta(side, price, size, sequence, exchange_ts);
-                            detect_book_mismatch(book, entry.best_bid, entry.best_ask)
-                        } else {
-                            None
-                        };
+                    let mut apply_error = None;
+                    let mismatch = if let Some(book) =
+                        self.validation_books.get_mut(asset_id.as_str())
+                    {
+                        match book.try_apply_delta(side, price, size, sequence, exchange_ts) {
+                            Ok(()) => detect_book_mismatch(book, entry.best_bid, entry.best_ask),
+                            Err(e) => {
+                                apply_error = Some(e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(e) = apply_error {
+                        self.validation_books.remove(asset_id.as_str());
+                        warn!(
+                            asset_id = %asset_id,
+                            error = %e,
+                            "book delta rejected; emitting continuity reset"
+                        );
+                        self.send(PersistedRecord::Ingest(IngestEvent {
+                            asset_id: Some(asset_id.clone()),
+                            kind: IngestEventKind::SourceReset,
+                            provenance: self.make_provenance(
+                                raw.recv_timestamp_us,
+                                exchange_ts,
+                                entry.hash.map(str::to_string),
+                                Some(sequence),
+                            ),
+                            expected_sequence: None,
+                            observed_sequence: None,
+                            details: Some(format!(
+                                "book delta dropped from shadow validation: {e}"
+                            )),
+                        }))
+                        .await?;
+                        continue;
+                    }
                     if let Some(details) = mismatch {
                         pb_metrics::record_book_mismatch();
                         warn!(asset_id = %asset_id, %details, "venue book mismatch detected");

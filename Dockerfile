@@ -46,10 +46,10 @@ COPY config/default.toml /etc/poly-book/default.toml
 RUN mkdir -p /data && chown -R poly:poly /data /var/lib/poly-book
 
 ENV PB__STORAGE__PARQUET_BASE_PATH=/data
-# Bind to all interfaces inside the container; the trust boundary is enforced at
-# the orchestrator / security-group / reverse-proxy level, not in-process.
-ENV PB__METRICS__LISTEN_ADDR=0.0.0.0:9090
-ENV PB__API__LISTEN_ADDR=0.0.0.0:3000
+# Loopback defaults avoid accidental unauthenticated exposure. Orchestrators that
+# need an external bind must set PB__API__AUTH_TOKEN as well.
+ENV PB__METRICS__LISTEN_ADDR=127.0.0.1:9090
+ENV PB__API__LISTEN_ADDR=127.0.0.1:3000
 
 EXPOSE 3000 9090
 

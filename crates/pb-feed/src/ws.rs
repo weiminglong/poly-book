@@ -2,7 +2,10 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async_tls_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -16,6 +19,10 @@ const DEFAULT_MAX_BACKOFF_MS: u64 = 30_000;
 /// resets the reconnect backoff so the next disconnect retries quickly instead
 /// of inheriting an ever-growing delay.
 const STABLE_SESSION_MS: u64 = 30_000;
+/// Maximum accepted WebSocket text message. Venue book snapshots are far below
+/// this under normal operation; larger frames force reconnect instead of copying
+/// an attacker-controlled payload through the ingest pipeline.
+pub const MAX_WS_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WsConfig {
@@ -156,8 +163,11 @@ impl WsClient {
         // tokio-tungstenite builds a default rustls connector using the bundled
         // Mozilla root store, so we depend only on rustls (no openssl/native-tls
         // C dependency).
+        let mut ws_limits = WebSocketConfig::default();
+        ws_limits.max_message_size = Some(MAX_WS_TEXT_BYTES);
+        ws_limits.max_frame_size = Some(MAX_WS_TEXT_BYTES);
         let (ws_stream, _) =
-            connect_async_tls_with_config(&self.config.ws_url, None, true, None).await?;
+            connect_async_tls_with_config(&self.config.ws_url, Some(ws_limits), true, None).await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, session_id, "ws connected");
 
@@ -208,6 +218,13 @@ impl WsClient {
                     last_activity = Instant::now();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
+                            if text.len() > MAX_WS_TEXT_BYTES {
+                                return Err(FeedError::PayloadTooLarge {
+                                    label: "websocket",
+                                    len: text.len(),
+                                    limit: MAX_WS_TEXT_BYTES,
+                                });
+                            }
                             let raw = WsRawMessage {
                                 text: text.to_string(),
                                 recv_timestamp_us: now_us(),

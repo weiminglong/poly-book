@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use config::Config;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -416,6 +416,62 @@ pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
     }
 }
 
+pub fn api_auth_token_from_settings(settings: &Config) -> Option<String> {
+    settings
+        .get_string("api.auth_token")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn is_loopback(addr: SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
+/// Enforce the workstation trust boundary before binding externally.
+///
+/// Loopback remains open for local development. Any non-loopback HTTP/WS or gRPC
+/// bind must carry the shared API bearer token so an accidental `0.0.0.0` in a
+/// container or ECS task does not expose the read/query surfaces unauthenticated.
+pub fn validate_api_auth_boundary(
+    api_addr: SocketAddr,
+    grpc_enabled: bool,
+    grpc_addr: SocketAddr,
+    auth_token: Option<&str>,
+) -> Result<()> {
+    if auth_token.is_some() {
+        return Ok(());
+    }
+    if !is_loopback(api_addr) {
+        bail!(
+            "api.auth_token is required when api.listen_addr binds a non-loopback address ({api_addr})"
+        );
+    }
+    if grpc_enabled && !is_loopback(grpc_addr) {
+        bail!(
+            "api.auth_token is required when grpc.listen_addr binds a non-loopback address ({grpc_addr})"
+        );
+    }
+    Ok(())
+}
+
+pub fn redact_url_for_log(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut parsed) => {
+            if !parsed.username().is_empty() {
+                let _ = parsed.set_username("redacted");
+            }
+            if parsed.password().is_some() {
+                let _ = parsed.set_password(Some("redacted"));
+            }
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
+}
+
 /// Build service backends from config.
 ///
 /// Reads `api.historical_backend` (default: "parquet") to select the backend.
@@ -456,7 +512,11 @@ pub async fn build_services(
 
             match probe {
                 Ok(Ok(_)) => {
-                    tracing::info!(url = %ch_url, database = %ch_db, "using ClickHouse historical backend");
+                    tracing::info!(
+                        url = %redact_url_for_log(&ch_url),
+                        database = %ch_db,
+                        "using ClickHouse historical backend"
+                    );
                     return (
                         pb_service::AnyReplayService::ClickHouse(
                             pb_service::ClickHouseReplayService::new(&ch_url, &ch_db),
@@ -472,13 +532,13 @@ pub async fn build_services(
                 Ok(Err(e)) => {
                     tracing::warn!(
                         error = %e,
-                        url = %ch_url,
+                        url = %redact_url_for_log(&ch_url),
                         "ClickHouse unavailable, falling back to Parquet"
                     );
                 }
                 Err(_) => {
                     tracing::warn!(
-                        url = %ch_url,
+                        url = %redact_url_for_log(&ch_url),
                         "ClickHouse probe timed out, falling back to Parquet"
                     );
                 }
@@ -531,7 +591,11 @@ pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQue
             let ch_db = settings
                 .get_string("storage.clickhouse_database")
                 .unwrap_or_else(|_| "poly_book".to_string());
-            tracing::info!(url = %ch_url, database = %ch_db, "query workbench enabled (ClickHouse)");
+            tracing::info!(
+                url = %redact_url_for_log(&ch_url),
+                database = %ch_db,
+                "query workbench enabled (ClickHouse)"
+            );
             Some(pb_service::AnyQueryService::ClickHouse(
                 pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
             ))
@@ -929,6 +993,47 @@ mod tests {
         let (enabled, addr) = grpc_config_from_settings(&settings);
         assert!(enabled);
         assert_eq!(addr, "127.0.0.1:9999".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn api_auth_token_from_settings_trims_empty_values() {
+        assert_eq!(api_auth_token_from_settings(&empty_config()), None);
+        assert_eq!(
+            api_auth_token_from_settings(&config_with("api.auth_token", "  secret  ")),
+            Some("secret".to_string())
+        );
+        assert_eq!(
+            api_auth_token_from_settings(&config_with("api.auth_token", "   ")),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_api_auth_boundary_requires_token_for_external_binds() {
+        let api_loopback = "127.0.0.1:3000".parse::<SocketAddr>().unwrap();
+        let api_external = "0.0.0.0:3000".parse::<SocketAddr>().unwrap();
+        let grpc_loopback = "127.0.0.1:50051".parse::<SocketAddr>().unwrap();
+        let grpc_external = "0.0.0.0:50051".parse::<SocketAddr>().unwrap();
+
+        assert!(validate_api_auth_boundary(api_loopback, false, grpc_loopback, None).is_ok());
+        assert!(validate_api_auth_boundary(api_external, false, grpc_loopback, None).is_err());
+        assert!(
+            validate_api_auth_boundary(api_external, false, grpc_loopback, Some("secret")).is_ok()
+        );
+        assert!(validate_api_auth_boundary(api_loopback, true, grpc_external, None).is_err());
+    }
+
+    #[test]
+    fn redact_url_for_log_removes_credentials_query_and_fragment() {
+        assert_eq!(
+            redact_url_for_log("http://user:pass@clickhouse:8123/path?password=secret#frag"),
+            "http://redacted:redacted@clickhouse:8123/path"
+        );
+        assert_eq!(
+            redact_url_for_log("http://clickhouse:8123?secret=x"),
+            "http://clickhouse:8123/"
+        );
+        assert_eq!(redact_url_for_log("not a url"), "<invalid-url>");
     }
 
     // --- checkpoint_config_from_settings ---

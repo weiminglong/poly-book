@@ -75,6 +75,10 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - A liveness watchdog forces a reconnect if no frame (data or pong) arrives within
   ~3× the ping interval, so a half-open TCP connection cannot silently stall the
   feed for many minutes.
+- WebSocket messages are capped at 1 MiB at the tungstenite frame/message layer
+  and again before copying text into the dispatcher channel. Dispatcher-level
+  caps reject snapshots above 10,000 levels per side and `price_change` batches
+  above 20,000 entries.
 - On reconnect success, the dispatcher clears per-asset sequence, stale snapshot
   tracking, shadow validation books, and the asset-id interning cache before
   emitting `SourceReset`, so downstream replay does not stitch state across feed
@@ -91,8 +95,9 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - Atomic snapshots: a `book` message's levels are all converted before any are
   emitted. A mid-message conversion failure emits a single `SourceReset` marker
   (and leaves the staleness tracker untouched) instead of a partial snapshot
-  that would be indistinguishable from a complete one. A `price_change` batch
-  skips an unparseable entry rather than aborting the remaining valid deltas.
+  that would be indistinguishable from a complete one. Oversized snapshots also
+  emit `SourceReset`. A `price_change` batch skips an unparseable entry rather
+  than aborting the remaining valid deltas.
 - Venue cross-check: the dispatcher keeps a per-asset shadow `L2Book` (seeded by
   snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
   against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
@@ -106,6 +111,11 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   shared raw channel, so the normal snapshot path rebuilds the book. The
   REST→WS-`book` conversion is round-trip-tested against `WsMessage` so it matches
   the live wire format. (Wired in `ingest`; `auto-ingest` relies on rotation.)
+- REST responses are read with a 4 MiB body cap enforced before full buffering:
+  oversized `Content-Length` is rejected immediately, and chunked/unknown-length
+  bodies are counted as they stream. Discovery pages are capped at 1,000 events,
+  CLOB market metadata at 512 tokens, and REST book snapshots at 10,000 levels
+  per side.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization.
   See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
 - Tests cover malformed JSON, `parse_side` coverage, dispatcher behavior,

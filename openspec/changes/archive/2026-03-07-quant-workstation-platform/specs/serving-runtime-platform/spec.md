@@ -42,6 +42,15 @@ And it sends or requires an explicit resync snapshot rather than letting continu
 
 ## Transport Boundaries
 
+### Scenario: Exposed read surfaces require bearer authentication
+
+```
+Given the workstation read surfaces are bound beyond loopback
+When HTTP, WebSocket, or gRPC data routes are served
+Then startup requires a configured bearer token
+And clients must present that token while health probes remain available for orchestrators
+```
+
 ### Scenario: Browser and internal consumers use different transports over one service layer
 
 ```

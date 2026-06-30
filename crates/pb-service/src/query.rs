@@ -1,5 +1,6 @@
 //! Query workbench service: guarded read-only SQL execution.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::ServiceError;
@@ -52,6 +53,17 @@ const WRITE_KEYWORDS: &[&str] = &[
 ];
 
 const ALLOWED_ROOT_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"];
+
+/// Workbench-visible datasets. Keep this list in sync with the public API docs
+/// and the ClickHouse tables created by `pb-store`.
+pub const APPROVED_DATASETS: &[&str] = &[
+    "book_events",
+    "trade_events",
+    "ingest_events",
+    "book_checkpoints",
+    "replay_validations",
+    "execution_events",
+];
 
 /// Identifiers that must never appear in a workbench query. These are ClickHouse
 /// table functions that perform I/O — an unauthenticated SSRF / arbitrary
@@ -131,6 +143,14 @@ fn push_blanked(out: &mut String, ch: char) {
     }
 }
 
+fn push_identifier_char(out: &mut String, ch: char) {
+    if ch.is_ascii_alphanumeric() || ch == '_' {
+        out.push(ch);
+    } else {
+        push_blanked(out, ch);
+    }
+}
+
 fn sanitize_sql(sql: &str) -> SanitizeResult {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
@@ -187,20 +207,29 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::DoubleQuote => {
-                push_blanked(&mut sanitized, ch);
                 if ch == '"' {
                     if chars.peek() == Some(&'"') {
                         sanitized.push(' ');
                         chars.next();
                     } else {
+                        sanitized.push(' ');
                         state = State::Normal;
                     }
+                } else {
+                    push_identifier_char(&mut sanitized, ch);
                 }
             }
             State::Backtick => {
-                push_blanked(&mut sanitized, ch);
                 if ch == '`' {
-                    state = State::Normal;
+                    if chars.peek() == Some(&'`') {
+                        sanitized.push(' ');
+                        chars.next();
+                    } else {
+                        sanitized.push(' ');
+                        state = State::Normal;
+                    }
+                } else {
+                    push_identifier_char(&mut sanitized, ch);
                 }
             }
             State::LineComment => {
@@ -232,6 +261,37 @@ fn keyword_tokens(sql: &str) -> impl Iterator<Item = &str> {
         .filter(|token| !token.is_empty())
 }
 
+#[derive(Debug, Clone)]
+struct SqlToken {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+fn sql_tokens(sql: &str) -> Vec<SqlToken> {
+    let mut tokens = Vec::new();
+    let mut start: Option<usize> = None;
+    for (idx, ch) in sql.char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            start.get_or_insert(idx);
+        } else if let Some(token_start) = start.take() {
+            tokens.push(SqlToken {
+                text: sql[token_start..idx].to_string(),
+                start: token_start,
+                end: idx,
+            });
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push(SqlToken {
+            text: sql[token_start..].to_string(),
+            start: token_start,
+            end: sql.len(),
+        });
+    }
+    tokens
+}
+
 fn has_multiple_statements(sql: &str) -> bool {
     let mut saw_semicolon = false;
     for ch in sql.chars() {
@@ -244,6 +304,159 @@ fn has_multiple_statements(sql: &str) -> bool {
         }
     }
     false
+}
+
+fn is_approved_dataset(name: &str) -> bool {
+    APPROVED_DATASETS
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(name))
+}
+
+fn skip_ascii_ws(sql: &str, mut pos: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn read_ascii_ident(sql: &str, pos: usize) -> Option<(String, usize)> {
+    let bytes = sql.as_bytes();
+    let mut end = pos;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    (end > pos).then(|| (sql[pos..end].to_string(), end))
+}
+
+fn skip_balanced_parens(sql: &str, pos: usize) -> usize {
+    let bytes = sql.as_bytes();
+    if bytes.get(pos) != Some(&b'(') {
+        return pos;
+    }
+    let mut depth = 0usize;
+    let mut cur = pos;
+    while cur < bytes.len() {
+        match bytes[cur] {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return cur + 1;
+                }
+            }
+            _ => {}
+        }
+        cur += 1;
+    }
+    sql.len()
+}
+
+fn collect_cte_names(sql: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut pos = skip_ascii_ws(sql, 0);
+    let Some((root, after_root)) = read_ascii_ident(sql, pos) else {
+        return names;
+    };
+    if root != "WITH" {
+        return names;
+    }
+    pos = skip_ascii_ws(sql, after_root);
+
+    loop {
+        let Some((name, after_name)) = read_ascii_ident(sql, pos) else {
+            break;
+        };
+        if name == "SELECT" {
+            break;
+        }
+        pos = skip_ascii_ws(sql, after_name);
+        if sql.as_bytes().get(pos) == Some(&b'(') {
+            pos = skip_ascii_ws(sql, skip_balanced_parens(sql, pos));
+        }
+        let Some((as_keyword, after_as)) = read_ascii_ident(sql, pos) else {
+            break;
+        };
+        if as_keyword != "AS" {
+            break;
+        }
+        names.insert(name);
+        pos = skip_ascii_ws(sql, after_as);
+        if sql.as_bytes().get(pos) == Some(&b'(') {
+            pos = skip_ascii_ws(sql, skip_balanced_parens(sql, pos));
+        }
+        if sql.as_bytes().get(pos) == Some(&b',') {
+            pos = skip_ascii_ws(sql, pos + 1);
+            continue;
+        }
+        break;
+    }
+
+    names
+}
+
+fn validate_table_ref(
+    sql: &str,
+    tokens: &[SqlToken],
+    token_idx: usize,
+    cte_names: &HashSet<String>,
+) -> Result<(), ServiceError> {
+    let Some(first) = tokens.get(token_idx) else {
+        return Ok(());
+    };
+    let between = &sql[tokens[token_idx - 1].end..first.start];
+    if between.contains('(') || first.text == "SELECT" {
+        return Ok(());
+    }
+
+    let after_first = skip_ascii_ws(sql, first.end);
+    if sql.as_bytes().get(after_first) == Some(&b'.') {
+        return Err(ServiceError::InvalidParams(
+            "qualified table names are not allowed; use the configured workbench database"
+                .to_string(),
+        ));
+    }
+
+    if is_approved_dataset(&first.text) || cte_names.contains(&first.text) {
+        return Ok(());
+    }
+
+    Err(ServiceError::InvalidParams(format!(
+        "dataset is not allowed: {}",
+        first.text
+    )))
+}
+
+fn validate_dataset_scope(sql: &str) -> Result<(), ServiceError> {
+    let tokens = sql_tokens(sql);
+    let cte_names = collect_cte_names(sql);
+
+    for (idx, token) in tokens.iter().enumerate() {
+        match token.text.as_str() {
+            "FROM" | "JOIN" => validate_table_ref(sql, &tokens, idx + 1, &cte_names)?,
+            "DESCRIBE" => {
+                let mut table_idx = idx + 1;
+                if tokens.get(table_idx).map(|t| t.text.as_str()) == Some("TABLE") {
+                    table_idx += 1;
+                }
+                validate_table_ref(sql, &tokens, table_idx, &cte_names)?;
+            }
+            "SHOW" => {
+                if let Some((table_kw_idx, _)) = tokens
+                    .iter()
+                    .enumerate()
+                    .skip(idx + 1)
+                    .take(4)
+                    .find(|(_, candidate)| candidate.text == "TABLE")
+                {
+                    validate_table_ref(sql, &tokens, table_kw_idx + 1, &cte_names)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate that SQL is read-only.
@@ -298,6 +511,8 @@ fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
 /// Validate and normalize SQL under the configured query guard.
 pub fn guard_sql(sql: &str, guard: &QueryGuard) -> Result<String, ServiceError> {
     validate_read_only(sql)?;
+    let upper = sanitize_sql(sql).sql.to_uppercase();
+    validate_dataset_scope(upper.trim())?;
     Ok(inject_limit(sql, guard.max_rows))
 }
 
@@ -379,6 +594,10 @@ impl ClickHouseQueryService {
     }
 }
 
+fn clickhouse_reqwest_error(context: &str, err: reqwest::Error) -> ServiceError {
+    ServiceError::Internal(format!("{context}: {}", err.without_url()))
+}
+
 /// ClickHouse JSONCompact response format.
 #[derive(Debug, serde::Deserialize)]
 struct ClickHouseJsonCompact {
@@ -425,16 +644,16 @@ impl QueryService for ClickHouseQueryService {
             let resp = request
                 .send()
                 .await
-                .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
+                .map_err(|e| clickhouse_reqwest_error("ClickHouse request failed", e))?;
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(ServiceError::Internal(format!(
                     "ClickHouse query error: {body}"
                 )));
             }
-            resp.json::<ClickHouseJsonCompact>().await.map_err(|e| {
-                ServiceError::Internal(format!("failed to parse ClickHouse response: {e}"))
-            })
+            resp.json::<ClickHouseJsonCompact>()
+                .await
+                .map_err(|e| clickhouse_reqwest_error("failed to parse ClickHouse response", e))
         };
         let result: ClickHouseJsonCompact = tokio::time::timeout(
             std::time::Duration::from_secs(guard.timeout_secs.saturating_add(2)),
@@ -482,7 +701,7 @@ impl QueryService for ClickHouseQueryService {
             .body(sql)
             .send()
             .await
-            .map_err(|e| ServiceError::Internal(format!("ClickHouse request failed: {e}")))?;
+            .map_err(|e| clickhouse_reqwest_error("ClickHouse request failed", e))?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -494,7 +713,7 @@ impl QueryService for ClickHouseQueryService {
         let result: ClickHouseJsonCompact = resp
             .json()
             .await
-            .map_err(|e| ServiceError::Internal(format!("failed to parse schema response: {e}")))?;
+            .map_err(|e| clickhouse_reqwest_error("failed to parse schema response", e))?;
 
         // Group columns by table name.
         let mut datasets: Vec<DatasetSchema> = Vec::new();
@@ -504,6 +723,9 @@ impl QueryService for ClickHouseQueryService {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            if !is_approved_dataset(&table_name) {
+                continue;
+            }
             let column_name = row
                 .get(1)
                 .and_then(|v| v.as_str())
@@ -566,6 +788,7 @@ impl QueryService for AnyQueryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn escape_ch_string_literal_neutralizes_injection() {
@@ -582,6 +805,30 @@ mod tests {
         );
         // Backslash is escaped first so it cannot re-enable a following quote.
         assert_eq!(escape_ch_string_literal("a\\'b"), "a\\\\\\'b");
+    }
+
+    #[tokio::test]
+    async fn clickhouse_reqwest_errors_strip_credential_urls() {
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            reqwest::Client::new()
+                .get("http://poly_book:secret-password@127.0.0.1:1")
+                .send(),
+        )
+        .await
+        .expect("connection attempt should finish")
+        .expect_err("closed local port should fail");
+
+        let rendered = clickhouse_reqwest_error("ClickHouse request failed", err).to_string();
+        assert!(rendered.contains("ClickHouse request failed"));
+        assert!(
+            !rendered.contains("poly_book") && !rendered.contains("secret-password"),
+            "credential-bearing URL must be stripped from error: {rendered}"
+        );
+        assert!(
+            !rendered.contains("for url"),
+            "reqwest URL context should be removed: {rendered}"
+        );
     }
 
     #[test]
@@ -712,8 +959,8 @@ mod tests {
             max_rows: 25,
             timeout_secs: 1,
         };
-        let result = guard_sql("SELECT * FROM foo;", &guard).unwrap();
-        assert_eq!(result, "SELECT * FROM foo LIMIT 25");
+        let result = guard_sql("SELECT * FROM book_events;", &guard).unwrap();
+        assert_eq!(result, "SELECT * FROM book_events LIMIT 25");
     }
 
     #[test]
@@ -749,6 +996,47 @@ mod tests {
                 "guard must reject dangerous query: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn guard_rejects_quoted_io_table_functions_and_system() {
+        let guard = QueryGuard::default();
+        for sql in [
+            "SELECT * FROM `file`('/etc/passwd', 'CSV')",
+            "SELECT * FROM \"url\"('http://169.254.169.254/latest/meta-data', 'CSV')",
+            "SELECT * FROM `system`.`users`",
+        ] {
+            assert!(
+                guard_sql(sql, &guard).is_err(),
+                "guard must reject quoted dangerous identifier: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_rejects_unadvertised_tables() {
+        let guard = QueryGuard::default();
+        for sql in [
+            "SELECT * FROM hidden_table",
+            "SHOW CREATE TABLE hidden_table",
+            "SELECT * FROM poly_book.book_events",
+            "WITH cte AS (SELECT * FROM system.users) SELECT * FROM cte",
+        ] {
+            assert!(
+                guard_sql(sql, &guard).is_err(),
+                "guard must reject query outside approved dataset scope: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_allows_cte_over_approved_dataset() {
+        let guard = QueryGuard::default();
+        assert!(guard_sql(
+            "WITH cte AS (SELECT * FROM book_events) SELECT * FROM cte",
+            &guard
+        )
+        .is_ok());
     }
 
     #[test]

@@ -49,6 +49,7 @@ Same pattern for `AnyIntegrityService`, `AnyExecutionService`, and `AnyQueryServ
 | `ContinuityEvent` | Structured reconnect/gap/stale event from the data layer. |
 | `QueryGuard` | Guard rails for query execution (max rows, timeout). |
 | `guard_sql` | Shared query-guard entrypoint that validates read-only SQL and injects `LIMIT`. |
+| `APPROVED_DATASETS` | Dataset allowlist visible to the query workbench. |
 | `QueryResult` | Query result with columns, rows, truncation flag, execution time. |
 | `QueryColumnInfo` | Column metadata (name and data type). |
 | `DatasetSchema` | Dataset schema with name, description, and columns. |
@@ -80,19 +81,26 @@ pb-service trait method
 - If ClickHouse is unavailable at startup, the system falls back to Parquet.
 - `QueryGuard` enforces a single read-only SQL statement rooted at
   `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`, strips comments and quoted
-  literals before keyword checks, injects `LIMIT` if missing, and applies a
-  configurable timeout.
+  string literals before keyword checks, preserves quoted identifier tokens for
+  blocklist checks, injects `LIMIT` if missing, and applies a configurable
+  timeout.
 - `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
   targets exercise the same sanitizer and normalization path the runtime uses.
 - The guard rejects an identifier blocklist of I/O table functions (`file`,
   `url`, `s3`, `remote`, `mysql`, …), the `system` database, and exfiltration
   clauses (`INTO OUTFILE`, `SETTINGS`) so a SELECT-rooted query cannot be an
   SSRF / arbitrary-file-read primitive.
+- The guard and `/query/datasets` share `APPROVED_DATASETS`, so ad-hoc SQL can
+  only reference the documented workbench tables and cannot reach arbitrary
+  ClickHouse tables or qualified databases.
 - `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format
   for dynamic SQL execution, and enforces `readonly=2`, `max_result_rows`, and
   `max_execution_time` server-side as defense-in-depth; the whole request
-  (send + body download) is bounded by one timeout. The API clamps the
-  client-supplied row cap to the configured ceiling.
+  (send + body download) is bounded by one timeout. `reqwest` URL context is
+  stripped from transport/decode errors before converting them to
+  `ServiceError::Internal`, so credential-bearing ClickHouse URLs do not reach
+  API logs. The API clamps the client-supplied row cap to the configured
+  ceiling.
 - Shared helpers are extracted into `lib.rs` to eliminate duplicated business
   logic between Parquet and ClickHouse backends: `map_replay_error`,
   `ingest_to_continuity`, `build_replay_result`, `build_integrity_summary`,
@@ -117,6 +125,6 @@ pb-service trait method
 
 ## Tests
 
-51 tests covering shared helper functions (error mapping, continuity gap detection,
+52 tests covering shared helper functions (error mapping, continuity gap detection,
 replay result construction, integrity summary building, execution timeline ordering),
 query guard edge cases, and backend-specific service logic.

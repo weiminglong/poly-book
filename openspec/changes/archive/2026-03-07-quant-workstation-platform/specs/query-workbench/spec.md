@@ -31,6 +31,15 @@ Then the server rejects or truncates the request according to policy
 And the user receives a clear explanation of the guard that was triggered
 ```
 
+### Scenario: Query scope is limited to advertised datasets
+
+```
+Given the query workbench advertises a fixed set of logical datasets
+When a user submits ad-hoc SQL
+Then the SQL guard rejects table references outside that dataset set
+And quoted ClickHouse I/O table functions, system tables, and qualified database references are rejected before execution
+```
+
 ## Backend Selection
 
 ### Scenario: Local and deployed query backends are separated

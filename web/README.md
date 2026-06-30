@@ -64,11 +64,16 @@ npm ci
 npm run dev
 ```
 
-Vite dev server runs on `http://localhost:4173` and proxies `/api` to the backend.
+Vite dev server binds `http://127.0.0.1:4173` by default and proxies `/api` to
+the backend. Set `VITE_DEV_HOST=0.0.0.0` only for an intentional LAN-exposed dev
+session.
 
 ```bash
 # Override the API proxy target
 VITE_DEV_API_PROXY_TARGET=http://127.0.0.1:3100 npm run dev
+
+# Override the dev server host
+VITE_DEV_HOST=0.0.0.0 npm run dev
 
 # Override the API base URL directly
 VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev

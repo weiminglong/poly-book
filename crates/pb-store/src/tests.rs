@@ -44,8 +44,12 @@ fn test_asset_id() -> AssetId {
 }
 
 fn make_book_event(recv_ts: u64) -> BookEvent {
+    make_book_event_for_asset(test_asset_id(), recv_ts)
+}
+
+fn make_book_event_for_asset(asset_id: AssetId, recv_ts: u64) -> BookEvent {
     BookEvent {
-        asset_id: test_asset_id(),
+        asset_id,
         kind: BookEventKind::Delta,
         side: Side::Bid,
         price: FixedPrice::new(5000).unwrap(),
@@ -576,6 +580,45 @@ async fn reconcile_replaces_hour_partitions_idempotently() {
     // Re-running is idempotent: the same single file, no duplication.
     writer.write_batch_replacing(&[r1, r2]).await.unwrap();
     assert_eq!(count_files(&store).await, 1, "reconcile must be idempotent");
+}
+
+#[tokio::test]
+async fn reconcile_delete_matches_asset_component_exactly() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    let foo = PersistedRecord::Book(make_book_event_for_asset(AssetId::new("foo"), FIXED_TS_US));
+    let foo_bar = PersistedRecord::Book(make_book_event_for_asset(
+        AssetId::new("foo_bar"),
+        FIXED_TS_US,
+    ));
+
+    writer.write_record(foo.clone()).await.unwrap();
+    writer.write_record(foo_bar).await.unwrap();
+
+    writer.write_batch_replacing(&[foo]).await.unwrap();
+
+    let file_names: Vec<String> = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .map(|meta| meta.location.filename().unwrap_or_default().to_string())
+        .collect();
+
+    assert_eq!(
+        file_names.len(),
+        2,
+        "foo_bar partition must survive replacing foo"
+    );
+    assert!(file_names
+        .iter()
+        .any(|name| pb_types::newtype::storage_file_matches_asset(name, "foo")));
+    assert!(file_names
+        .iter()
+        .any(|name| pb_types::newtype::storage_file_matches_asset(name, "foo_bar")));
 }
 
 #[tokio::test]

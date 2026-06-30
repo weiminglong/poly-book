@@ -14,7 +14,7 @@ resource "aws_ecs_task_definition" "serve" {
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
+  task_role_arn            = aws_iam_role.ecs_task_readonly.arn
 
   container_definitions = jsonencode([
     {
@@ -50,13 +50,22 @@ resource "aws_ecs_task_definition" "serve" {
           { name = "PB__METRICS__LISTEN_ADDR", value = "0.0.0.0:9090" },
           { name = "AWS_DEFAULT_REGION", value = var.aws_region }
         ],
-        var.enable_clickhouse_service ? [
+        [for k, v in var.app_env_vars : { name = k, value = v }]
+      )
+
+      secrets = concat(
+        var.serve_api_auth_token_secret_arn != "" ? [
           {
-            name  = "PB__STORAGE__CLICKHOUSE_URL"
-            value = "http://${aws_service_discovery_service.clickhouse[0].name}.${aws_service_discovery_private_dns_namespace.internal[0].name}:8123"
+            name      = "PB__API__AUTH_TOKEN"
+            valueFrom = var.serve_api_auth_token_secret_arn
           }
         ] : [],
-        [for k, v in var.app_env_vars : { name = k, value = v }]
+        var.enable_clickhouse_service ? [
+          {
+            name      = "PB__STORAGE__CLICKHOUSE_URL"
+            valueFrom = var.clickhouse_app_url_secret_arn
+          }
+        ] : []
       )
 
       logConfiguration = {
@@ -79,6 +88,18 @@ resource "aws_ecs_task_definition" "serve" {
         access_point_id = aws_efs_access_point.wal.id
         iam             = "ENABLED"
       }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.serve_desired_count == 0 || length(trimspace(var.serve_api_auth_token_secret_arn)) > 0
+      error_message = "serve_api_auth_token_secret_arn is required when serve_desired_count is greater than 0 because serve binds 0.0.0.0."
+    }
+
+    precondition {
+      condition     = !var.enable_clickhouse_service || length(trimspace(var.clickhouse_app_url_secret_arn)) > 0
+      error_message = "clickhouse_app_url_secret_arn is required when enable_clickhouse_service is true so app tasks receive an authenticated ClickHouse URL."
     }
   }
 }

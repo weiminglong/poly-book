@@ -52,36 +52,58 @@ impl L2Book {
         sequence: Sequence,
         timestamp_us: u64,
     ) {
-        self.bids.clear();
-        self.asks.clear();
-        self.total_bid_raw = 0;
-        self.total_ask_raw = 0;
+        let _ = self.try_apply_snapshot(bids, asks, sequence, timestamp_us);
+    }
 
-        // `old_raw` is always either 0 (new price) or the size previously stored
-        // at this price in the map, and `total_*_raw` is maintained as the exact
-        // sum of all stored sizes. So `old_raw <= total_*_raw` is a structural
-        // invariant and the subtraction cannot underflow — no checked arithmetic
-        // is needed here (this is not reachable from feed data,
-        // since old_raw is sourced from the map, never the incoming delta).
+    /// Checked snapshot application. If an aggregate total would overflow, the
+    /// existing book is left unchanged and an error is returned.
+    pub fn try_apply_snapshot(
+        &mut self,
+        bids: &[(FixedPrice, FixedSize)],
+        asks: &[(FixedPrice, FixedSize)],
+        sequence: Sequence,
+        timestamp_us: u64,
+    ) -> Result<(), BookError> {
+        let mut next_bids = BTreeMap::new();
+        let mut next_asks = BTreeMap::new();
+        let mut next_bid_raw = 0u64;
+        let mut next_ask_raw = 0u64;
+
         for &(price, size) in bids {
             if !size.is_zero() {
-                let old_raw = self
-                    .bids
+                let old_raw = next_bids
                     .insert(Reverse(price), size)
                     .map_or(0, |s| s.raw());
-                self.total_bid_raw = self.total_bid_raw - old_raw + size.raw();
+                next_bid_raw = next_bid_raw
+                    .checked_sub(old_raw)
+                    .and_then(|total| total.checked_add(size.raw()))
+                    .ok_or_else(|| BookError::AggregateOverflow {
+                        asset_id: self.asset_id.to_string(),
+                        side: "Bid".to_string(),
+                    })?;
             }
         }
         for &(price, size) in asks {
             if !size.is_zero() {
-                let old_raw = self.asks.insert(price, size).map_or(0, |s| s.raw());
-                self.total_ask_raw = self.total_ask_raw - old_raw + size.raw();
+                let old_raw = next_asks.insert(price, size).map_or(0, |s| s.raw());
+                next_ask_raw = next_ask_raw
+                    .checked_sub(old_raw)
+                    .and_then(|total| total.checked_add(size.raw()))
+                    .ok_or_else(|| BookError::AggregateOverflow {
+                        asset_id: self.asset_id.to_string(),
+                        side: "Ask".to_string(),
+                    })?;
             }
         }
 
+        self.bids = next_bids;
+        self.asks = next_asks;
+        self.total_bid_raw = next_bid_raw;
+        self.total_ask_raw = next_ask_raw;
         self.sequence = sequence;
         self.seq_initialized = true;
         self.last_update_us = timestamp_us;
+        Ok(())
     }
 
     /// Apply a single price-level delta.
@@ -95,6 +117,20 @@ impl L2Book {
         sequence: Sequence,
         timestamp_us: u64,
     ) {
+        let _ = self.try_apply_delta(side, price, size, sequence, timestamp_us);
+    }
+
+    /// Checked delta application. If an aggregate total would overflow, the book
+    /// is left unchanged and an error is returned.
+    #[inline]
+    pub fn try_apply_delta(
+        &mut self,
+        side: Side,
+        price: FixedPrice,
+        size: FixedSize,
+        sequence: Sequence,
+        timestamp_us: u64,
+    ) -> Result<(), BookError> {
         match side {
             Side::Bid => {
                 if size.is_zero() {
@@ -102,11 +138,17 @@ impl L2Book {
                         self.total_bid_raw -= old.raw();
                     }
                 } else {
-                    let old_raw = self
-                        .bids
-                        .insert(Reverse(price), size)
-                        .map_or(0, |s| s.raw());
-                    self.total_bid_raw = self.total_bid_raw - old_raw + size.raw();
+                    let old_raw = self.bids.get(&Reverse(price)).map_or(0, |s| s.raw());
+                    let next_total = self
+                        .total_bid_raw
+                        .checked_sub(old_raw)
+                        .and_then(|total| total.checked_add(size.raw()))
+                        .ok_or_else(|| BookError::AggregateOverflow {
+                            asset_id: self.asset_id.to_string(),
+                            side: "Bid".to_string(),
+                        })?;
+                    self.bids.insert(Reverse(price), size);
+                    self.total_bid_raw = next_total;
                 }
             }
             Side::Ask => {
@@ -115,8 +157,17 @@ impl L2Book {
                         self.total_ask_raw -= old.raw();
                     }
                 } else {
-                    let old_raw = self.asks.insert(price, size).map_or(0, |s| s.raw());
-                    self.total_ask_raw = self.total_ask_raw - old_raw + size.raw();
+                    let old_raw = self.asks.get(&price).map_or(0, |s| s.raw());
+                    let next_total = self
+                        .total_ask_raw
+                        .checked_sub(old_raw)
+                        .and_then(|total| total.checked_add(size.raw()))
+                        .ok_or_else(|| BookError::AggregateOverflow {
+                            asset_id: self.asset_id.to_string(),
+                            side: "Ask".to_string(),
+                        })?;
+                    self.asks.insert(price, size);
+                    self.total_ask_raw = next_total;
                 }
             }
         }
@@ -124,6 +175,7 @@ impl L2Book {
         self.sequence = sequence;
         self.seq_initialized = true;
         self.last_update_us = timestamp_us;
+        Ok(())
     }
 
     /// Best (highest) bid price and size.
@@ -308,6 +360,58 @@ mod tests {
         let book = make_book();
         assert_eq!(book.bid_depth(), 3);
         assert_eq!(book.ask_depth(), 2);
+    }
+
+    #[test]
+    fn try_apply_snapshot_rejects_aggregate_overflow_without_mutating() {
+        let mut book = make_book();
+        let original_best = book.best_bid();
+        let err = book
+            .try_apply_snapshot(
+                &[
+                    (
+                        FixedPrice::from_f64(0.50).unwrap(),
+                        FixedSize::new(u64::MAX),
+                    ),
+                    (FixedPrice::from_f64(0.49).unwrap(), FixedSize::new(1)),
+                ],
+                &[],
+                Sequence::new(2),
+                2_000_000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, BookError::AggregateOverflow { .. }));
+        assert_eq!(book.best_bid(), original_best);
+        assert_eq!(book.sequence, Sequence::new(1));
+    }
+
+    #[test]
+    fn try_apply_delta_rejects_aggregate_overflow_without_mutating() {
+        let mut book = L2Book::new(AssetId::new("test"));
+        book.try_apply_delta(
+            Side::Bid,
+            FixedPrice::from_f64(0.50).unwrap(),
+            FixedSize::new(u64::MAX),
+            Sequence::new(0),
+            1,
+        )
+        .unwrap();
+
+        let err = book
+            .try_apply_delta(
+                Side::Bid,
+                FixedPrice::from_f64(0.49).unwrap(),
+                FixedSize::new(1),
+                Sequence::new(1),
+                2,
+            )
+            .unwrap_err();
+        assert!(matches!(err, BookError::AggregateOverflow { .. }));
+        assert_eq!(book.bid_depth(), 1);
+        assert!(!book
+            .bids
+            .contains_key(&Reverse(FixedPrice::from_f64(0.49).unwrap())));
+        assert_eq!(book.sequence, Sequence::new(0));
     }
 
     #[test]

@@ -10,14 +10,14 @@ weighted mid, depth queries, integrity checks).
 |------|-------------|
 | `L2Book` | The order book. Bids: `BTreeMap<Reverse<FixedPrice>, FixedSize>` (best-first). Asks: `BTreeMap<FixedPrice, FixedSize>` (best-first). |
 | `BookSide` | Type alias: `Vec<(FixedPrice, FixedSize)>` for one side of the book. |
-| `BookError` | Error type for book operations (sequence gaps, integrity violations). |
+| `BookError` | Error type for book operations (sequence gaps, integrity violations, aggregate overflow). |
 
 ## Methods
 
-`apply_snapshot`, `apply_delta`, `best_bid`, `best_ask`, `mid_price`, `spread`,
-`weighted_mid_price`, `total_bid_size`, `total_ask_size`, `top_bids`, `top_asks`,
-`bids_sorted`, `asks_sorted`, `bid_depth`, `ask_depth`, `check_integrity`,
-`check_sequence`.
+`apply_snapshot`, `try_apply_snapshot`, `apply_delta`, `try_apply_delta`,
+`best_bid`, `best_ask`, `mid_price`, `spread`, `weighted_mid_price`,
+`total_bid_size`, `total_ask_size`, `top_bids`, `top_asks`, `bids_sorted`,
+`asks_sorted`, `bid_depth`, `ask_depth`, `check_integrity`, `check_sequence`.
 
 ## Data Flow
 
@@ -36,8 +36,10 @@ pb-book (L2Book)
 - `Reverse<FixedPrice>` on the bid side ensures `BTreeMap` iteration yields
   best bid first without extra sorting. See [ADR-0002](../../docs/adr/0002-btreemap-orderbook.md).
 - **O(1) total sizes**: `total_bid_size` and `total_ask_size` are maintained via
-  incremental running sums (`total_bid_raw` / `total_ask_raw` fields) updated
-  during `apply_snapshot` and `apply_delta`, avoiding full-tree walks.
+  checked running sums (`total_bid_raw` / `total_ask_raw` fields) updated during
+  `try_apply_snapshot` and `try_apply_delta`, avoiding full-tree walks without
+  panic-prone integer overflow. If a total would overflow, the checked method
+  returns `BookError::AggregateOverflow` and leaves the book unchanged.
 - `#[inline]` on hot-path methods: `apply_delta`, `best_bid`, `best_ask`,
   `mid_price`, `spread`, `weighted_mid_price`.
 - `check_integrity` detects crossed books (best bid >= best ask). Zero-size

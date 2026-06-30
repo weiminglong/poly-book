@@ -28,4 +28,7 @@ pub enum BookError {
         best_bid: String,
         best_ask: String,
     },
+
+    #[error("orderbook {asset_id}: aggregate size overflow on {side} side")]
+    AggregateOverflow { asset_id: String, side: String },
 }

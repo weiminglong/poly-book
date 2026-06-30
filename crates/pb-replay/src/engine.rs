@@ -11,6 +11,13 @@ use crate::reader::EventReader;
 
 const DEFAULT_LOOKBACK_US: u64 = 3_600_000_000;
 
+fn checkpoint_within_floor(
+    checkpoint: Option<BookCheckpoint>,
+    floor_timestamp_us: u64,
+) -> Option<BookCheckpoint> {
+    checkpoint.filter(|checkpoint| checkpoint.checkpoint_timestamp_us >= floor_timestamp_us)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplayResult {
     pub book: L2Book,
@@ -47,10 +54,12 @@ impl<R: EventReader> ReplayEngine<R> {
             .reader
             .read_latest_checkpoint(asset_id, target_timestamp_us)
             .await?;
+        let floor_us = target_timestamp_us.saturating_sub(self.lookback_us);
+        let checkpoint = checkpoint_within_floor(checkpoint, floor_us);
         let start_us = checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.checkpoint_timestamp_us)
-            .unwrap_or_else(|| target_timestamp_us.saturating_sub(self.lookback_us));
+            .unwrap_or(floor_us);
         let window = self
             .reader
             .read_market_data(asset_id, start_us, target_timestamp_us)
@@ -122,10 +131,12 @@ impl<R: EventReader> ReplayEngine<R> {
             .reader
             .read_latest_checkpoint(asset_id, reference_us.saturating_sub(1))
             .await?;
+        let floor_us = reference_us.saturating_sub(self.lookback_us);
+        let seed = checkpoint_within_floor(seed, floor_us);
         let start_us = seed
             .as_ref()
             .map(|checkpoint| checkpoint.checkpoint_timestamp_us)
-            .unwrap_or_else(|| reference_us.saturating_sub(self.lookback_us));
+            .unwrap_or(floor_us);
         let window = self
             .reader
             .read_market_data(asset_id, start_us, reference_us)
@@ -194,7 +205,7 @@ fn reconstruct_book(
             target_ts = target_timestamp_us,
             "reconstructing from checkpoint"
         );
-        apply_checkpoint(&mut book, &checkpoint, mode);
+        apply_checkpoint(&mut book, &checkpoint, mode)?;
         used_checkpoint = true;
         // Compare the checkpoint boundary in the SAME clock domain as the events.
         // `checkpoint_timestamp_us` is an exchange-clock value (backfill sets it to
@@ -251,7 +262,7 @@ fn reconstruct_book(
             "found snapshot for reconstruction"
         );
 
-        apply_snapshot_events(&mut book, &snapshot_events, snapshot_time);
+        apply_snapshot_events(&mut book, &snapshot_events, snapshot_time)?;
         snapshot_idx + 1
     };
 
@@ -273,7 +284,7 @@ fn reconstruct_book(
                             && event_ordering_ts(candidate, mode) == current_time
                     })
                     .collect();
-                apply_snapshot_events(&mut book, &snapshot_events, current_time);
+                apply_snapshot_events(&mut book, &snapshot_events, current_time)?;
                 idx += snapshot_events.len();
                 continue;
             }
@@ -292,7 +303,7 @@ fn reconstruct_book(
                             sequence: event.provenance.sequence,
                             ingest_ordinal: None,
                         },
-                        expected_sequence: Some(book.sequence.raw() + 1),
+                        expected_sequence: Some(book.sequence.raw().wrapping_add(1)),
                         observed_sequence: Some(next_sequence.raw()),
                         details: Some(error.to_string()),
                     });
@@ -301,7 +312,7 @@ fn reconstruct_book(
                     // observability. The gap is recorded in
                     // continuity_events for the replay caller.
                 }
-                book.apply_delta(
+                if let Err(error) = book.try_apply_delta(
                     event.side,
                     event.price,
                     event.size,
@@ -313,7 +324,25 @@ fn reconstruct_book(
                     // wrong in ExchangeTime mode and inconsistent with the
                     // checkpoint fix.
                     current_time,
-                );
+                ) {
+                    continuity_events.push(IngestEvent {
+                        asset_id: Some(asset_id.clone()),
+                        kind: IngestEventKind::SourceReset,
+                        provenance: EventProvenance {
+                            recv_timestamp_us: event.provenance.recv_timestamp_us,
+                            exchange_timestamp_us: event.provenance.exchange_timestamp_us,
+                            source: event.provenance.source,
+                            source_event_id: event.provenance.source_event_id.clone(),
+                            source_session_id: event.provenance.source_session_id.clone(),
+                            sequence: event.provenance.sequence,
+                            ingest_ordinal: None,
+                        },
+                        expected_sequence: None,
+                        observed_sequence: None,
+                        details: Some(format!("book delta rejected during replay: {error}")),
+                    });
+                    break;
+                }
             }
         }
         idx += 1;
@@ -451,7 +480,11 @@ fn checkpoint_ordering_ts(checkpoint: &BookCheckpoint, mode: ReplayMode) -> u64 
     }
 }
 
-fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint, mode: ReplayMode) {
+fn apply_checkpoint(
+    book: &mut L2Book,
+    checkpoint: &BookCheckpoint,
+    mode: ReplayMode,
+) -> Result<(), pb_book::BookError> {
     let bids = checkpoint
         .bids
         .iter()
@@ -468,15 +501,19 @@ fn apply_checkpoint(book: &mut L2Book, checkpoint: &BookCheckpoint, mode: Replay
     // the two domains in one field, so a hydrate-only reconstruct (or the first
     // crossed-book continuity marker) reported a timestamp from the wrong clock
     // under recv/exchange skew.
-    book.apply_snapshot(
+    book.try_apply_snapshot(
         &bids,
         &asks,
         Sequence::default(),
         checkpoint_ordering_ts(checkpoint, mode),
-    );
+    )
 }
 
-fn apply_snapshot_events(book: &mut L2Book, snapshot_events: &[&BookEvent], timestamp_us: u64) {
+fn apply_snapshot_events(
+    book: &mut L2Book,
+    snapshot_events: &[&BookEvent],
+    timestamp_us: u64,
+) -> Result<(), pb_book::BookError> {
     let mut bids = Vec::new();
     let mut asks = Vec::new();
     let mut sequence = Sequence::default();
@@ -487,7 +524,7 @@ fn apply_snapshot_events(book: &mut L2Book, snapshot_events: &[&BookEvent], time
             Side::Ask => asks.push((event.price, event.size)),
         }
     }
-    book.apply_snapshot(&bids, &asks, sequence, timestamp_us);
+    book.try_apply_snapshot(&bids, &asks, sequence, timestamp_us)
 }
 
 fn books_match_checkpoint(book: &L2Book, checkpoint: &BookCheckpoint) -> bool {
@@ -717,14 +754,14 @@ mod sort_tests {
         };
 
         let mut recv_book = L2Book::new(AssetId::new("tok"));
-        apply_checkpoint(&mut recv_book, &checkpoint, ReplayMode::RecvTime);
+        apply_checkpoint(&mut recv_book, &checkpoint, ReplayMode::RecvTime).unwrap();
         assert_eq!(
             recv_book.last_update_us, 2000,
             "RecvTime hydration must stamp the recv-clock timestamp"
         );
 
         let mut exch_book = L2Book::new(AssetId::new("tok"));
-        apply_checkpoint(&mut exch_book, &checkpoint, ReplayMode::ExchangeTime);
+        apply_checkpoint(&mut exch_book, &checkpoint, ReplayMode::ExchangeTime).unwrap();
         assert_eq!(
             exch_book.last_update_us, 1000,
             "ExchangeTime hydration must stamp the exchange-clock timestamp"
