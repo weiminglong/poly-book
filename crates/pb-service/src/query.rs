@@ -219,6 +219,7 @@ fn sanitize_sql_with_options(sql: &str, preserve_quoted_identifiers: bool) -> Sa
                     if ch == '"' {
                         if chars.peek() == Some(&'"') {
                             sanitized.push(' ');
+                            sanitized.push(' ');
                             chars.next();
                         } else {
                             sanitized.push(' ');
@@ -243,6 +244,7 @@ fn sanitize_sql_with_options(sql: &str, preserve_quoted_identifiers: bool) -> Sa
                 if preserve_quoted_identifiers {
                     if ch == '`' {
                         if chars.peek() == Some(&'`') {
+                            sanitized.push(' ');
                             sanitized.push(' ');
                             chars.next();
                         } else {
@@ -1120,18 +1122,17 @@ mod tests {
     }
 
     #[test]
-    fn guard_rejects_unstable_quoted_identifier_normalization() {
+    fn guard_keeps_escaped_quoted_identifier_normalization_stable() {
         let guard = QueryGuard::default();
-        let err = guard_sql("\"\"\"\"WITH\"k;;;;; ;2\"k\"\"\"WITH\"k;", &guard).unwrap_err();
-        match err {
-            ServiceError::InvalidParams(msg) => {
-                assert!(
-                    msg.contains("unclosed") || msg.contains("normalization is not stable"),
-                    "unexpected error: {msg}"
-                );
-            }
-            _ => panic!("expected InvalidParams"),
-        }
+        let guarded = guard_sql("\"\"\"\"WITH\"k;;;;; ;2\"k\"\"\"WITH\"k;", &guard)
+            .expect("escaped quoted identifiers should normalize stably");
+        assert_eq!(guard_sql(&guarded, &guard).unwrap(), guarded);
+    }
+
+    #[test]
+    fn guard_handles_utf8_after_escaped_quoted_identifier_delimiters() {
+        let guard = QueryGuard::default();
+        let _ = guard_sql("``````WITH-SHOW-\u{44d3};", &guard);
     }
 
     #[test]

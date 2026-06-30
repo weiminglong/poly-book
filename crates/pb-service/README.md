@@ -85,7 +85,8 @@ pb-service trait method
   identifying the statement root or write keywords, preserves quoted identifier
   tokens for blocklist checks, injects `LIMIT` if missing, and applies a
   configurable timeout. The normalized SQL must itself pass the guard and remain
-  stable across repeated normalization.
+  stable across repeated normalization; sanitizer output remains byte-aligned
+  with the original SQL so Unicode input cannot shift statement-boundary slices.
 - `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
   targets exercise the same sanitizer and normalization path the runtime uses.
 - The guard rejects an identifier blocklist of I/O table functions (`file`,
