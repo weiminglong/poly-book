@@ -152,6 +152,14 @@ fn push_identifier_char(out: &mut String, ch: char) {
 }
 
 fn sanitize_sql(sql: &str) -> SanitizeResult {
+    sanitize_sql_with_options(sql, true)
+}
+
+fn sanitize_sql_for_keywords(sql: &str) -> SanitizeResult {
+    sanitize_sql_with_options(sql, false)
+}
+
+fn sanitize_sql_with_options(sql: &str, preserve_quoted_identifiers: bool) -> SanitizeResult {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
@@ -207,29 +215,53 @@ fn sanitize_sql(sql: &str) -> SanitizeResult {
                 }
             }
             State::DoubleQuote => {
-                if ch == '"' {
-                    if chars.peek() == Some(&'"') {
-                        sanitized.push(' ');
-                        chars.next();
+                if preserve_quoted_identifiers {
+                    if ch == '"' {
+                        if chars.peek() == Some(&'"') {
+                            sanitized.push(' ');
+                            chars.next();
+                        } else {
+                            sanitized.push(' ');
+                            state = State::Normal;
+                        }
                     } else {
-                        sanitized.push(' ');
-                        state = State::Normal;
+                        push_identifier_char(&mut sanitized, ch);
                     }
                 } else {
-                    push_identifier_char(&mut sanitized, ch);
+                    push_blanked(&mut sanitized, ch);
+                    if ch == '"' {
+                        if chars.peek() == Some(&'"') {
+                            sanitized.push(' ');
+                            chars.next();
+                        } else {
+                            state = State::Normal;
+                        }
+                    }
                 }
             }
             State::Backtick => {
-                if ch == '`' {
-                    if chars.peek() == Some(&'`') {
-                        sanitized.push(' ');
-                        chars.next();
+                if preserve_quoted_identifiers {
+                    if ch == '`' {
+                        if chars.peek() == Some(&'`') {
+                            sanitized.push(' ');
+                            chars.next();
+                        } else {
+                            sanitized.push(' ');
+                            state = State::Normal;
+                        }
                     } else {
-                        sanitized.push(' ');
-                        state = State::Normal;
+                        push_identifier_char(&mut sanitized, ch);
                     }
                 } else {
-                    push_identifier_char(&mut sanitized, ch);
+                    push_blanked(&mut sanitized, ch);
+                    if ch == '`' {
+                        if chars.peek() == Some(&'`') {
+                            sanitized.push(' ');
+                            chars.next();
+                        } else {
+                            state = State::Normal;
+                        }
+                    }
                 }
             }
             State::LineComment => {
@@ -467,7 +499,7 @@ fn validate_dataset_scope(sql: &str) -> Result<(), ServiceError> {
 
 /// Validate that SQL is read-only.
 fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
-    let result = sanitize_sql(sql);
+    let result = sanitize_sql_for_keywords(sql);
     if !result.balanced {
         return Err(ServiceError::InvalidParams(
             "SQL has unclosed quote or comment".into(),
@@ -504,8 +536,10 @@ fn validate_read_only(sql: &str) -> Result<(), ServiceError> {
             )));
         }
     }
+    let identifier_upper = sanitize_sql(sql).sql.to_uppercase();
+    let identifier_tokens: Vec<&str> = keyword_tokens(&identifier_upper).collect();
     for ident in FORBIDDEN_IDENTIFIERS {
-        if tokens.iter().any(|token| token == ident) {
+        if identifier_tokens.iter().any(|token| token == ident) {
             return Err(ServiceError::InvalidParams(format!(
                 "identifier is not allowed: {ident}"
             )));
@@ -1057,6 +1091,22 @@ mod tests {
                 }
                 _ => panic!("expected InvalidParams for {sql:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn guard_rejects_root_keyword_inside_quoted_identifier() {
+        let guard = QueryGuard::default();
+        let err = guard_sql("\u{2}\"SHOW%IW\0\"\"\";;;;;;;;;;;;;;;;;;;;;;;;", &guard).unwrap_err();
+        match err {
+            ServiceError::InvalidParams(msg) => {
+                assert!(
+                    msg.contains("statement type is not allowed")
+                        || msg.contains("SQL must not be empty"),
+                    "unexpected error: {msg}"
+                );
+            }
+            _ => panic!("expected InvalidParams"),
         }
     }
 

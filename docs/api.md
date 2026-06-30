@@ -298,7 +298,8 @@ Request body (JSON):
 Guard rails:
 
 - Only a single read-only statement is allowed
-- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`
+- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`;
+  quoted identifiers do not count as the statement root
 - Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
   `TRUNCATE`, `RENAME`, `GRANT`, `REVOKE`, `ATTACH`, `DETACH`) are rejected
   with 400 after comments and quoted literals are stripped from the guard scan

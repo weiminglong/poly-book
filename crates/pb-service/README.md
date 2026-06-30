@@ -81,9 +81,10 @@ pb-service trait method
 - If ClickHouse is unavailable at startup, the system falls back to Parquet.
 - `QueryGuard` enforces a single read-only SQL statement rooted at
   `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`, strips comments and quoted
-  string literals before keyword checks, preserves quoted identifier tokens for
-  blocklist checks, injects `LIMIT` if missing, and applies a configurable
-  timeout.
+  string literals before keyword checks, ignores quoted identifiers when
+  identifying the statement root or write keywords, preserves quoted identifier
+  tokens for blocklist checks, injects `LIMIT` if missing, and applies a
+  configurable timeout.
 - `guard_sql` is reusable outside the ClickHouse adapter, so tests and fuzz
   targets exercise the same sanitizer and normalization path the runtime uses.
 - The guard rejects an identifier blocklist of I/O table functions (`file`,
@@ -126,6 +127,6 @@ pb-service trait method
 
 ## Tests
 
-52 tests covering shared helper functions (error mapping, continuity gap detection,
-replay result construction, integrity summary building, execution timeline ordering),
-query guard edge cases, and backend-specific service logic.
+Unit tests cover shared helper functions (error mapping, continuity gap detection,
+replay result construction, integrity summary building, execution timeline
+ordering), query guard edge cases, and backend-specific service logic.
