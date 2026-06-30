@@ -49,8 +49,8 @@ clickhouse_database = "poly_book"
 clickhouse_batch_interval_secs = 1   # honored by the ClickHouse sink
 clickhouse_batch_size = 10000        # honored by the ClickHouse sink
 
-# Services default to loopback (no built-in auth) — front them with an
-# authenticating reverse proxy before exposing off-host.
+# Services default to loopback. Non-loopback API/gRPC binds require
+# api.auth_token / PB__API__AUTH_TOKEN at startup.
 [metrics]
 listen_addr = "127.0.0.1:9090"
 endpoint = "/metrics"
@@ -65,7 +65,7 @@ query_workbench_enabled = false
 query_max_rows = 10000
 query_timeout_secs = 30
 http_request_timeout_secs = 30   # per-request HTTP timeout (504 if exceeded); not the WS stream
-# auth_token = ""                # optional bearer token; when set, all API/WS routes require it (health stays open)
+# auth_token = ""                # required for non-loopback API/gRPC binds; all API/WS/gRPC data routes require it (health stays open)
 
 [wal]
 base_path = "./data/wal"
@@ -78,7 +78,7 @@ sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)
 
 [grpc]
 enabled = false
-# Loopback by default; bind publicly only behind an authenticating proxy.
+# Loopback by default; non-loopback requires api.auth_token.
 listen_addr = "127.0.0.1:50051"
 
 [logging]
@@ -97,6 +97,11 @@ cargo run -- auto-ingest
 On feed reconnect success, the dispatcher clears per-asset sequence and stale
 snapshot tracking before emitting `source_reset`, so downstream replay can treat
 the new WebSocket session as a hard continuity boundary.
+
+Feed input is bounded before it reaches storage: WebSocket text frames are capped
+at 1 MiB, venue snapshots at 10,000 levels per side, `price_change` batches at
+20,000 entries, REST bodies at 4 MiB before full buffering, discovery pages at
+1,000 events, and CLOB metadata at 512 tokens.
 
 ### Polymarket CLOB V2
 
@@ -286,12 +291,30 @@ Terraform in `infra/` provisions the AWS resources for the deployment target:
   writer failover)
 - optional **single-node ClickHouse** on ECS+EFS (`clickhouse.tf`, opt-in via
   `enable_clickhouse_service`; prefer managed ClickHouse for production), with
-  Cloud Map private DNS for `serve` discovery
+  Cloud Map private DNS for `serve` discovery and password authentication
+  injected through ECS secrets
 - S3 for Parquet storage (SSE-KMS CMK, versioning, lifecycle, access logging to a
   hardened SSE-S3 log bucket)
 - VPC (with Flow Logs), subnets, security groups (metrics port in-VPC only; EFS
   egress scoped to the VPC), IAM (incl. scoped EFS mount perms), ECR (immutable
   tags, scan-on-push), and CloudWatch resources
+
+Runtime secrets:
+
+- `serve_api_auth_token_secret_arn` — required when `serve_desired_count > 0`
+  because the ECS serve task binds `PB__API__LISTEN_ADDR=0.0.0.0:3000`.
+- `clickhouse_password_secret_arn` — required when `enable_clickhouse_service`
+  is true; injected as `CLICKHOUSE_PASSWORD` for the ClickHouse container.
+- `clickhouse_app_url_secret_arn` — required when `enable_clickhouse_service`
+  is true; injected as `PB__STORAGE__CLICKHOUSE_URL` for app/serve tasks. The
+  secret value should include credentials, for example
+  `http://poly_book:<password>@clickhouse.poly-book.internal:8123`.
+
+IAM is split by runtime role: the live ingest task keeps S3 read/write/list
+without `s3:DeleteObject`, offline `reconcile` has a separate maintenance task
+role with delete permission for Parquet recovery, serve uses a read-only S3 role
+plus EFS consumer-position writes, and the optional ClickHouse task has a
+separate no-S3 task role.
 
 > **Status:** the `serve`/EFS/ClickHouse/on-demand topology
 > passes `terraform validate` + `fmt` **and a `tfsec` static security scan** (CI
@@ -376,6 +399,8 @@ partition it covers, deletes the existing Parquet files and rewrites the complet
 partition from the WAL. It is idempotent (safe to re-run) and authoritative for
 any partition it touches. It does not commit a consumer position, so each run
 reconciles the full retained WAL. ClickHouse is not rebuilt by this command.
+In ECS, run this as a maintenance task using the dedicated reconcile task role;
+the always-on ingest task role intentionally lacks `s3:DeleteObject`.
 
 ### Failover & Recovery (RTO/RPO)
 
@@ -443,8 +468,13 @@ Enable the gRPC read surface for programmatic access to historical queries:
 PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
 ```
 
-The gRPC server listens on `0.0.0.0:50051` by default and exposes `Reconstruct`,
-`IntegritySummary`, and `ExecutionTimeline` RPCs via the `WorkstationService`.
+The gRPC server listens on `127.0.0.1:50051` by default and exposes
+`Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs via the
+`WorkstationService`. If `api.auth_token` is configured, callers must send
+`Authorization: Bearer <token>` metadata. Startup rejects non-loopback gRPC
+binds without that token. Expensive gRPC backend work is bounded by a 30s
+deadline and a 128-request global in-flight cap; saturated servers return
+`RESOURCE_EXHAUSTED`, and timed-out work returns `DEADLINE_EXCEEDED`.
 
 ### Query Workbench
 
@@ -466,8 +496,12 @@ curl -X POST http://localhost:3000/api/v1/query/sql \
   -d '{"sql": "SELECT count() FROM book_events", "max_rows": 100}'
 ```
 
-The workbench rejects write SQL and injects LIMIT if not present. Returns 503
-when disabled (the default).
+The workbench rejects write SQL, dangerous ClickHouse table functions (including
+quoted identifiers), and table references outside the advertised dataset
+allowlist. It injects `LIMIT` if not present. ClickHouse transport and decode
+errors strip request URL context before they become internal API errors, so
+credential-bearing backend URLs do not enter API logs. Returns 503 when disabled
+(the default).
 
 ### Health Endpoints
 
@@ -579,8 +613,9 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:4173` in the browser. The Vite dev server proxies
-`/api` requests to the Rust API at `127.0.0.1:3000`.
+Open `http://127.0.0.1:4173` in the browser. The Vite dev server binds loopback
+by default and proxies `/api` requests to the Rust API at `127.0.0.1:3000`. Set
+`VITE_DEV_HOST=0.0.0.0` only for an intentional LAN-exposed dev session.
 
 ### Demo Mode (No Backend Required)
 

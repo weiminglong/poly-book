@@ -94,7 +94,7 @@ resource "aws_ecs_task_definition" "clickhouse" {
   cpu                      = var.clickhouse_cpu
   memory                   = var.clickhouse_memory
   execution_role_arn       = aws_iam_role.ecs_execution.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
+  task_role_arn            = aws_iam_role.ecs_task_clickhouse.arn
 
   container_definitions = jsonencode([
     {
@@ -109,6 +109,19 @@ resource "aws_ecs_task_definition" "clickhouse" {
 
       ulimits = [
         { name = "nofile", softLimit = 262144, hardLimit = 262144 }
+      ]
+
+      environment = [
+        { name = "CLICKHOUSE_DB", value = "poly_book" },
+        { name = "CLICKHOUSE_USER", value = var.clickhouse_user },
+        { name = "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", value = "1" }
+      ]
+
+      secrets = [
+        {
+          name      = "CLICKHOUSE_PASSWORD"
+          valueFrom = var.clickhouse_password_secret_arn
+        }
       ]
 
       mountPoints = [
@@ -135,6 +148,13 @@ resource "aws_ecs_task_definition" "clickhouse" {
     efs_volume_configuration {
       file_system_id     = aws_efs_file_system.clickhouse[0].id
       transit_encryption = "ENABLED"
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = length(trimspace(var.clickhouse_password_secret_arn)) > 0
+      error_message = "clickhouse_password_secret_arn is required when enable_clickhouse_service is true."
     }
   }
 }

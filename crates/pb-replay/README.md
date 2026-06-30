@@ -39,9 +39,13 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 
 ## Design Notes
 
-- Reconstruction starts from the nearest checkpoint before the target timestamp,
-  then only reads market data from that checkpoint timestamp forward instead of
-  replaying the full lookback window.
+- Reconstruction searches for checkpoints only inside the configured lookback
+  window and starts from one only when it is inside that floor. Stale checkpoints
+  older than `target - lookback` are ignored, so replay reads never expand beyond
+  the configured reconstruction window solely because an old checkpoint exists.
+- `read_latest_checkpoint` still returns the latest available checkpoint before a
+  timestamp for startup hydration and operator workflows that need the durable
+  recovery point rather than replay-window bounds.
 - `SourceReset` is treated as a hard continuity boundary during replay. If the
   latest reset precedes the target, replay ignores older checkpoints/snapshots
   and requires a fresh post-reset snapshot before applying later deltas.
@@ -60,11 +64,12 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   it; the two aggregate queries run concurrently via `try_join!`. The
   returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
   `validation_match_count`.
-- Unbounded ClickHouse reads (`read_ingest_events`, `read_execution_events`) go
-  through `bounded_client()`, which sets `max_result_rows = MAX_READ_ROWS` (5M) +
-  `result_overflow_mode = 'throw'`, so a pathological window ERRORS loudly instead
-  of materializing millions of rows and OOM-ing the serve process. Verified
-  against a live server (TOO_MANY_ROWS_OR_BYTES on overflow).
+- Potentially large ClickHouse reads (`read_market_data`, `read_ingest_events`,
+  `read_execution_events`) go through `bounded_client()`, which sets
+  `max_result_rows = MAX_READ_ROWS` (5M) + `result_overflow_mode = 'throw'`, so a
+  pathological window ERRORS loudly instead of materializing millions of rows and
+  OOM-ing the serve process. Verified against a live server
+  (TOO_MANY_ROWS_OR_BYTES on overflow).
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
@@ -86,6 +91,9 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 - Replay never mutates live observability: a sequence gap found during
   reconstruction is recorded in the returned continuity events, not pushed to the
   live `pb_gaps_detected_total` recorder.
+- Book snapshot/checkpoint/delta application uses checked `L2Book` paths. An
+  aggregate overflow from corrupt persisted data returns a replay error or
+  continuity marker instead of panicking or partially mutating the book.
 - **Single clock domain at the checkpoint boundary**: `checkpoint_timestamp_us`
   is an exchange-clock value, so the post-checkpoint cutoff projects the
   checkpoint into the active replay clock (`checkpoint_ordering_ts`) before
@@ -105,6 +113,6 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 
 ## Tests
 
-27 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
+28 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
 `ParquetReader` integration, end-to-end write-then-reconstruct round-trips, and
 backfill REST response parsing.

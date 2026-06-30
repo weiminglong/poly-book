@@ -90,6 +90,13 @@ resource "aws_ecs_task_definition" "app" {
         [for k, v in var.app_env_vars : { name = k, value = v }]
       )
 
+      secrets = var.enable_clickhouse_service ? [
+        {
+          name      = "PB__STORAGE__CLICKHOUSE_URL"
+          valueFrom = var.clickhouse_app_url_secret_arn
+        }
+      ] : []
+
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -110,6 +117,13 @@ resource "aws_ecs_task_definition" "app" {
         access_point_id = aws_efs_access_point.wal.id
         iam             = "ENABLED"
       }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !var.enable_clickhouse_service || length(trimspace(var.clickhouse_app_url_secret_arn)) > 0
+      error_message = "clickhouse_app_url_secret_arn is required when enable_clickhouse_service is true so app tasks receive an authenticated ClickHouse URL."
     }
   }
 }

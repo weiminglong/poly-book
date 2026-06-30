@@ -28,6 +28,28 @@ pub enum FeedError {
 
     #[error("url parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    #[error("{label} payload too large: {len} bytes exceeds {limit} byte limit")]
+    PayloadTooLarge {
+        label: &'static str,
+        len: usize,
+        limit: usize,
+    },
+
+    #[error("{label} array too large: {len} entries exceeds {limit} entry limit")]
+    ArrayTooLarge {
+        label: &'static str,
+        len: usize,
+        limit: usize,
+    },
+
+    #[error("book side too large for {label}: bids={bids}, asks={asks}, limit per side={limit}")]
+    BookTooLarge {
+        label: &'static str,
+        bids: usize,
+        asks: usize,
+        limit: usize,
+    },
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for FeedError {

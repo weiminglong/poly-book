@@ -16,13 +16,16 @@ surfaces remain deferred.
 
 ## Security / Trust Boundary
 
-There is **no built-in authentication** on the HTTP, WebSocket, or gRPC surfaces.
-All services default to binding loopback (`127.0.0.1`); to serve other hosts,
-place an authenticating reverse proxy in front and only then change the bind
-address. Never expose the metrics port or the SQL workbench to an untrusted
-network. HTTP request/response routes are bounded by a per-request timeout, a
-global in-flight concurrency cap, and a request-body size limit; 5xx responses
-return an opaque message and log the detail server-side.
+HTTP, WebSocket, and gRPC data surfaces support a shared bearer token via
+`api.auth_token` / `PB__API__AUTH_TOKEN`. All services default to binding
+loopback (`127.0.0.1`); startup rejects non-loopback API or gRPC binds unless
+that token is configured. Health probes stay open. Never expose the metrics port
+or the SQL workbench to an untrusted network. HTTP request/response routes are
+bounded by a per-request timeout, a global in-flight concurrency cap, and a
+request-body size limit; gRPC backend work has a 30s deadline and a 128-request
+global in-flight cap. 5xx responses return an opaque message and log the detail
+server-side after URL-bearing ClickHouse transport errors have been stripped of
+request URL context.
 
 Health/readiness endpoints: `GET /health` (detailed JSON, always 200),
 `GET /health/live` (liveness), `GET /health/ready` (200 only when ready, else
@@ -123,9 +126,12 @@ Returns:
 - asset ID
 - selected replay mode
 - whether replay used a checkpoint
-- replay starts from the latest checkpoint at or before `at_us` when available,
-  and only reads forward from that checkpoint horizon instead of the full
-  default lookback window
+- replay starts from the latest checkpoint at or before `at_us` only if that
+  checkpoint is inside the configured lookback floor; stale checkpoints older
+  than `at_us - lookback` are ignored so reconstruct reads stay bounded
+- checkpoint discovery for a reconstruct request scans only the configured
+  lookback window; if none is found, replay falls back to snapshot-based
+  reconstruction
 - `source_reset` continuity events are treated as hard replay boundaries; if a
   reset occurs before `at_us`, reconstruction requires a fresh post-reset
   snapshot instead of stitching pre-reset state across sessions
@@ -219,6 +225,8 @@ Returns:
   so a client knows how many pages exist
 - the same window cap, result-limit clamp, `offset`, and `descending` paging are
   available on the gRPC `ExecutionTimeline` RPC
+- the gRPC surface rejects `limit > 1000`; `limit = 0` uses the default page size
+  of 100
 
 ### `WS /api/v1/streams/orderbook`
 
@@ -290,11 +298,21 @@ Request body (JSON):
 Guard rails:
 
 - Only a single read-only statement is allowed
-- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`
+- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`;
+  quoted identifiers do not count as the statement root
 - Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
   `TRUNCATE`, `RENAME`, `GRANT`, `REVOKE`, `ATTACH`, `DETACH`) are rejected
   with 400 after comments and quoted literals are stripped from the guard scan
+- Quoted identifiers remain visible to blocklist checks, so backtick/double
+  quoted `file`, `url`, `s3`, `system`, and similar identifiers are rejected
+- Table references are restricted to the advertised workbench datasets:
+  `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`,
+  `replay_validations`, and `execution_events`
+- Dangling `FROM`, `JOIN`, and `DESCRIBE` table references return 400 before
+  `LIMIT` normalization
 - `LIMIT` is injected if not present
+- The normalized SQL must itself pass the guard and remain stable across
+  repeated normalization
 - Queries time out after `api.query_timeout_secs` (default 30s)
 
 Response:

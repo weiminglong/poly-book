@@ -207,12 +207,21 @@ impl LiveState {
             return false;
         };
         let state = self.ensure_asset(asset_id);
-        state.book.apply_snapshot(
+        if let Err(err) = state.book.try_apply_snapshot(
             &pending.bids,
             &pending.asks,
             pb_types::Sequence::new(pending.sequence),
             pending.last_recv_timestamp_us,
-        );
+        ) {
+            state.latest_warning = Some(ContinuityWarning {
+                kind: "book_apply_error".to_string(),
+                recv_timestamp_us: pending.last_recv_timestamp_us,
+                exchange_timestamp_us: pending.key.exchange_timestamp_us,
+                details: Some(err.to_string()),
+            });
+            tracing::warn!(asset_id, error = %err, "snapshot rejected on live path");
+            return false;
+        }
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(pending.last_recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(pending.key.exchange_timestamp_us);
@@ -277,13 +286,22 @@ impl LiveState {
     fn record_delta_event(&mut self, event: BookEvent) {
         let asset_id = event.asset_id.to_string();
         let state = self.ensure_asset(&asset_id);
-        state.book.apply_delta(
+        if let Err(err) = state.book.try_apply_delta(
             event.side,
             event.price,
             event.size,
             event.provenance.sequence.unwrap_or_default(),
             event.provenance.recv_timestamp_us,
-        );
+        ) {
+            state.latest_warning = Some(ContinuityWarning {
+                kind: "book_apply_error".to_string(),
+                recv_timestamp_us: event.provenance.recv_timestamp_us,
+                exchange_timestamp_us: event.provenance.exchange_timestamp_us,
+                details: Some(err.to_string()),
+            });
+            tracing::warn!(asset_id = %asset_id, error = %err, "delta rejected on live path");
+            return;
+        }
         state.last_recv_timestamp_us = Some(event.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(event.provenance.exchange_timestamp_us);
         self.check_book_integrity(&asset_id);
@@ -325,12 +343,21 @@ impl LiveState {
             checkpoint.bids.iter().map(|l| (l.price, l.size)).collect();
         let asks: Vec<(FixedPrice, FixedSize)> =
             checkpoint.asks.iter().map(|l| (l.price, l.size)).collect();
-        state.book.apply_snapshot(
+        if let Err(err) = state.book.try_apply_snapshot(
             &bids,
             &asks,
             pb_types::Sequence::default(),
             checkpoint.checkpoint_timestamp_us,
-        );
+        ) {
+            state.latest_warning = Some(ContinuityWarning {
+                kind: "book_apply_error".to_string(),
+                recv_timestamp_us: checkpoint.provenance.recv_timestamp_us,
+                exchange_timestamp_us: checkpoint.provenance.exchange_timestamp_us,
+                details: Some(err.to_string()),
+            });
+            tracing::warn!(asset_id, error = %err, "checkpoint rejected on live path");
+            return;
+        }
         state.initialized_from_snapshot = true;
         state.last_recv_timestamp_us = Some(checkpoint.provenance.recv_timestamp_us);
         state.last_exchange_timestamp_us = Some(checkpoint.provenance.exchange_timestamp_us);

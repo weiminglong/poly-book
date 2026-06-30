@@ -55,12 +55,15 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 
 - The API is intentionally read-only. No mutation routes exist in v1.
   See [docs/serve-api.md](../../docs/serve-api.md) for runtime constraints.
-- **Trust boundary**: there is no authentication. Services bind loopback by
-  default and must sit behind an authenticating reverse proxy before being
-  exposed off-host. HTTP request/response routes are bounded by a per-request
-  timeout, a global in-flight concurrency cap, and a request-body size limit;
-  the long-lived WS route is intentionally exempt from the request timeout. 5xx
-  responses return an opaque message and log the real detail server-side.
+- **Trust boundary**: HTTP/WS routes support optional bearer-token auth via
+  `api.auth_token`; health probes stay open. The default loopback bind can stay
+  open for local use, but `pb-bin` rejects non-loopback API/gRPC binds unless a
+  token is configured. HTTP request/response routes are bounded by a
+  per-request timeout, a global in-flight concurrency cap, and a request-body
+  size limit; the long-lived WS route is intentionally exempt from the request
+  timeout. 5xx responses return an opaque message and log the real detail
+  server-side; URL-bearing ClickHouse transport errors are redacted before they
+  can reach that log path.
 - `LiveReadModel` receives `PersistedRecord` events and maintains in-memory
   book state without persisting to disk. After each snapshot materialization,
   delta, and checkpoint apply it runs `L2Book::check_integrity`; a crossed/locked
@@ -78,7 +81,10 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   the same broadcast fanout, so WAL-tail updates are streamed to WS clients as
   incremental book messages instead of snapshot-only sessions.
 - Historical reads use configurable backend (Parquet or ClickHouse) via `pb-service` enum dispatch.
-- Query workbench (`/query/datasets`, `/query/sql`) is ClickHouse-only and optional (`query_service: Option<AnyQueryService>`).
+- Query workbench (`/query/datasets`, `/query/sql`) is ClickHouse-only and
+  optional (`query_service: Option<AnyQueryService>`). It exposes only the
+  documented dataset allowlist and rejects direct access to other tables or
+  qualified database names.
 - WebSocket `asset_id` accepts either the canonical token ID or a registered
   slug, matching the REST snapshot route.
 

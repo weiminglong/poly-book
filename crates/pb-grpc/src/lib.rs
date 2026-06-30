@@ -1,7 +1,11 @@
 //! gRPC read surface for the poly-book workstation.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -22,6 +26,38 @@ use proto::workstation_service_server::{WorkstationService, WorkstationServiceSe
 /// a wide query cannot OOM the serve process; large enough
 /// for legitimate reconstruct/timeline responses.
 const MAX_GRPC_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Match the HTTP execution inspector's default page size.
+const EXECUTION_DEFAULT_LIMIT: u32 = 100;
+/// Match the HTTP execution inspector's hard per-request cap.
+const EXECUTION_MAX_LIMIT: u32 = 1000;
+/// Match the HTTP request/response default timeout.
+const GRPC_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Global cap on concurrent gRPC request work.
+const MAX_INFLIGHT_GRPC_REQUESTS: usize = 128;
+
+fn grpc_concurrency_limiter() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(MAX_INFLIGHT_GRPC_REQUESTS))
+}
+
+async fn run_with_grpc_budget<T, F>(timeout: Duration, future: F) -> Result<T, Status>
+where
+    F: Future<Output = Result<T, Status>>,
+{
+    let _permit = grpc_concurrency_limiter()
+        .try_acquire()
+        .map_err(|_| Status::resource_exhausted("gRPC server at capacity, retry shortly"))?;
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| Status::deadline_exceeded("gRPC request timed out"))?
+}
+
+async fn with_grpc_budget<T, F>(future: F) -> Result<T, Status>
+where
+    F: Future<Output = Result<T, Status>>,
+{
+    run_with_grpc_budget(Duration::from_secs(GRPC_REQUEST_TIMEOUT_SECS), future).await
+}
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -78,6 +114,32 @@ fn parse_replay_mode(s: &str) -> Result<ReplayMode, Status> {
         other => Err(Status::invalid_argument(format!(
             "unknown replay mode: {other}, expected \"recv_time\" or \"exchange_time\""
         ))),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() != b.len()) as u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn validate_bearer_auth(
+    metadata: &tonic::metadata::MetadataMap,
+    expected: &str,
+) -> Result<(), Status> {
+    let presented = metadata
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let ok = presented
+        .map(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(Status::unauthenticated("missing or invalid bearer token"))
     }
 }
 
@@ -143,11 +205,13 @@ impl WorkstationService for GrpcWorkstationService {
             None => None,
         };
 
-        let result = self
-            .replay
-            .reconstruct(&asset_id, req.at_us, mode, depth)
-            .await
-            .map_err(service_error_to_status)?;
+        let result = with_grpc_budget(async {
+            self.replay
+                .reconstruct(&asset_id, req.at_us, mode, depth)
+                .await
+                .map_err(service_error_to_status)
+        })
+        .await?;
 
         let resp = proto::ReconstructResponse {
             asset_id: result.asset_id,
@@ -189,12 +253,16 @@ impl WorkstationService for GrpcWorkstationService {
     ) -> Result<Response<proto::IntegritySummaryResponse>, Status> {
         let req = request.into_inner();
         let asset_id = pb_types::AssetId::new(&*req.asset_id);
-
-        let summary = self
-            .integrity
-            .summary(&asset_id, req.start_us, req.end_us)
-            .await
+        pb_service::validate_time_window(req.start_us, req.end_us)
             .map_err(service_error_to_status)?;
+
+        let summary = with_grpc_budget(async {
+            self.integrity
+                .summary(&asset_id, req.start_us, req.end_us)
+                .await
+                .map_err(service_error_to_status)
+        })
+        .await?;
 
         let resp = proto::IntegritySummaryResponse {
             asset_id: summary.asset_id,
@@ -225,22 +293,35 @@ impl WorkstationService for GrpcWorkstationService {
         request: Request<proto::ExecutionTimelineRequest>,
     ) -> Result<Response<proto::ExecutionTimelineResponse>, Status> {
         let req = request.into_inner();
+        pb_service::validate_time_window(req.start_us, req.end_us)
+            .map_err(service_error_to_status)?;
+        let limit = if req.limit == 0 {
+            EXECUTION_DEFAULT_LIMIT
+        } else if req.limit > EXECUTION_MAX_LIMIT {
+            return Err(Status::invalid_argument(format!(
+                "limit must be between 1 and {EXECUTION_MAX_LIMIT}"
+            )));
+        } else {
+            req.limit
+        };
         let asset_id = req.asset_id.as_deref().map(pb_types::AssetId::new);
         let order_id = req.order_id.as_deref();
 
-        let timeline = self
-            .execution
-            .timeline(
-                asset_id.as_ref(),
-                order_id,
-                req.start_us,
-                req.end_us,
-                req.limit as usize,
-                req.offset as usize,
-                req.descending,
-            )
-            .await
-            .map_err(service_error_to_status)?;
+        let timeline = with_grpc_budget(async {
+            self.execution
+                .timeline(
+                    asset_id.as_ref(),
+                    order_id,
+                    req.start_us,
+                    req.end_us,
+                    limit as usize,
+                    req.offset as usize,
+                    req.descending,
+                )
+                .await
+                .map_err(service_error_to_status)
+        })
+        .await?;
 
         let events = timeline
             .events
@@ -288,9 +369,17 @@ pub async fn start_grpc_server(
     integrity: AnyIntegrityService,
     execution: AnyExecutionService,
     max_depth: usize,
+    auth_token: Option<String>,
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let service = GrpcWorkstationService::new(replay, integrity, execution, max_depth);
+    let auth_token = auth_token.map(Arc::<str>::from);
+    let auth_interceptor = move |request: Request<()>| {
+        if let Some(expected) = auth_token.as_deref() {
+            validate_bearer_auth(request.metadata(), expected)?;
+        }
+        Ok(request)
+    };
     // Bound the response encode size. The default permits multi-GB messages, so a
     // wide reconstruct/timeline query against a busy asset could try to serialize
     // an enormous response and OOM the serve process. 16 MiB
@@ -299,6 +388,8 @@ pub async fn start_grpc_server(
     let workstation = WorkstationServiceServer::new(service)
         .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES)
         .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES);
+    let workstation =
+        tonic::service::interceptor::InterceptedService::new(workstation, auth_interceptor);
     let server = tonic::transport::Server::builder().add_service(workstation);
 
     // Bind up front so a bind failure (e.g. port in use) is returned to the
@@ -424,6 +515,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -472,6 +564,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -516,6 +609,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -550,6 +644,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execution_timeline_rejects_limit_above_http_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            None,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let status = client
+            .execution_timeline(proto::ExecutionTimelineRequest {
+                asset_id: None,
+                order_id: None,
+                start_us: 1,
+                end_us: 86_400_000_001,
+                limit: EXECUTION_MAX_LIMIT + 1,
+                offset: 0,
+                descending: false,
+            })
+            .await
+            .expect_err("oversized gRPC execution limit must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_enabled_rejects_missing_and_accepts_valid_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        write_test_data(base).await;
+
+        let port = free_port().await;
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let shutdown = CancellationToken::new();
+        let (replay, integrity, execution) = build_test_services(base);
+
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            usize::MAX,
+            Some("s3cret".to_string()),
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut client = WorkstationServiceClient::connect(format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let missing = client
+            .reconstruct(proto::ReconstructRequest {
+                asset_id: "test-asset".into(),
+                at_us: 1_700_000_000_000_000 + 1,
+                mode: "recv_time".into(),
+                depth: None,
+            })
+            .await
+            .expect_err("missing token must be rejected");
+        assert_eq!(missing.code(), tonic::Code::Unauthenticated);
+
+        let mut request = Request::new(proto::ReconstructRequest {
+            asset_id: "test-asset".into(),
+            at_us: 1_700_000_000_000_000 + 1,
+            mode: "recv_time".into(),
+            depth: None,
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer s3cret".parse().unwrap());
+        let resp = client.reconstruct(request).await.unwrap().into_inner();
+        assert_eq!(resp.asset_id, "test-asset");
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+
+    #[tokio::test]
     async fn test_invalid_replay_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().to_str().unwrap();
@@ -565,6 +761,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -703,6 +900,18 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Internal);
     }
 
+    #[tokio::test]
+    async fn grpc_budget_times_out_slow_backend_work() {
+        let status = run_with_grpc_budget(Duration::from_millis(1), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<(), Status>(())
+        })
+        .await
+        .expect_err("slow backend work should hit the gRPC deadline");
+
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+    }
+
     // -----------------------------------------------------------------------
     // Additional RPC tests
     // -----------------------------------------------------------------------
@@ -724,6 +933,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -766,9 +976,17 @@ mod tests {
         let (replay, integrity, execution) = build_test_services(base);
 
         // max_depth = 5 mirrors the HTTP api.max_depth guard.
-        let handle = start_grpc_server(addr, replay, integrity, execution, 5, shutdown.clone())
-            .await
-            .unwrap();
+        let handle = start_grpc_server(
+            addr,
+            replay,
+            integrity,
+            execution,
+            5,
+            None,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -813,6 +1031,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -858,6 +1077,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -904,6 +1124,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -953,6 +1174,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await
@@ -1001,6 +1223,7 @@ mod tests {
             integrity,
             execution,
             usize::MAX,
+            None,
             shutdown.clone(),
         )
         .await

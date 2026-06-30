@@ -117,6 +117,9 @@ impl MockReader {
     }
 
     fn with_latest_checkpoint(mut self, cp: Option<BookCheckpoint>) -> Self {
+        if let Some(checkpoint) = cp.as_ref() {
+            self.checkpoints.push(checkpoint.clone());
+        }
         self.latest_checkpoint = cp;
         self
     }
@@ -149,10 +152,18 @@ impl EventReader for MockReader {
     async fn read_checkpoints(
         &self,
         _asset_id: &AssetId,
-        _start_us: u64,
-        _end_us: u64,
+        start_us: u64,
+        end_us: u64,
     ) -> Result<Vec<BookCheckpoint>, ReplayError> {
-        Ok(self.checkpoints.clone())
+        Ok(self
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.checkpoint_timestamp_us >= start_us
+                    && checkpoint.checkpoint_timestamp_us <= end_us
+            })
+            .cloned()
+            .collect())
     }
 
     async fn read_latest_checkpoint(
@@ -327,6 +338,32 @@ async fn replay_engine_uses_checkpoint_timestamp_as_market_data_floor() {
     let calls = calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0], (checkpoint_ts, target_ts));
+}
+
+#[tokio::test]
+async fn replay_engine_ignores_checkpoint_older_than_lookback_floor() {
+    let checkpoint_ts = BASE_TS;
+    let target_ts = BASE_TS + 100_000;
+    let lookback_us = 10_000;
+    let checkpoint = make_checkpoint(
+        checkpoint_ts,
+        vec![(5000, 1_000_000)],
+        vec![(5100, 2_000_000)],
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let reader = MockReader::new()
+        .with_call_log(calls.clone())
+        .with_market_data(MarketDataWindow::default())
+        .with_latest_checkpoint(Some(checkpoint));
+    let engine = ReplayEngine::new(reader).with_lookback_us(lookback_us);
+
+    let _ = engine
+        .reconstruct_at(&test_asset_id(), target_ts, ReplayMode::RecvTime)
+        .await;
+
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], (target_ts - lookback_us, target_ts));
 }
 
 #[tokio::test]

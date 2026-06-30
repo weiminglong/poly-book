@@ -30,7 +30,7 @@ Opt-in via `config/default.toml`:
 ```toml
 [grpc]
 enabled = false
-listen_addr = "0.0.0.0:50051"
+listen_addr = "127.0.0.1:50051"
 ```
 
 ## Design Notes
@@ -39,13 +39,16 @@ listen_addr = "0.0.0.0:50051"
 - `completeness_to_str()` returns `&'static str` instead of a heap-allocated `String`
   for zero-allocation completeness level formatting.
 - Backend selection (Parquet/ClickHouse) applies equally to gRPC and HTTP
+- When `api.auth_token` is configured, the gRPC server requires the same
+  `Authorization: Bearer <token>` metadata as HTTP/WS. `pb-bin` refuses to start
+  gRPC on a non-loopback bind without that token.
 - `start_grpc_server` binds the listener up front and returns a bind error to the
   caller (which fails fast), instead of logging "bound" and swallowing the failure
   inside the serve task.
-- Time-window and limit validation lives in `pb-service` (the enum-dispatch
-  chokepoint), so gRPC inherits the same 24h window cap and result-limit clamp as
-  HTTP — a hostile far-future `end_us` can no longer drive `hour_paths` into
-  billions of iterations and OOM the process.
+- Time-window validation lives in `pb-service` (the enum-dispatch chokepoint),
+  and gRPC also rejects `ExecutionTimeline` limits above the HTTP cap of 1000.
+  A hostile far-future `end_us` can no longer drive `hour_paths` into billions
+  of iterations and OOM the process.
 - `Reconstruct` validates `depth` against `max_depth` (passed to
   `start_grpc_server`/`GrpcWorkstationService::new` from `api.max_depth`), mirroring
   the HTTP `validate_depth` guard so both surfaces reject the same oversized depth
@@ -55,6 +58,9 @@ listen_addr = "0.0.0.0:50051"
   `max_decoding_message_size`); the default permits multi-GB messages, so a wide
   query could otherwise serialize an enormous response and OOM serve. Pairs with
   the `ClickHouseReader` per-read row cap (`MAX_READ_ROWS`).
+- Expensive gRPC backend work is also bounded by a 30s request deadline and a
+  128-request global in-flight cap. Saturated servers return
+  `RESOURCE_EXHAUSTED`; slow backend calls return `DEADLINE_EXCEEDED`.
 - `ExecutionTimelineRequest` carries `offset` and `descending` fields for
   server-side pagination (mirrors HTTP `offset`/`order`), so callers can page
   through the full window instead of being capped at the first/last `limit` events.
@@ -70,6 +76,6 @@ listen_addr = "0.0.0.0:50051"
 
 ## Tests
 
-22 tests covering all `CompletenessLevel` variants, `parse_replay_mode`,
+25 tests covering all `CompletenessLevel` variants, `parse_replay_mode`,
 proto message mapping, error-to-gRPC-status mapping, the `depth > max_depth`
-rejection, and RPC handler tests.
+rejection, bearer-token auth, execution limit rejection, and RPC handler tests.

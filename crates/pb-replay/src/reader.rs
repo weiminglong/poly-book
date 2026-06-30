@@ -155,8 +155,8 @@ impl ParquetReader {
                     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                         continue;
                     };
-                    let expected = format!("{prefix}_");
-                    if !name.starts_with(&expected) {
+                    let expected = pb_types::newtype::storage_key_for(prefix);
+                    if !pb_types::newtype::storage_file_matches_asset(name, &expected) {
                         continue;
                     }
                 }
@@ -1337,10 +1337,12 @@ impl EventReader for ClickHouseReader {
         let book_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, side, price, size, sequence, source, source_event_id, source_session_id, ingest_ordinal FROM book_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, sequence";
         let trade_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, price, size, side, trade_id, fidelity, sequence, source, source_event_id, source_session_id FROM trade_events WHERE asset_id = ? AND recv_timestamp_us >= ? AND recv_timestamp_us <= ? ORDER BY recv_timestamp_us, trade_id";
         let ingest_query = "SELECT recv_timestamp_us, exchange_timestamp_us, asset_id, event_kind, sequence, expected_sequence, observed_sequence, details, source, source_event_id, source_session_id FROM ingest_events WHERE recv_timestamp_us >= ? AND recv_timestamp_us <= ? AND (asset_id = ? OR asset_id IS NULL) ORDER BY recv_timestamp_us, event_kind, sequence";
+        let client = self.bounded_client();
 
         let (book_rows, trade_rows, ingest_rows) = tokio::try_join!(
             async {
-                self.client
+                client
+                    .clone()
                     .query(book_query)
                     .bind(asset_id.as_str())
                     .bind(start_us)
@@ -1350,7 +1352,8 @@ impl EventReader for ClickHouseReader {
                     .map_err(ReplayError::from)
             },
             async {
-                self.client
+                client
+                    .clone()
                     .query(trade_query)
                     .bind(asset_id.as_str())
                     .bind(start_us)
@@ -1360,7 +1363,8 @@ impl EventReader for ClickHouseReader {
                     .map_err(ReplayError::from)
             },
             async {
-                self.client
+                client
+                    .clone()
                     .query(ingest_query)
                     .bind(start_us)
                     .bind(end_us)

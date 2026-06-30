@@ -11,7 +11,7 @@ the system.
 |------|-------------|
 | `FixedPrice` | Price scaled by 10,000 (4 decimal places); private `u32` field. `const fn` on `raw()`, `is_zero()`. Never use `f64`. See [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md). |
 | `FixedSize` | Size scaled by 1,000,000 (6 decimal places); private `u64` field. `const fn` on `new()`, `raw()`, `is_zero()`. |
-| `AssetId` | Typed newtype wrapping a string identifier for a market asset. |
+| `AssetId` | Typed newtype wrapping a string identifier for a market asset. Provides `storage_key()` for safe object-store filenames. |
 | `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
 | `PersistedRecord` | Enum dispatching to the six event datasets below. |
@@ -68,8 +68,15 @@ pb-types ◄── pb-feed    (wire deserialization)
 - `PersistedRecord` is the single enum that splits into all six datasets. Adding
   a new dataset means adding a variant here, plus corresponding schema and writer
   in pb-store and reader in pb-replay.
+- `storage_key_for()` percent-encodes asset partitions for Parquet object names,
+  preserving common safe ASCII and encoding `/`, `\`, `%`, control bytes, and
+  non-ASCII as `%XX`.
+- `storage_file_asset_key()` / `storage_file_matches_asset()` parse the current
+  `{asset}_{first_ts}_{content_hash}_{len}.parquet` suffix from the right, so
+  callers compare the exact asset component even when the encoded asset key
+  contains underscores.
 - `proptest` suites verify fixed-point roundtrip, ordering, and serde consistency.
-- 149 tests covering boundary conditions, serde round-trips, proptest invariants,
+- 150 tests covering boundary conditions, serde round-trips, proptest invariants,
   and all persisted record types.
 
 ## Docs to Update After Changes

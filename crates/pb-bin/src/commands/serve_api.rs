@@ -87,9 +87,16 @@ pub async fn run(
         pipeline::build_services(&settings).await;
     let query_service = pipeline::build_query_service(&settings).await;
     let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
+    let auth_token = pipeline::api_auth_token_from_settings(&settings);
 
     // Optionally start gRPC server.
     let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
+    pipeline::validate_api_auth_boundary(
+        api_listen_addr,
+        grpc_enabled,
+        grpc_addr,
+        auth_token.as_deref(),
+    )?;
     let grpc_handle = if grpc_enabled {
         Some(
             pb_grpc::start_grpc_server(
@@ -98,6 +105,7 @@ pub async fn run(
                 integrity_service.clone(),
                 execution_service.clone(),
                 max_depth,
+                auth_token.clone(),
                 shutdown.child_token(),
             )
             .await
@@ -122,11 +130,7 @@ pub async fn run(
                 pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
                 1,
             ) as u64,
-            // Optional bearer-token auth; empty/unset = open.
-            auth_token: settings
-                .get_string("api.auth_token")
-                .ok()
-                .filter(|t| !t.is_empty()),
+            auth_token,
         },
         broadcast: Some(broadcast.clone()),
         slug_registry,

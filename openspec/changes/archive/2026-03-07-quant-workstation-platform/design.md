@@ -88,6 +88,9 @@ The target transport split is:
 - internal services use gRPC over the same serving domain model
 - transport-specific DTOs and error mappings are derived from a shared
   transport-neutral service layer rather than duplicating domain logic
+- gRPC read calls use the same safety envelope as browser-facing reads:
+  authenticated non-loopback binds, bounded time windows, bounded result sizes,
+  request deadlines, and process-wide concurrency caps
 
 ### Live read model
 
@@ -155,6 +158,8 @@ The replay lab shows:
 - continuity events returned with the replay
 - whether replay started from a checkpoint
 - replay validation and drift visibility
+- bounded checkpoint use: a persisted checkpoint older than the replay lookback
+  floor is ignored so request cost cannot be widened by stale checkpoint data
 
 ### Integrity
 
@@ -193,11 +198,15 @@ The query workbench provides:
 - canned examples
 - read-only SQL execution against an approved backend
 - row limits, timeout limits, and disabled-by-default controls
+- dataset allowlisting and rejection of ClickHouse I/O table functions/system
+  tables before execution
+- backend transport errors that do not leak credential-bearing ClickHouse URLs
+  into API logs
 
 ## Safety And Scope Boundaries
 
-The workstation's first version has no authenticated mutating actions. It does
-not claim:
+The workstation's first version has lightweight bearer-token authentication for
+exposed read surfaces, but no authenticated mutating actions. It does not claim:
 
 - live order submission
 - cancel or replace controls
@@ -236,17 +245,23 @@ surface. The current shipped routes are:
 
 - `GET /api/v1/feed/status`
 - `GET /api/v1/assets/active`
+- `GET /api/v1/assets/resolve`
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`
 - `GET /api/v1/execution/orders`
+- `GET /api/v1/query/datasets`
+- `POST /api/v1/query/sql`
 - `WS /api/v1/streams/orderbook?asset_id=...`
+- optional gRPC `WorkstationService` on `127.0.0.1:50051` for reconstruct,
+  integrity summary, and execution timeline reads
 
 Current backend constraints:
 
 - live state is derived from an in-process read model
-- replay reads are Parquet-only today
-- the runtime is read-only and does not persist live data
+- replay and integrity reads use the configured Parquet or ClickHouse backend
+- the `serve` runtime is read-only and hydrates from checkpoints plus WAL tail
+- `serve-api` remains a combined ingest + API workstation mode without WAL
 
 Current shipped frontend boundary:
 
@@ -261,10 +276,8 @@ Current shipped frontend boundary:
 The following planned surfaces remain deferred:
 
 - `GET /api/v1/latency/summary`
-- SQL workbench routes
 - Latency UI
 - Query Workbench UI
-- ClickHouse-backed API reads
 
 ## Future Clean-Slate Runtime Boundary
 

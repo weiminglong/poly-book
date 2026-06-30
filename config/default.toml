@@ -19,11 +19,10 @@ clickhouse_database = "poly_book"
 clickhouse_batch_interval_secs = 1
 clickhouse_batch_size = 10000
 
-# Trust boundary: these services have NO authentication. They default to
-# loopback (127.0.0.1) so nothing is exposed off-host out of the box. To serve
-# other hosts, put an authenticating reverse proxy in front and only then change
-# the bind address (e.g. PB__API__LISTEN_ADDR=0.0.0.0:3000). Never bind the
-# metrics or SQL-workbench surfaces to a public interface.
+# Trust boundary: these services default to loopback (127.0.0.1) so nothing is
+# exposed off-host out of the box. Non-loopback API/gRPC binds require
+# api.auth_token / PB__API__AUTH_TOKEN at startup. Never bind the metrics or
+# SQL-workbench surfaces to a public interface.
 [metrics]
 listen_addr = "127.0.0.1:9090"
 endpoint = "/metrics"
@@ -58,10 +57,10 @@ query_timeout_secs = 30
 # (replay, integrity, etc.); an over-running request is rejected with 504. Does
 # not apply to the long-lived WebSocket stream.
 http_request_timeout_secs = 30
-# Optional bearer token. When set (non-empty), every API and WebSocket route
-# requires `Authorization: Bearer <token>`; health probes stay open. Leave unset
-# for the default loopback-only, no-auth workstation. Set this before exposing the
-# API on any non-loopback interface (audit P2-SEC-2). Override: PB__API__AUTH_TOKEN.
+# Optional bearer token. When set (non-empty), every API, WebSocket, and gRPC
+# data route requires `Authorization: Bearer <token>`; health probes stay open.
+# Leave unset for the default loopback-only workstation. Required before exposing
+# the API or gRPC on any non-loopback interface. Override: PB__API__AUTH_TOKEN.
 # auth_token = ""
 
 [grpc]

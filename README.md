@@ -151,9 +151,10 @@ npm ci
 npm run dev
 ```
 
-By default the Vite dev server runs on `:4173` and proxies `/api` requests to
-`http://127.0.0.1:3000`, so you can run it alongside `cargo run -- serve-api
---auto-rotate`. The shipped SPA currently includes `Live Feed`, `Replay Lab`, `Integrity`,
+By default the Vite dev server binds `127.0.0.1:4173` and proxies `/api`
+requests to `http://127.0.0.1:3000`, so you can run it alongside
+`cargo run -- serve-api --auto-rotate`. Set `VITE_DEV_HOST=0.0.0.0` only for an
+intentional LAN-exposed dev session. The shipped SPA currently includes `Live Feed`, `Replay Lab`, `Integrity`,
 and `Execution Timeline`. Append
 `?source=demo` to the URL or use the in-app toggle to review seeded sample data
 without a running backend. The SPA uses a newer Node runtime than the Rust-only

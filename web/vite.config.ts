@@ -6,6 +6,7 @@ import { defineConfig, loadEnv } from 'vite'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '')
   const apiProxyTarget = env.VITE_DEV_API_PROXY_TARGET ?? 'http://127.0.0.1:3000'
+  const devHost = env.VITE_DEV_HOST ?? '127.0.0.1'
 
   return {
     plugins: [react(), tailwindcss()],
@@ -22,7 +23,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      host: '0.0.0.0',
+      host: devHost,
       port: 4173,
       proxy: {
         '/api': {
@@ -35,7 +36,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     preview: {
-      host: '0.0.0.0',
+      host: devHost,
       port: 4173,
     },
     test: {

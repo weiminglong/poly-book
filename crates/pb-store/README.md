@@ -49,21 +49,25 @@ PersistedRecord channel
   (or not representable as a datetime) are routed to a dedicated
   `invalid_timestamp` partition with a warning, instead of being silently misfiled
   into the 1970-01-01 partition by `unwrap_or_default()`.
-- Parquet object names are `{asset}_{first_ts}_{content_hash}_{len}.parquet`. The
-  content-hash + byte-length suffix means two batches that land in the same
+- Parquet object names are `{asset_key}_{first_ts}_{content_hash}_{len}.parquet`.
+  `asset_key` is a percent-encoded asset partition, so malformed asset IDs cannot
+  inject path separators or object-key delimiters. The content-hash +
+  byte-length suffix means two batches that land in the same
   (asset, hour) bucket with the same first-record timestamp cannot silently
   overwrite each other; identical content maps to the same name (idempotent
   retry). The byte length is appended so a (vanishingly unlikely) 64-bit hash
   collision between two *different* batches would also need identical lengths to
-  collide — at no extra cost, since identical content has identical length.
-  Readers list by the `{asset}_` prefix, so multiple files per bucket are read
-  transparently.
+  collide — at no extra cost, since identical content has identical length. The
+  asset component is parsed from the right-hand fixed suffix fields when reading
+  or deleting, so an asset key containing `_` cannot be mistaken for another
+  asset's prefix.
 - `write_batch_replacing` rebuilds partitions authoritatively from a record
   stream (WAL replay) for crash recovery: for each `(dataset, asset, hour)`
-  group it deletes the existing `{asset}_*` files and writes the complete group,
-  so the source stream is authoritative and re-running is idempotent. It is the
-  storage half of the `reconcile` command and is meant for offline use (ingest
-  stopped) to avoid racing live-sink writes to the same partitions.
+  group it deletes the existing files whose parsed asset component matches that
+  exact `asset_key` and writes the complete group, so the source stream is
+  authoritative and re-running is idempotent. It is the storage half of the
+  `reconcile` command and is meant for offline use (ingest stopped) to avoid
+  racing live-sink writes to the same partitions.
 - Parquet encoding uses explicit Zstd compression at level 3 and `DELTA_BINARY_PACKED`
   encoding on timestamp, price, size, and sequence columns for better compression ratios.
 - A pre-allocated 256 KB byte buffer avoids repeated heap allocation during Parquet writes.
@@ -108,5 +112,5 @@ PersistedRecord channel
 
 ## Tests
 
-29 tests covering schema validation, record batch conversion, `ParquetRecordWriter`
+30 tests covering schema validation, record batch conversion, `ParquetRecordWriter`
 lifecycle, and `ParquetSink` lifecycle.
