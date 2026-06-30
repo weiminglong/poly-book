@@ -2742,7 +2742,7 @@ dependencies = [
  "pb-store",
  "pb-types",
  "pb-wal",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -2775,7 +2775,7 @@ dependencies = [
  "pb-book",
  "pb-metrics",
  "pb-types",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -2843,7 +2843,7 @@ dependencies = [
  "axum",
  "metrics",
  "metrics-exporter-prometheus",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -2864,7 +2864,7 @@ dependencies = [
  "pb-metrics",
  "pb-store",
  "pb-types",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -2885,7 +2885,7 @@ dependencies = [
  "pb-replay",
  "pb-store",
  "pb-types",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3543,9 +3543,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.2"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4206,7 +4206,7 @@ dependencies = [
  "memchr",
  "parse-display",
  "pin-project-lite",
- "reqwest 0.13.2",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serde_with",
