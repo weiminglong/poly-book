@@ -39,15 +39,13 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 
 ## Design Notes
 
-- Reconstruction starts from the nearest checkpoint before the target timestamp
-  only when that checkpoint is inside the configured lookback floor. Stale
-  checkpoints older than `target - lookback` are ignored, so replay reads never
-  expand beyond the configured reconstruction window solely because an old
-  checkpoint exists.
-- The latest-checkpoint search expands from a recent window up to a hard seven
-  day cap. If no checkpoint is found inside that bound, replay falls back to the
-  normal snapshot lookback instead of scanning object-store prefixes toward
-  epoch.
+- Reconstruction searches for checkpoints only inside the configured lookback
+  window and starts from one only when it is inside that floor. Stale checkpoints
+  older than `target - lookback` are ignored, so replay reads never expand beyond
+  the configured reconstruction window solely because an old checkpoint exists.
+- `read_latest_checkpoint` still returns the latest available checkpoint before a
+  timestamp for startup hydration and operator workflows that need the durable
+  recovery point rather than replay-window bounds.
 - `SourceReset` is treated as a hard continuity boundary during replay. If the
   latest reset precedes the target, replay ignores older checkpoints/snapshots
   and requires a fresh post-reset snapshot before applying later deltas.

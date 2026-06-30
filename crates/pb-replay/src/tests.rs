@@ -117,6 +117,9 @@ impl MockReader {
     }
 
     fn with_latest_checkpoint(mut self, cp: Option<BookCheckpoint>) -> Self {
+        if let Some(checkpoint) = cp.as_ref() {
+            self.checkpoints.push(checkpoint.clone());
+        }
         self.latest_checkpoint = cp;
         self
     }
@@ -149,10 +152,18 @@ impl EventReader for MockReader {
     async fn read_checkpoints(
         &self,
         _asset_id: &AssetId,
-        _start_us: u64,
-        _end_us: u64,
+        start_us: u64,
+        end_us: u64,
     ) -> Result<Vec<BookCheckpoint>, ReplayError> {
-        Ok(self.checkpoints.clone())
+        Ok(self
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.checkpoint_timestamp_us >= start_us
+                    && checkpoint.checkpoint_timestamp_us <= end_us
+            })
+            .cloned()
+            .collect())
     }
 
     async fn read_latest_checkpoint(

@@ -129,8 +129,9 @@ Returns:
 - replay starts from the latest checkpoint at or before `at_us` only if that
   checkpoint is inside the configured lookback floor; stale checkpoints older
   than `at_us - lookback` are ignored so reconstruct reads stay bounded
-- checkpoint discovery expands only up to a seven-day search cap; if none is
-  found, replay falls back to snapshot-based reconstruction
+- checkpoint discovery for a reconstruct request scans only the configured
+  lookback window; if none is found, replay falls back to snapshot-based
+  reconstruction
 - `source_reset` continuity events are treated as hard replay boundaries; if a
   reset occurs before `at_us`, reconstruction requires a fresh post-reset
   snapshot instead of stitching pre-reset state across sessions
@@ -306,6 +307,8 @@ Guard rails:
 - Table references are restricted to the advertised workbench datasets:
   `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`,
   `replay_validations`, and `execution_events`
+- Dangling `FROM`, `JOIN`, and `DESCRIBE` table references return 400 before
+  `LIMIT` normalization
 - `LIMIT` is injected if not present
 - Queries time out after `api.query_timeout_secs` (default 30s)
 

@@ -77,10 +77,6 @@ fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
 
 const PARQUET_READ_CONCURRENCY: usize = 8;
 const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
-/// Maximum historical checkpoint search window. Without this cap, a missing
-/// checkpoint expands the search toward epoch and can enumerate years of hourly
-/// object-store prefixes.
-pub const MAX_CHECKPOINT_LOOKBACK_US: u64 = 7 * 24 * 3_600 * 1_000_000;
 
 /// Hard backstop on rows returned by a single unbounded ClickHouse read
 /// (ingest/execution events). Applied via `max_result_rows` +
@@ -1047,10 +1043,7 @@ impl EventReader for ParquetReader {
             if start_us == 0 {
                 return Ok(None);
             }
-            if window >= MAX_CHECKPOINT_LOOKBACK_US {
-                return Ok(None);
-            }
-            window = window.saturating_mul(2).min(MAX_CHECKPOINT_LOOKBACK_US);
+            window = window.saturating_mul(2);
         }
     }
 

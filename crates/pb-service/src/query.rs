@@ -401,8 +401,14 @@ fn validate_table_ref(
     token_idx: usize,
     cte_names: &HashSet<String>,
 ) -> Result<(), ServiceError> {
+    let clause = tokens
+        .get(token_idx.saturating_sub(1))
+        .map(|token| token.text.as_str())
+        .unwrap_or("table reference");
     let Some(first) = tokens.get(token_idx) else {
-        return Ok(());
+        return Err(ServiceError::InvalidParams(format!(
+            "table reference is required after {clause}"
+        )));
     };
     let between = &sql[tokens[token_idx - 1].end..first.start];
     if between.contains('(') || first.text == "SELECT" {
@@ -1026,6 +1032,31 @@ mod tests {
                 guard_sql(sql, &guard).is_err(),
                 "guard must reject query outside approved dataset scope: {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn guard_rejects_dangling_table_references() {
+        let guard = QueryGuard::default();
+        for sql in [
+            "SELECT * FROM",
+            "SELECT * FROM book_events JOIN",
+            "DESCRIBE TABLE",
+            "WITH\0JOIN\0",
+        ] {
+            let err = match guard_sql(sql, &guard) {
+                Ok(accepted) => panic!("guard must reject {sql:?}: {accepted:?}"),
+                Err(err) => err,
+            };
+            match err {
+                ServiceError::InvalidParams(msg) => {
+                    assert!(
+                        msg.contains("table reference is required"),
+                        "unexpected error for {sql:?}: {msg}"
+                    );
+                }
+                _ => panic!("expected InvalidParams for {sql:?}"),
+            }
         }
     }
 

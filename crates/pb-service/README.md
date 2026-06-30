@@ -92,7 +92,8 @@ pb-service trait method
   SSRF / arbitrary-file-read primitive.
 - The guard and `/query/datasets` share `APPROVED_DATASETS`, so ad-hoc SQL can
   only reference the documented workbench tables and cannot reach arbitrary
-  ClickHouse tables or qualified databases.
+  ClickHouse tables or qualified databases. Dangling `FROM`/`JOIN`/`DESCRIBE`
+  references are rejected before `LIMIT` normalization.
 - `ClickHouseQueryService` uses the ClickHouse HTTP API with `JSONCompact` format
   for dynamic SQL execution, and enforces `readonly=2`, `max_result_rows`, and
   `max_execution_time` server-side as defense-in-depth; the whole request

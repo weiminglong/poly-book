@@ -18,6 +18,20 @@ fn checkpoint_within_floor(
     checkpoint.filter(|checkpoint| checkpoint.checkpoint_timestamp_us >= floor_timestamp_us)
 }
 
+async fn latest_checkpoint_in_window<R: EventReader>(
+    reader: &R,
+    asset_id: &AssetId,
+    start_us: u64,
+    end_us: u64,
+) -> Result<Option<BookCheckpoint>, ReplayError> {
+    if end_us < start_us {
+        return Ok(None);
+    }
+    let mut checkpoints = reader.read_checkpoints(asset_id, start_us, end_us).await?;
+    checkpoints.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
+    Ok(checkpoints.pop())
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplayResult {
     pub book: L2Book,
@@ -50,11 +64,10 @@ impl<R: EventReader> ReplayEngine<R> {
         target_timestamp_us: u64,
         mode: ReplayMode,
     ) -> Result<ReplayResult, ReplayError> {
-        let checkpoint = self
-            .reader
-            .read_latest_checkpoint(asset_id, target_timestamp_us)
-            .await?;
         let floor_us = target_timestamp_us.saturating_sub(self.lookback_us);
+        let checkpoint =
+            latest_checkpoint_in_window(&self.reader, asset_id, floor_us, target_timestamp_us)
+                .await?;
         let checkpoint = checkpoint_within_floor(checkpoint, floor_us);
         let start_us = checkpoint
             .as_ref()
@@ -127,11 +140,10 @@ impl<R: EventReader> ReplayEngine<R> {
         // the very thing it was compared against and `matched` was always true
         //.
         let reference_us = reference.checkpoint_timestamp_us;
-        let seed = self
-            .reader
-            .read_latest_checkpoint(asset_id, reference_us.saturating_sub(1))
-            .await?;
         let floor_us = reference_us.saturating_sub(self.lookback_us);
+        let seed_end_us = reference_us.saturating_sub(1);
+        let seed =
+            latest_checkpoint_in_window(&self.reader, asset_id, floor_us, seed_end_us).await?;
         let seed = checkpoint_within_floor(seed, floor_us);
         let start_us = seed
             .as_ref()
