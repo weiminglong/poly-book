@@ -8,6 +8,13 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Engineering-narrative documentation: a root-level `TESTING.md` mapping each
+  failure mode to the layer that catches it (with verified counts and run
+  commands, plus an explicit not-yet-covered section), and four new ADRs
+  (0008–0011) documenting the embedded WAL over a message broker, dual-sink
+  Parquet/ClickHouse storage, ingest/serve process separation, and the
+  read-only workstation boundary. The ADR index in `docs/architecture.md` now
+  lists all eleven ADRs.
 - Research access: `research/orderbook_analysis.ipynb`, an executed notebook
   (plots embedded, renders on GitHub) computing microstructure analytics —
   top-of-book/mid/spread series, microprice, Cont–Kukanov–Stoikov order-flow
