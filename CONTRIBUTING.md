@@ -25,7 +25,10 @@ Optional tools:
 
 ## Test Matrix
 
-Use the smallest command that validates your change:
+[TESTING.md](TESTING.md) maps each failure mode to the layer that catches it
+(unit/property tests, fuzzing, golden fixtures, Miri, monitoring rule tests)
+and lists what is deliberately not covered. For day-to-day work, use the
+smallest command that validates your change:
 
 ```bash
 cargo test --workspace --exclude pb-integration-tests

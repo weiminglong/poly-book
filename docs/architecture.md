@@ -220,3 +220,8 @@ happens when a consumer falls behind is explicit:
 | [ADR-0004](adr/0004-zero-copy-deserialization.md) | Zero-copy wire deserialization | Reduce allocations on ingest path |
 | [ADR-0005](adr/0005-mimalloc-allocator.md) | mimalloc global allocator | Lower p99 latency under tokio |
 | [ADR-0006](adr/0006-fxhashmap-dispatcher.md) | FxHashMap in Dispatcher | Faster non-cryptographic lookups on trusted data |
+| [ADR-0007](adr/0007-release-profile.md) | panic=abort release profile with symbolizable backtraces | Fail-stop over limping on, without losing diagnosability |
+| [ADR-0008](adr/0008-embedded-wal-over-message-broker.md) | Embedded single-writer WAL over a message broker | Sub-µs appends, no broker ops on a single host |
+| [ADR-0009](adr/0009-dual-sink-storage.md) | Dual-sink storage: Parquet cold, ClickHouse warm | Portable replay truth + interactive SQL |
+| [ADR-0010](adr/0010-ingest-serve-process-separation.md) | Ingest/serve process separation | Isolate capture from read-path faults; restartable serving |
+| [ADR-0011](adr/0011-read-only-workstation-boundary.md) | Read-only workstation boundary | Blast-radius control; no control plane without its prerequisites |

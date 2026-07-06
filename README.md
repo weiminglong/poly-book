@@ -226,6 +226,9 @@ just parquet-schema
 
 ## Performance & Correctness
 
+The full failure-mode → defense matrix — which layer catches which class of
+bug, with real counts and run commands — lives in [TESTING.md](TESTING.md).
+
 ### Benchmarks
 
 ```bash
