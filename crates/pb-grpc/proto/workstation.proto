@@ -75,7 +75,7 @@ message ExecutionTimelineRequest {
   uint64 start_us = 3;
   uint64 end_us = 4;
   uint32 limit = 5;
-  // Server-side pagination (A.65): skip `offset` events from the start of the
+  // Server-side pagination: skip `offset` events from the start of the
   // ordered page; `descending` selects most-recent-first ordering.
   uint32 offset = 6;
   bool descending = 7;

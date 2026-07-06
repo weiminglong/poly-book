@@ -46,7 +46,7 @@ export function DataTable<T>({ columns, data, pageSize = 50 }: DataTableProps<T>
                         canSort ? ' cursor-pointer' : ''
                       }`}
                       onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
-                      // Keyboard-operable sorting (Enter/Space), not mouse-only (A.72).
+                      // Keyboard-operable sorting (Enter/Space), not mouse-only.
                       onKeyDown={
                         canSort
                           ? (e) => {

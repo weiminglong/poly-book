@@ -41,7 +41,9 @@ export default function App() {
   return (
     <ErrorBoundary level="root">
       <Providers>
-        <BrowserRouter>
+        {/* BASE_URL follows vite's `base`, so routing keeps working when the
+            SPA is served from a subpath (GitHub Pages project site). */}
+        <BrowserRouter basename={import.meta.env.BASE_URL}>
           <AppShell />
         </BrowserRouter>
       </Providers>

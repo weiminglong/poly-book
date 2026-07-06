@@ -84,6 +84,16 @@ VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 The SPA includes seeded sample responses for review without live infrastructure.
 Open `http://localhost:4173/?source=demo` or use the in-app data source toggle.
 
+The orderbook page streams from a client-side market simulator in demo mode
+(`src/shared/api/demo-stream.ts`): a random-walk book seeded from the fixtures,
+ticking several times per second through the same `BookUpdateMessage` shape the
+real WebSocket broadcast produces. No socket is opened in demo mode. Fixture
+timestamps are anchored to page load, so every page shows a current clock.
+
+A hosted instance deploys to GitHub Pages on every `main` push
+(`.github/workflows/pages.yml`) with demo as the default data source:
+<https://weiminglong.github.io/poly-book/>.
+
 Demo data is lazy-loaded via dynamic `import()` to keep the initial bundle small.
 
 ## Scripts

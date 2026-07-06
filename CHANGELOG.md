@@ -8,6 +8,17 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Hosted demo: the workstation SPA now deploys to GitHub Pages in
+  backend-free demo mode on every `main` push (`Live demo` link in the
+  README). Demo mode gained a client-side market simulator that streams a
+  moving order book (random-walk mid, level churn, bounded probability band)
+  through the same message shape as the real WebSocket broadcast, replacing
+  the frozen fixture book. The stream hook no longer opens a real WebSocket
+  in demo mode (previously a permanent amber "Reconnecting" badge), the SQL
+  workbench returns fixture results instead of a 500, the replay form
+  prefills a known-good timestamp, fixture clocks are anchored to page load,
+  and the zero-data orderbook page now explains how to get data. New favicon
+  and page metadata; WS staleness is now surfaced as a badge.
 - Fixed: all live-feed commands (`ingest`, `auto-ingest`, `serve-api`) panicked
   at WebSocket TLS setup ("Could not automatically determine the process-level
   CryptoProvider") because the dependency graph links two rustls crypto

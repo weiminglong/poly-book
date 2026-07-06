@@ -5,7 +5,7 @@ interface ErrorBoundaryProps {
   level?: 'root' | 'route'
   /** When any value here changes, a caught error is cleared. Pass the current
    *  route (e.g. the pathname) so navigating away from a broken page recovers
-   *  instead of the error UI bricking all navigation (A.71). */
+   *  instead of the error UI bricking all navigation. */
   resetKeys?: unknown[]
   children: ReactNode
 }

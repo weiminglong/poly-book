@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#0f172a"/>
+  <!-- asks: red bars, right-aligned, deeper levels wider and fainter -->
+  <rect x="13" y="3" width="14" height="3" fill="#f87171" opacity="0.5"/>
+  <rect x="16" y="8" width="11" height="3" fill="#f87171" opacity="0.75"/>
+  <rect x="19" y="13" width="8" height="3" fill="#f87171"/>
+  <!-- bids: green bars, left-aligned, deeper levels wider and fainter -->
+  <rect x="5" y="17" width="8" height="3" fill="#34d399"/>
+  <rect x="5" y="22" width="11" height="3" fill="#34d399" opacity="0.75"/>
+  <rect x="5" y="27" width="14" height="3" fill="#34d399" opacity="0.5"/>
+</svg>

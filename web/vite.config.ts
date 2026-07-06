@@ -9,6 +9,9 @@ export default defineConfig(({ mode }) => {
   const devHost = env.VITE_DEV_HOST ?? '127.0.0.1'
 
   return {
+    // Non-root base for GitHub Pages project-site builds
+    // (https://<owner>.github.io/poly-book/); defaults to root everywhere else.
+    base: env.VITE_BASE_PATH ?? '/',
     plugins: [react(), tailwindcss()],
     build: {
       chunkSizeWarningLimit: 150,
@@ -30,7 +33,7 @@ export default defineConfig(({ mode }) => {
           target: apiProxyTarget,
           changeOrigin: true,
           // Proxy WebSocket upgrades too, otherwise the orderbook stream
-          // (/api/v1/streams/orderbook) is dead in dev and e2e (A.69).
+          // (/api/v1/streams/orderbook) is dead in dev and e2e.
           ws: true,
         },
       },

@@ -7,6 +7,11 @@
 `poly-book` is a Rust workspace for collecting Polymarket order book data, storing
 it in replay-friendly formats, and reconstructing market state later.
 
+**[Live demo](https://weiminglong.github.io/poly-book/)** — the workstation UI
+with a simulated market stream, no backend or install required. Explore the
+orderbook ladder, depth chart, replay, integrity, and query pages directly in
+the browser.
+
 It is aimed at people building or studying low-latency market-data systems:
 
 - live WebSocket and REST ingestion

@@ -1,4 +1,4 @@
-import { type UseQueryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type UseQueryOptions, useMutation, useQuery } from '@tanstack/react-query'
 import type {
   ActiveAssetSummary,
   DatasetSchemaResponse,
@@ -19,6 +19,7 @@ import {
   getDemoExecution,
   getDemoFeedStatus,
   getDemoIntegrity,
+  getDemoQueryResult,
   getDemoReplay,
   getDemoSnapshot,
 } from './demo'
@@ -243,24 +244,24 @@ export function useDatasets(opts?: Partial<UseQueryOptions<DatasetSchemaResponse
 }
 
 export function useQuerySql() {
+  const sourceMode = useSourceModeContext()
   const base = getApiBaseUrl()
-  const queryClient = useQueryClient()
+  const isDemo = sourceMode === 'demo'
 
   return useMutation({
     mutationFn: async (sql: string) => {
+      if (isDemo) {
+        return getDemoQueryResult()
+      }
       // The SQL workbench runs analytic queries that can legitimately take
       // longer than the default snappy-read timeout. Allow up to just above the
-      // server-side query timeout so valid queries are not aborted client-side
-      // (A.73).
+      // server-side query timeout so valid queries are not aborted client-side.
       return postAndValidate(
         queryResultResponseSchema,
         buildUrl(base, '/api/v1/query/sql'),
         { sql },
         { timeoutMs: 35_000 },
       )
-    },
-    onSuccess: (data) => {
-      queryClient.setQueryData(['query-result'], data)
     },
   })
 }
