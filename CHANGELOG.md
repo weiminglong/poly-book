@@ -8,6 +8,15 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Research access: `research/orderbook_analysis.ipynb`, an executed notebook
+  (plots embedded, renders on GitHub) computing microstructure analytics —
+  top-of-book/mid/spread series, microprice, Cont–Kukanov–Stoikov order-flow
+  imbalance vs mid moves, trade signs and effective/realized spreads, and
+  binary-outcome complementarity/pinning — directly over the committed
+  `demo/data/` Parquet capture with polars + matplotlib only, plus
+  `examples/api-cookbook.md` with one captured request/response example per
+  HTTP route and the WebSocket stream, both runnable fully offline
+  (`research/README.md` documents the one-line runner).
 - Preflight checks: a new `doctor` subcommand prints a pass/warn/fail table
   covering config-key validation (hard failure on unknown keys), Parquet path
   writability, WAL directory state, REST/Gamma reachability, a full WebSocket

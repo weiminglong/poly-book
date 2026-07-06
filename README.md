@@ -46,6 +46,18 @@ cadence, and replay/integrity/execution answer from the capture. No network,
 no venue dependency, deterministic. The startup banner prints copy-paste
 `curl` examples with known-good timestamps.
 
+### Research quickstart
+
+The same capture is a research dataset: plain hour-partitioned Parquet with a
+documented schema. [`research/orderbook_analysis.ipynb`](research/orderbook_analysis.ipynb)
+is an executed notebook (renders on GitHub) computing microstructure analytics
+over it — mid/spread, microprice, order-flow imbalance vs price moves, trade
+flow, and binary-outcome pinning — with polars + matplotlib only; see
+[`research/README.md`](research/README.md) for a one-line runner. For the API
+surface, [`examples/api-cookbook.md`](examples/api-cookbook.md) has one
+captured request/response example per route, all runnable offline against
+`just demo`.
+
 ### One command (Docker, live venue)
 
 ```bash
