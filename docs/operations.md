@@ -16,6 +16,21 @@ keys and logs a `WARN` for any unknown `section.key` (a typo or a removed/rename
 setting), so a misspelled key — which is otherwise silently ignored and falls
 back to the default — is visible in the logs rather than silently dropped.
 
+### Preflight (`doctor`)
+
+```bash
+poly-book doctor                 # full checklist, incl. network probes
+poly-book doctor --skip-network  # offline/CI variant
+```
+
+Prints a pass/warn/fail table and exits non-zero on failure, so it can gate a
+deploy (`poly-book doctor && poly-book ingest`). Checks: unknown config keys
+(a hard failure here, unlike the warn-only startup path), Parquet path
+writability, WAL directory state (segments, consumer positions, last-write
+age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
+through the same connector the feed uses, ClickHouse ping (warn-only — it is
+an optional component), and API/metrics/gRPC port availability.
+
 Current defaults:
 
 ```toml

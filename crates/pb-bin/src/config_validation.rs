@@ -82,6 +82,15 @@ pub fn warn_unknown_config_keys(settings: &config::Config) {
     }
 }
 
+/// Return the unknown `section.key` entries in an already-loaded config, for
+/// callers (like `doctor`) that report rather than log.
+pub fn unknown_keys_in(settings: &config::Config) -> Vec<String> {
+    match settings.clone().try_deserialize::<serde_json::Value>() {
+        Ok(value) => unknown_config_keys(&value, KNOWN_CONFIG_KEYS),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Pure helper: return the `section.key` (or bare top-level) keys present in
 /// `value` that are not in `known`, sorted for deterministic output.
 fn unknown_config_keys(value: &serde_json::Value, known: &[&str]) -> Vec<String> {
