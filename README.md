@@ -296,7 +296,7 @@ Key design choices documented in [docs/latency.md](docs/latency.md) and
 [docs/adr/](docs/adr/):
 
 - Fixed-point arithmetic eliminates FPU stalls and NaN guards (ADR-0001)
-- BTreeMap gives O(1) best bid/ask via sorted iteration (ADR-0002)
+- BTreeMap book: best bid/ask in ~3 ns measured, benchmarked against a dense-array alternative (ADR-0002)
 - Channel-based message passing avoids locks on the hot path (ADR-0003)
 - Zero-copy wire deserialization reduces allocations (ADR-0004)
 - mimalloc global allocator for lower p99 latency (ADR-0005)

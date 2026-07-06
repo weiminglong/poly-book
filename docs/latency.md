@@ -55,7 +55,7 @@ WebSocket frame arrival
 | Decision | Latency Impact |
 |----------|---------------|
 | Fixed-point arithmetic | Eliminates FPU pipeline stalls and NaN guards |
-| BTreeMap for book | O(1) best bid/ask via sorted iteration |
+| BTreeMap for book | ~3 ns best bid/ask measured (O(log n) first-element access) |
 | Zero-copy wire deser | ~2–5x fewer allocations per message |
 | FxHashMap in Dispatcher | ~3–5x faster hash for asset ID lookups |
 | mimalloc allocator | Lower p99 allocation latency under tokio |
