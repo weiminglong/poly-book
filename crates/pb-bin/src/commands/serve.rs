@@ -137,6 +137,11 @@ pub async fn run(
                 1,
             ) as u64,
             auth_token,
+            // Optional bundled-SPA hosting (empty/unset = API only).
+            static_assets_dir: settings
+                .get_string("api.static_assets_dir")
+                .ok()
+                .filter(|d| !d.is_empty()),
         },
         broadcast: Some(broadcast),
         slug_registry,

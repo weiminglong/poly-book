@@ -76,6 +76,18 @@ token. With no token set the workstation stays open on loopback — appropriate
 only for a single-operator host. This is bearer-token authentication, not full
 authorization/RBAC, which remains out of scope for the read-only workstation.
 
+### Bundled web UI (optional)
+
+When `api.static_assets_dir` (env: `PB__API__STATIC_ASSETS_DIR`) points at a
+built `web/dist`, both `serve-api` and `serve` host the SPA from the same
+process: unknown paths serve static assets with an `index.html` fallback so
+client-side routes deep-link. API, health, and WebSocket routes always take
+precedence, and static requests are metered under the `<unmatched>` route
+label. The Docker image enables this against its bundled assets; the key is
+unset by default outside Docker. Static assets are served without auth — the
+UI is public code, while every data route it calls still requires the bearer
+token when one is configured.
+
 ## Configurable Historical Backend
 
 Historical routes (replay, integrity, execution) are served through `pb-service`

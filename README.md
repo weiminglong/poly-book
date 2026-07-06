@@ -34,7 +34,19 @@ If you want to contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
-### Prerequisites
+### One command (Docker)
+
+```bash
+docker compose --profile minimal up --build
+# open http://localhost:3000 — live feed + API + workstation UI in one container
+```
+
+The `full` profile runs the production process separation (ingest + serve over
+a shared WAL volume, plus ClickHouse), and `observability` adds
+Prometheus/Alertmanager/Grafana with the committed dashboard. See
+[docs/operations.md](docs/operations.md) for all three topologies.
+
+### Prerequisites (from source)
 
 - [Rust](https://rustup.rs/) 1.94+
 - Docker for the full integration suite

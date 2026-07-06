@@ -269,10 +269,12 @@ The `Dockerfile` uses a multi-stage build:
 3. **runtime** — copies the binary, the SPA assets (to `/var/lib/poly-book/web`),
    and the default config into a minimal Debian image.
 
-The recommended initial packaging bundles both the API binary and static SPA
-assets into a single container. The `serve-api` command serves the API on `:3000`
-and a separate static file server or reverse proxy can serve the SPA from the
-bundled assets.
+The image bundles the API binary and the built SPA into a single container.
+`PB__API__STATIC_ASSETS_DIR` points at the bundled assets, so the API process
+itself serves the UI on `:3000` — no separate static file server is needed.
+The image's default command is the combined live workstation
+(`serve-api --auto-rotate`); orchestrators override it per process
+(`ingest`, `serve`, `reconcile`, ...), as `docker-compose.yml` does.
 
 A later migration to separate containers (Rust API + Nginx/Caddy for static
 assets) is straightforward when traffic or team structure warrants it.
@@ -356,6 +358,31 @@ just parquet-stats
 ```
 
 ## Workstation API
+
+### Docker Compose (one command)
+
+```bash
+# One-container live workstation: feed + API + web UI at http://localhost:3000
+docker compose --profile minimal up --build      # or: just up
+
+# Production process separation: ingest + serve (shared WAL volume) + ClickHouse
+docker compose --profile full up --build         # or: just up-full
+
+# Full topology plus Prometheus/Alertmanager/Grafana (Grafana at :3001)
+docker compose --profile full --profile observability up --build   # or: just up-obs
+```
+
+Profiles are mutually exclusive on ports — pick one of `minimal` or `full`.
+The image serves the bundled web UI from the same process via
+`PB__API__STATIC_ASSETS_DIR` (see below); only localhost ports are mapped.
+
+### Serving the Web UI from the API process
+
+When `api.static_assets_dir` (env: `PB__API__STATIC_ASSETS_DIR`) points at a
+built `web/dist`, any non-API route serves the SPA with an `index.html`
+fallback, so one process hosts both the API and the workstation UI. Unset
+(the default outside Docker) keeps the API-only behavior. API, health, and
+WebSocket routes always take precedence over static files.
 
 ### Combined Mode (single process)
 

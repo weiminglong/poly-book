@@ -8,6 +8,17 @@ is practical to do so.
 
 ## [Unreleased]
 
+- One-command local topologies: a top-level `docker-compose.yml` with three
+  profiles — `minimal` (one container: live feed + API + web UI),
+  `full` (production process separation: ingest + serve over a shared WAL
+  volume, plus ClickHouse), and `observability` (Prometheus with the alert
+  rules loaded, Alertmanager, and Grafana with the committed dashboard
+  provisioned). `just up` / `up-full` / `up-obs` wrap the profiles.
+- The API process can now serve the bundled web UI: `api.static_assets_dir`
+  (env: `PB__API__STATIC_ASSETS_DIR`) enables a static-file fallback with SPA
+  deep-link support on `serve-api` and `serve`. The Docker image enables it
+  against its bundled assets and its default command is now the combined live
+  workstation (`serve-api --auto-rotate`) instead of a help screen.
 - Hosted demo: the workstation SPA now deploys to GitHub Pages in
   backend-free demo mode on every `main` push (`Live demo` link in the
   README). Demo mode gained a client-side market simulator that streams a
