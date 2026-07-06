@@ -67,7 +67,7 @@ jobs:
     name: Docs hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: No internal tracking references
         # Comments must carry their own rationale, not IDs that resolve to
         # nothing in the repo. Character classes keep this pattern from
@@ -92,6 +92,10 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # quick-xml DoS advisories with no upgrade path yet (object_store
+          # pins quick-xml < 0.41). Rationale and removal condition are
+          # documented on the matching ignore entries in deny.toml.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
   monitoring:
     name: Monitoring Rules
