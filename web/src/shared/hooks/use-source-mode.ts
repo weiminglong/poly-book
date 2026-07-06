@@ -10,7 +10,9 @@ function getInitialSourceMode(): DataSourceMode {
   const stored = localStorage.getItem(SOURCE_KEY)
   if (stored === 'demo' || stored === 'api') return stored
 
-  return 'api'
+  // Build-time default: the hosted GitHub Pages demo has no backend, so it
+  // ships with demo as the fallback instead of a dead API connection.
+  return import.meta.env.VITE_DEFAULT_SOURCE_MODE === 'demo' ? 'demo' : 'api'
 }
 
 export function useSourceMode() {

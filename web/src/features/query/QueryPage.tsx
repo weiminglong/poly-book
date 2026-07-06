@@ -5,8 +5,16 @@ import { QueryResults } from './components/query-results'
 import { SchemaBrowser } from './components/schema-browser'
 import { SqlEditor } from './components/sql-editor'
 
+// Seeded on first visit so Run produces a result immediately instead of
+// presenting an empty editor; mirrors the shape of the demo fixture result.
+const DEFAULT_QUERY = `SELECT asset_id, count() AS count
+FROM book_events
+GROUP BY asset_id
+ORDER BY count DESC
+LIMIT 10`
+
 export default function QueryPage() {
-  const [sql, setSql] = useState(() => sessionStorage.getItem('pb-last-query') ?? '')
+  const [sql, setSql] = useState(() => sessionStorage.getItem('pb-last-query') ?? DEFAULT_QUERY)
   const mutation = useQuerySql()
   const editorRef = useRef<HTMLTextAreaElement>(null)
 

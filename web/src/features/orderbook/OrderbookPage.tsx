@@ -31,16 +31,21 @@ export default function OrderbookPage() {
     : (assets[0]?.asset_id ?? '')
 
   const snapshotQuery = useOrderBookSnapshot(effectiveAssetId, depth)
-  const { snapshot: wsSnapshot, status: wsStatus } = useOrderBookStream(effectiveAssetId || null)
+  const {
+    snapshot: wsSnapshot,
+    status: wsStatus,
+    stale: wsStale,
+  } = useOrderBookStream(effectiveAssetId || null)
 
   // Merge WS data with HTTP snapshot. Memoized so a new object identity is only
   // produced when an input actually changes — otherwise every render (including
   // unrelated state changes) would hand memoized children new props and force
   // them to re-render on the high-frequency live path.
   const httpSnapshot = snapshotQuery.data
+  const streamIsLive = wsStatus === 'connected' || wsStatus === 'demo'
   const liveSnapshot: LiveOrderBookSnapshot | null = useMemo(
     () =>
-      wsStatus === 'connected' && wsSnapshot && wsSnapshot.asset_id === effectiveAssetId
+      streamIsLive && wsSnapshot && wsSnapshot.asset_id === effectiveAssetId
         ? {
             asset_id: wsSnapshot.asset_id,
             sequence: wsSnapshot.sequence,
@@ -58,15 +63,17 @@ export default function OrderbookPage() {
             latest_warning: httpSnapshot?.latest_warning ?? null,
           }
         : (httpSnapshot ?? null),
-    [wsStatus, wsSnapshot, httpSnapshot, effectiveAssetId],
+    [streamIsLive, wsSnapshot, httpSnapshot, effectiveAssetId],
   )
 
   const transportLabel =
-    wsStatus === 'connected'
-      ? 'WebSocket (live)'
-      : wsStatus === 'connecting' || wsStatus === 'reconnecting'
-        ? `WebSocket (${wsStatus})`
-        : 'HTTP polling'
+    wsStatus === 'demo'
+      ? 'Simulated stream (demo)'
+      : wsStatus === 'connected'
+        ? 'WebSocket (live)'
+        : wsStatus === 'connecting' || wsStatus === 'reconnecting'
+          ? `WebSocket (${wsStatus})`
+          : 'HTTP polling'
 
   return (
     <div className="grid gap-[var(--density-gap)]">
@@ -80,8 +87,15 @@ export default function OrderbookPage() {
             Institutional-grade orderbook visualization with price ladder and depth chart.
           </h1>
         </div>
-        <TransportBadge status={wsStatus} />
+        <TransportBadge status={wsStatus} stale={wsStale} />
       </div>
+
+      {assetsQuery.error ? (
+        <ErrorBanner
+          title="Active-asset lookup failed"
+          message={assetsQuery.error instanceof Error ? assetsQuery.error.message : 'Unknown error'}
+        />
+      ) : null}
 
       {snapshotQuery.error ? (
         <ErrorBanner
@@ -170,16 +184,29 @@ export default function OrderbookPage() {
         </div>
       ) : !effectiveAssetId ? (
         <Card>
-          <p className="text-muted-foreground">Select an asset to view the orderbook.</p>
+          {assets.length === 0 && !assetsQuery.isLoading ? (
+            <p className="text-muted-foreground">
+              No active assets. Start the feed (<code>poly-book serve-api --auto-rotate</code>) and
+              refresh, or switch the data source to Demo in the top bar to explore with simulated
+              data.
+            </p>
+          ) : (
+            <p className="text-muted-foreground">Select an asset to view the orderbook.</p>
+          )}
         </Card>
       ) : null}
     </div>
   )
 }
 
-function TransportBadge({ status }: { status: StreamStatus }) {
+function TransportBadge({ status, stale }: { status: StreamStatus; stale: boolean }) {
+  // A live-but-silent stream is worse than a reconnecting one: surface it
+  // instead of leaving a frozen book under a green badge.
+  if (stale && status === 'connected') {
+    return <Badge variant="warning">Stale</Badge>
+  }
   const variant =
-    status === 'connected'
+    status === 'connected' || status === 'demo'
       ? 'success'
       : status === 'connecting' || status === 'reconnecting'
         ? 'warning'
@@ -187,9 +214,11 @@ function TransportBadge({ status }: { status: StreamStatus }) {
   const label =
     status === 'connected'
       ? 'WebSocket'
-      : status === 'fallback'
-        ? 'HTTP Fallback'
-        : titleCase(status)
+      : status === 'demo'
+        ? 'Demo stream'
+        : status === 'fallback'
+          ? 'HTTP Fallback'
+          : titleCase(status)
   return <Badge variant={variant}>{label}</Badge>
 }
 

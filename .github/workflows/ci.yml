@@ -73,7 +73,7 @@ jobs:
         # nothing in the repo. Character classes keep this pattern from
         # matching its own definition.
         run: |
-          if grep -rnE "[H]FT-review|[a]udit finding|[a]udit [A]\.[0-9]+|P[0-3]-[A-Z]+-[0-9]" \
+          if grep -rnE "[H]FT-review|[a]udit finding|[a]udit [A]\.[0-9]+|P[0-3]-[A-Z]+-[0-9]|\([A]\.[0-9]+\)" \
             --include="*.rs" --include="*.ts" --include="*.tsx" --include="*.toml" \
             --include="*.md" --include="*.proto" --include="*.yml" --include="justfile" \
             --include="Dockerfile" --exclude-dir=node_modules --exclude-dir=target .; then

@@ -196,7 +196,7 @@ describe('OrderbookPage', () => {
     expect(noBtn).toHaveClass('font-bold')
   })
 
-  it('shows placeholder when no asset is selected and no assets available', () => {
+  it('explains how to get data when no assets are active', () => {
     mockUseActiveAssets.mockReturnValue(queryResult({ data: [] }))
     mockUseOrderBookSnapshot.mockReturnValue(
       queryResult({ data: undefined }) as ReturnType<typeof useOrderBookSnapshot>,
@@ -209,6 +209,10 @@ describe('OrderbookPage', () => {
     })
 
     render(<OrderbookPage />)
-    expect(screen.getByText('Select an asset to view the orderbook.')).toBeInTheDocument()
+    // Zero active assets is a fresh-install state, not a user mistake: the
+    // empty state must say how to get data, not ask them to select from an
+    // empty list.
+    expect(screen.getByText(/No active assets/)).toBeInTheDocument()
+    expect(screen.getByText(/Demo/)).toBeInTheDocument()
   })
 })

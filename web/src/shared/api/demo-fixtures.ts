@@ -11,8 +11,11 @@ import type {
   ReplayReconstructionResponse,
 } from '../../types'
 
-const DEMO_TIMESTAMP_US = 1_741_344_480_123_000
-const DEMO_ROTATION_US = 1_741_344_420_000_000
+// Anchored to page load (this module is lazy-imported when demo mode first
+// activates) so every demo surface shows a live-looking clock instead of the
+// fixed capture date the fixtures were authored from.
+const DEMO_TIMESTAMP_US = Date.now() * 1000 - 500_000
+const DEMO_ROTATION_US = DEMO_TIMESTAMP_US - 60_123_000
 
 export const demoFeedStatus: FeedStatusResponse = {
   mode: 'auto_rotate',

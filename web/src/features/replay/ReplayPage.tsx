@@ -1,4 +1,5 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { getDemoReplayDefaults } from '../../shared/api/demo'
 import { useActiveAssets, useReplayReconstruction } from '../../shared/api/queries'
 import {
   Badge,
@@ -11,6 +12,7 @@ import {
   Select,
 } from '../../shared/components'
 import { ContinuityTimeline } from '../../shared/components/continuity-timeline'
+import { useSourceModeContext } from '../../shared/hooks/use-source-mode'
 import { formatNumber, formatTimestamp } from '../../shared/lib/formatters'
 import type { ReplayReconstructionResponse, ReplayRequest } from '../../types'
 import { PriceLadder } from '../orderbook/components/price-ladder'
@@ -19,12 +21,30 @@ import { ReplayComparison } from './components/replay-comparison'
 type ViewMode = 'single' | 'comparison'
 
 export default function ReplayPage() {
+  const sourceMode = useSourceModeContext()
   const [assetId, setAssetId] = useState('btc-5m-yes')
   const [atUs, setAtUs] = useState('')
   const [mode, setMode] = useState<'recv_time' | 'exchange_time'>('recv_time')
   const [depth, setDepth] = useState(5)
   const [request, setRequest] = useState<ReplayRequest | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('single')
+
+  // In demo mode the timestamp field would otherwise dead-end: there is no
+  // captured data to look a timestamp up in, and the fixtures only answer at
+  // their own reference point. Prefill that known-good timestamp (never
+  // clobbering user input) so Reconstruct works on first click.
+  useEffect(() => {
+    if (sourceMode !== 'demo') return
+    let cancelled = false
+    void getDemoReplayDefaults().then((defaults) => {
+      if (cancelled) return
+      setAtUs((current) => (current === '' ? defaults.atUs : current))
+      setAssetId((current) => (current === 'btc-5m-yes' ? defaults.assetId : current))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [sourceMode])
 
   // Comparison mode: fire both recv_time and exchange_time queries
   const [compRequest, setCompRequest] = useState<{

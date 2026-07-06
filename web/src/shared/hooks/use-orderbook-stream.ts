@@ -1,18 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BookUpdateMessage } from '../../types'
+import { startDemoOrderBookStream } from '../api/demo-stream'
 import { bookUpdateMessageSchema } from '../api/schemas'
+import { useSourceModeContext } from './use-source-mode'
 import { useThrottledState } from './use-throttled-state'
 
-export type StreamStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'fallback'
+export type StreamStatus =
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'closed'
+  | 'fallback'
+  | 'demo'
 
 const RECONNECT_BASE_MS = 500
 const RECONNECT_MAX_MS = 10_000
 const MAX_RETRIES = 8
-/** No message within this window marks the stream data stale (A.67). */
+/** No message within this window marks the stream data stale. */
 const STALE_AFTER_MS = 15_000
 const STALE_CHECK_INTERVAL_MS = 3_000
 /** After exhausting reconnects, retry from scratch this often so the session
- *  recovers instead of being stuck in 'fallback' forever (A.67). */
+ *  recovers instead of being stuck in 'fallback' forever. */
 const FALLBACK_RETRY_MS = 30_000
 
 function wsUrl(assetId: string): string {
@@ -28,6 +36,7 @@ function wsUrl(assetId: string): string {
 }
 
 export function useOrderBookStream(assetId: string | null) {
+  const sourceMode = useSourceModeContext()
   const [snapshot, setSnapshot] = useThrottledState<BookUpdateMessage | null>(null)
   const [status, setStatus] = useState<StreamStatus>('closed')
   const [error, setError] = useState<string | null>(null)
@@ -40,7 +49,7 @@ export function useOrderBookStream(assetId: string | null) {
     // socket created by a previous run (e.g. before an asset switch, or the
     // first run under React StrictMode) cannot, via its async onclose/onmessage,
     // clobber the current connection or spawn a ghost reconnect loop. The old
-    // shared-ref approach reset the flag on every run, defeating it (A.10).
+    // shared-ref approach reset the flag on every run, defeating it.
     let cancelled = false
     let retries = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -61,6 +70,24 @@ export function useOrderBookStream(assetId: string | null) {
       setStatus('closed')
       return () => {
         cancelled = true
+      }
+    }
+
+    // Demo mode never opens a socket: the backend is absent by definition, so
+    // a real connection attempt would surface as failure noise (a permanent
+    // amber "Reconnecting" badge). Feed the page from the client-side market
+    // simulator instead, through the same message shape the WS broadcasts.
+    if (sourceMode === 'demo') {
+      closeCurrent()
+      setStatus('demo')
+      setError(null)
+      setStale(false)
+      const stop = startDemoOrderBookStream(assetId, (msg) => {
+        if (!cancelled) setSnapshot(msg)
+      })
+      return () => {
+        cancelled = true
+        stop()
       }
     }
 
@@ -119,7 +146,7 @@ export function useOrderBookStream(assetId: string | null) {
           setStatus('fallback')
           setError('WebSocket unavailable, falling back to HTTP polling')
           // Keep trying from scratch so the stream recovers rather than being
-          // stuck in fallback indefinitely (A.67).
+          // stuck in fallback indefinitely.
           retries = 0
           reconnectTimer = setTimeout(connect, FALLBACK_RETRY_MS)
           return
@@ -132,7 +159,7 @@ export function useOrderBookStream(assetId: string | null) {
     connect()
 
     // Mark data stale if no message arrives within the window, so consumers can
-    // stop trusting a frozen book under a green "live" badge (A.67).
+    // stop trusting a frozen book under a green "live" badge.
     const staleTimer = setInterval(() => {
       if (cancelled) return
       if (Date.now() - lastMessageAtRef.current > STALE_AFTER_MS) {
@@ -146,7 +173,7 @@ export function useOrderBookStream(assetId: string | null) {
       clearInterval(staleTimer)
       closeCurrent()
     }
-  }, [assetId, setSnapshot])
+  }, [assetId, sourceMode, setSnapshot])
 
   return { snapshot, status, error, stale }
 }

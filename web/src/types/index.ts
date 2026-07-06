@@ -73,7 +73,7 @@ export interface ExecutionRequest {
   startUs: number
   endUs: number
   limit?: number
-  /** Pagination offset into the ordered result set (A.65). */
+  /** Pagination offset into the ordered result set. */
   offset?: number
   /** Result ordering: 'desc' (most recent first, default) or 'asc'. */
   order?: 'asc' | 'desc'
@@ -83,6 +83,6 @@ export interface RequestOptions {
   signal?: AbortSignal
   /** Per-request timeout override in ms. Defaults to a short timeout suitable
    *  for snappy reads; analytic endpoints (e.g. the SQL workbench) pass a longer
-   *  value so legitimate queries are not aborted prematurely (A.73). */
+   *  value so legitimate queries are not aborted prematurely. */
   timeoutMs?: number
 }
