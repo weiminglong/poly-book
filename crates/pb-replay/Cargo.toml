@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "Historical replay and checkpoint reconstruction engine for poly-book"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 pb-book = { workspace = true }

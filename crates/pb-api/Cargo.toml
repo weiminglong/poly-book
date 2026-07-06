@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "Browser-facing API and live read model for the poly-book workstation"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 pb-book = { workspace = true }

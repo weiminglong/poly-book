@@ -165,3 +165,62 @@ tests:
               summary: "WebSocket subscribers are lagging the broadcast buffer"
               description: "One or more streaming clients fell behind the per-asset broadcast buffer and were force-resynced. Occasional events are benign (a slow client); a sustained rate means the update rate exceeds what clients can consume — consider a larger BROADCAST_CAPACITY or client-side throttling."
               runbook: monitoring/RUNBOOK.md#wsbroadcastlagging
+
+  # --- Liveness class (critical) ---
+  - interval: 30s
+    name: Target down pages after a minute
+    input_series:
+      - series: 'up{job="poly-book", instance="ingest-1"}'
+        values: "1 1 1 1 0 0 0 0"
+    alert_rule_test:
+      # Healthy: target up, no alert.
+      - eval_time: 1m
+        alertname: TargetDown
+        exp_alerts: []
+      # Down for >1m: fires.
+      - eval_time: 4m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: poly-book
+              instance: ingest-1
+            exp_annotations:
+              summary: "poly-book process on ingest-1 is not being scraped"
+              description: >-
+                The scrape target is down: the process died, the host is gone, or the
+                metrics listener stopped. Every other alert in this file is blind
+                while this fires — rate()/increase() over an absent series returns an
+                empty vector, so the worst failure mode (total process death) pages
+                through this rule.
+              runbook: monitoring/RUNBOOK.md#targetdown
+
+  - interval: 1m
+    name: Absent ingest series pages
+    input_series:
+      - series: 'up{job="unrelated"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: IngestAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No ingest metrics exist at all"
+              description: >-
+                pb_messages_received_total is absent from Prometheus — either no
+                ingest process has ever come up, or its series aged out after a long
+                outage. Belt-and-braces companion to TargetDown for setups where the
+                job label does not match the up{} selector.
+              runbook: monitoring/RUNBOOK.md#ingestabsent
+
+  - interval: 1m
+    name: Present ingest series does not page absent
+    input_series:
+      - series: 'pb_messages_received_total{instance="ingest-1"}'
+        values: "0+100x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: IngestAbsent
+        exp_alerts: []
