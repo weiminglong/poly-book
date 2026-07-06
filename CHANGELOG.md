@@ -8,6 +8,12 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Published performance report: `docs/PERFORMANCE.md` carries measured,
+  machine/toolchain/commit-stamped Criterion medians for every hot-path stage
+  (wire deserialize, dispatcher normalize + shadow-book, WAL encode/append,
+  book operations, read model), regenerated with `just bench-report`
+  (`scripts/bench-report.py`). The README benchmarks section now leads with
+  the measured numbers.
 - Engineering-narrative documentation: a root-level `TESTING.md` mapping each
   failure mode to the layer that catches it (with verified counts and run
   commands, plus an explicit not-yet-covered section), and four new ADRs

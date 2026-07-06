@@ -16,6 +16,12 @@ test:
 bench:
     cargo bench
 
+# Run the full benchmark suite and regenerate docs/PERFORMANCE.md with
+# machine/toolchain/commit-stamped results
+bench-report:
+    cargo bench --workspace
+    python3 scripts/bench-report.py
+
 # Measure the durability-layer failover RTO (primary crash -> standby lease
 # acquire + tail recovery + resume + re-hydrate). Run on the TARGET hardware for a
 # realistic baseline. The full deployment RTO additionally includes container
