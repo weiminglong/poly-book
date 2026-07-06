@@ -112,5 +112,5 @@ PersistedRecord channel
 
 ## Tests
 
-30 tests covering schema validation, record batch conversion, `ParquetRecordWriter`
+36 tests covering schema validation, record batch conversion, `ParquetRecordWriter`
 lifecycle, and `ParquetSink` lifecycle.

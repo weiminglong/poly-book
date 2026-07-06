@@ -172,8 +172,8 @@ WAL segments are stored under `data/wal/` (configurable via `wal.base_path`):
 
 ```text
 data/wal/
-├── segment_000000000000.wal
-├── segment_000000000001.wal
+├── segment_00000000000000000000.wal
+├── segment_00000000000000000001.wal
 ├── consumer_serve-live.pos    # reader position file
 └── ...
 ```
@@ -247,13 +247,11 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo bench --workspace --no-run` — compiles every Criterion benchmark so the
   latency harness can't rot (`bench` job; statistical regression gating is
   local-only, since shared runners are too noisy)
-- Web CI — `eslint`, `tsc -b`, `vitest run`, `vite build` in `web/`
-- Fuzz smoke test — `fuzz_wal_corruption` and `fuzz_book_delta` (30s each, nightly)
+- Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`
+- Fuzz smoke test — all six targets at 30s each on nightly Rust:
+  `fuzz_wal_corruption`, `fuzz_book_delta`, `fuzz_query_guard`, `fuzz_ws_deser`,
+  `fuzz_codec_decode`, `fuzz_fixed_price`
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
-
-Additional local fuzz target:
-
-- `cargo +nightly fuzz run fuzz_query_guard` — SQL sanitizer and normalization path for the query workbench
 
 Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
 separate weekly schedule and on pushes/PRs.

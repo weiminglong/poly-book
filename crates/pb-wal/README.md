@@ -42,8 +42,10 @@ The `codec` module adds a version byte prefix before bincode serialization:
 └──────────────┴───────────────────────┘
 ```
 
-Currently version 1. Unknown versions produce a `WalError::Codec` error,
-allowing forward-compatible schema evolution.
+Currently version 2 (`codec::CURRENT_VERSION`). Unknown versions produce a
+`WalError::Codec` error; version 1 (which predates the provenance ingest
+ordinal) is explicitly rejected with a drain-the-WAL hint, because positional
+bincode would silently misparse the changed field count.
 
 ## Data Flow
 
