@@ -12,4 +12,6 @@ pub use error::FeedError;
 pub use rate_limiter::RateLimiter;
 pub use resnapshot::run_resnapshot_worker;
 pub use rest::{RestClient, RestConfig};
-pub use ws::{FeedMessage, WsClient, WsConfig, WsLifecycleEvent, WsLifecycleKind, WsRawMessage};
+pub use ws::{
+    probe_ws, FeedMessage, WsClient, WsConfig, WsLifecycleEvent, WsLifecycleKind, WsRawMessage,
+};

@@ -119,6 +119,14 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
+    /// Preflight checklist: validate config and probe every external
+    /// dependency (feed endpoints, storage paths, ports); exits non-zero on
+    /// failure so it can gate deploys
+    Doctor {
+        /// Skip feed/ClickHouse reachability probes (offline/CI use)
+        #[arg(long, default_value_t = false)]
+        skip_network: bool,
+    },
     /// Replay a committed capture as a simulated live feed behind the full
     /// workstation API/UI — fully offline, no venue dependency
     Demo {
@@ -338,6 +346,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Doctor { skip_network } => {
+            commands::doctor::run(settings, skip_network).await?;
+        }
         Commands::Demo {
             data_dir,
             speed,
@@ -403,6 +414,24 @@ mod tests {
                 assert_eq!(limit, 100);
             }
             _ => panic!("expected Discover"),
+        }
+    }
+
+    #[test]
+    fn parse_doctor_defaults() {
+        let cli = Cli::try_parse_from(["poly-book", "doctor"]).unwrap();
+        match cli.command {
+            Commands::Doctor { skip_network } => assert!(!skip_network),
+            _ => panic!("expected Doctor"),
+        }
+    }
+
+    #[test]
+    fn parse_doctor_skip_network() {
+        let cli = Cli::try_parse_from(["poly-book", "doctor", "--skip-network"]).unwrap();
+        match cli.command {
+            Commands::Doctor { skip_network } => assert!(skip_network),
+            _ => panic!("expected Doctor"),
         }
     }
 

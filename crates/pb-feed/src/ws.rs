@@ -340,6 +340,20 @@ fn build_tls_connector() -> Result<Connector, FeedError> {
     Ok(Connector::Rustls(Arc::new(config)))
 }
 
+/// Probe the venue WebSocket endpoint: perform a full TLS + WebSocket
+/// handshake with the same connector the feed uses, send a close frame, and
+/// return the handshake latency. Used by `doctor` as a connectivity preflight
+/// that exercises the real connection path (including the pinned crypto
+/// provider) without subscribing to anything.
+pub async fn probe_ws(url: &str) -> Result<Duration, FeedError> {
+    let started = Instant::now();
+    let (mut ws_stream, _) =
+        connect_async_tls_with_config(url, None, true, Some(build_tls_connector()?)).await?;
+    let latency = started.elapsed();
+    let _ = ws_stream.close(None).await;
+    Ok(latency)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

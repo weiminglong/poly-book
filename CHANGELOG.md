@@ -8,6 +8,13 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Preflight checks: a new `doctor` subcommand prints a pass/warn/fail table
+  covering config-key validation (hard failure on unknown keys), Parquet path
+  writability, WAL directory state, REST/Gamma reachability, a full WebSocket
+  TLS handshake through the feed's own connector, ClickHouse ping (warn-only),
+  and port availability — exiting non-zero on failure so it can gate deploys.
+  `--skip-network` for offline/CI use. pb-feed gains a public `probe_ws`
+  helper for the handshake probe.
 - Offline demo: a new `demo` subcommand replays a committed capture of real
   BTC-5-minute market data (`demo/data/`, recorded with `auto-ingest`) as a
   simulated live feed behind the full workstation API — original cadence
