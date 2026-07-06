@@ -2,8 +2,8 @@
 exclude-unpublished = true
 
 [advisories]
-# Detect unmaintained crates in the workspace and its direct dependencies
-# (audit finding A.36); transitive-only unmaintained crates are not failed on to
+# Detect unmaintained crates in the workspace and its direct dependencies;
+# transitive-only unmaintained crates are not failed on to
 # avoid breaking CI on upstreams we cannot control.
 unmaintained = "workspace"
 yanked = "deny"
@@ -37,8 +37,8 @@ allow = [
 ]
 
 [bans]
-# Surface duplicate transitive versions rather than allowing them unbounded
-# (audit finding A.141); warn keeps it visible without failing CI.
+# Surface duplicate transitive versions rather than allowing them unbounded;
+# warn keeps it visible without failing CI.
 multiple-versions = "warn"
 wildcards = "allow"
 

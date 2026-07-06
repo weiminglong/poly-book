@@ -12,7 +12,7 @@ RUN npx vite build
 FROM rust:1.94-slim AS builder
 
 # pb-grpc's build script needs protoc. TLS is rustls (no OpenSSL), so no
-# libssl-dev/pkg-config are needed to compile (audit finding P2-BUILD-3).
+# libssl-dev/pkg-config are needed to compile.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
@@ -30,9 +30,9 @@ RUN cargo build --release --bin poly-book
 FROM debian:bookworm-slim
 
 # No libssl3 at runtime: TLS is rustls with bundled webpki (Mozilla) roots, so
-# the binary neither links OpenSSL nor needs the system CA store (audit finding
-# P2-BUILD-3). ca-certificates is kept as harmless belt-and-suspenders for any
-# tooling that consults the system trust store.
+# the binary neither links OpenSSL nor needs the system CA store.
+# ca-certificates is kept as harmless belt-and-suspenders for any tooling that
+# consults the system trust store.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -55,7 +55,7 @@ EXPOSE 3000 9090
 
 VOLUME ["/data"]
 
-# Run as the non-root user (audit finding A.158).
+# Run as the non-root user.
 USER poly
 
 ENTRYPOINT ["poly-book"]

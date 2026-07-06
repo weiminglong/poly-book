@@ -96,7 +96,7 @@ export function useOrderBookStream(assetId: string | null) {
           // Surface malformed frames instead of silently discarding them. A
           // persistently-malformed stream leaves wsSnapshot null and silently
           // degrades the page to HTTP polling under a green badge; the warning
-          // gives that failure a diagnostic trail (HFT-review #27).
+          // gives that failure a diagnostic trail.
           console.warn('Discarding malformed orderbook stream message:', err)
         }
       }

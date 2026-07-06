@@ -60,7 +60,7 @@ The detailed step plan below captures the implementation order used for the
 Phase 3-5 workstation rollout. The checklist sections above are the source of
 truth for what has shipped; the remaining open work is query adapters (3.4),
 gRPC transport, and multi-replica coordination. Phase 6 clean-slate serving
-architecture is complete (see `openspec/changes/clean-slate-serving-architecture/`).
+architecture is complete (see `openspec/changes/archive/2026-03-08-clean-slate-serving-architecture/`).
 
 ### Dependency graph
 

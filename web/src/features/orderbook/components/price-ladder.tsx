@@ -10,7 +10,7 @@ interface PriceLadderProps {
 export const PriceLadder = memo(function PriceLadder({ bids, asks }: PriceLadderProps) {
   // Memoize + single-pass: avoid rebuilding a combined array and Math.max(...spread)
   // (which allocates and can blow the stack on deep books) on every render during
-  // high-frequency updates (HFT-review #21).
+  // high-frequency updates.
   const maxSize = useMemo(() => {
     let max = 1
     for (const l of bids) {

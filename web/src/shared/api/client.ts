@@ -43,7 +43,7 @@ export async function fetchAndValidate<T>(
         }
       } catch (err) {
         // Keep the diagnostic trail instead of silently swallowing it; fall back
-        // to the HTTP status message for the user-facing error (HFT-review #16).
+        // to the HTTP status message for the user-facing error.
         console.warn('Failed to parse API error response body:', err)
       }
       throw new Error(message)
@@ -94,7 +94,7 @@ export async function postAndValidate<T>(
           message = json.error
         }
       } catch (err) {
-        // Keep the diagnostic trail instead of silently swallowing it (HFT-review #16).
+        // Keep the diagnostic trail instead of silently swallowing it.
         console.warn('Failed to parse API error response body:', err)
       }
       throw new Error(message)

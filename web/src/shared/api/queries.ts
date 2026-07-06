@@ -151,7 +151,7 @@ export function useReplayReconstruction(
               depth: String(request.depth),
             }),
             // Historical reconstruction can scan a wide window; the default 4s
-            // timeout aborts legitimate queries (HFT-review #11).
+            // timeout aborts legitimate queries.
             { signal, timeoutMs: 30_000 },
           )
         },
@@ -181,7 +181,7 @@ export function useIntegritySummary(
               start_us: String(request.startUs),
               end_us: String(request.endUs),
             }),
-            // Integrity over a wide window can exceed the default 4s (HFT-review #11).
+            // Integrity over a wide window can exceed the default 4s.
             { signal, timeoutMs: 30_000 },
           )
         },

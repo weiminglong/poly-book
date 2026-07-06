@@ -14,7 +14,7 @@
 - [x] 2.3 Implement `WalWriter`: manages active segment, rotates on size threshold, seals completed segments as read-only
 - [x] 2.4 Implement `WalReader`: consumer with independent position tracking, tails across segments, resumes from committed offset
 - [x] 2.5 Implement WAL pruning: removes sealed segments that all registered consumers have advanced past
-  - **Post-hoc correction (audit A.59, 2026-06):** shipped as `WalWriter::prune` / `WalWriter::prune_with_backpressure`, not a standalone `WalPruner` type. The methods were initially *unwired* (no production caller); pruning is now invoked on a 60s cadence in `ingest`/`auto-ingest`, with a hard `max_segments` count cap (audit A.20) and a single-writer `flock` (A.128).
+  - **Post-hoc correction (2026-06):** shipped as `WalWriter::prune` / `WalWriter::prune_with_backpressure`, not a standalone `WalPruner` type. The methods were initially *unwired* (no production caller); pruning is now invoked on a 60s cadence in `ingest`/`auto-ingest`, with a hard `max_segments` count cap and a single-writer `flock`.
 - [x] 2.6 Define `WalConfig` (segment_size, base_path, max_segments) and `WalError` types
 - [x] 2.7 Implement `PersistedRecord` serialization/deserialization via bincode with a version byte prefix
 - [x] 2.8 Add unit tests: append-read round-trip, segment rotation, CRC corruption detection, multi-consumer independent positions
@@ -94,4 +94,4 @@
 - [x] 8.6 Update `CLAUDE.md` crate table with `pb-wal` and `pb-service` entries
 - [x] 8.7 Add WAL fuzz target to CI workflow
 - [ ] 8.8 Add benchmark regression gate for read model latency (p99 snapshot read)
-  - **Post-hoc correction (audit A.59, 2026-06):** NOT shipped. Criterion benches exist locally for `pb-types`/`pb-book`/`pb-api`/`pb-service`, but `.github/workflows/ci.yml` has no benchmark job or threshold gate, so read-model latency regressions are not caught in CI. Unchecked to keep the archived record honest.
+  - **Post-hoc correction (2026-06, updated 2026-07):** partially shipped. Criterion benches exist for `pb-types`/`pb-book`/`pb-api`/`pb-service` and CI compiles every benchmark (`cargo bench --workspace --no-run`) so the harness cannot rot, but there is no threshold gate on shared runners — statistical regression gating remains local-only, so read-model latency regressions are not caught in CI. Unchecked to keep the archived record honest.

@@ -28,7 +28,7 @@ export default function ExecutionPage() {
 
   // Server-side pagination: each page is fetched with its own limit+offset so
   // events beyond the first page are reachable (previously the UI fetched a
-  // hard-coded 200 and paged client-side, hiding everything past 200 — A.65).
+  // hard-coded 200 and paged client-side, hiding everything past 200).
   const request = useMemo<ExecutionRequest | null>(
     () =>
       baseRequest
