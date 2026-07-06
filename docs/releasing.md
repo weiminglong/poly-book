@@ -20,5 +20,15 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The GitHub workflow at `.github/workflows/release.yml` creates the release entry
-automatically for tags matching `v*.*.*`.
+The GitHub workflow at `.github/workflows/release.yml` runs on tags matching
+`v*.*.*` and publishes three artifact sets:
+
+- a `linux/amd64` container image to `ghcr.io/<owner>/poly-book`, tagged with
+  the version, `MAJOR.MINOR`, and `latest`
+- `poly-book` binaries for `x86_64-unknown-linux-gnu` and
+  `aarch64-apple-darwin`, attached to the GitHub release as tarballs
+- the GitHub release itself with generated notes
+
+After the workflow finishes, verify
+`docker run ghcr.io/<owner>/poly-book:<version>` starts the combined live
+workstation (the image's default command).
