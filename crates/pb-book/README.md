@@ -50,6 +50,14 @@ pb-book (L2Book)
 - 69 tests covering empty book, single level, snapshot duplicates, delta sequences,
   and proptest invariants.
 
+## Benchmarks
+
+`benches/book_ops.rs` and `benches/book_depth.rs` cover snapshot/delta/read
+workloads; `benches/array_book.rs` keeps the ADR-0002 comparison honest by
+running an epoch-stamped dense-array book (the bounded-tick-grid alternative)
+against `L2Book` on identical workloads. Measured results and the retention
+rationale live in `docs/adr/0002-btreemap-orderbook.md`.
+
 ## Docs to Update After Changes
 
 | What changed | Update |

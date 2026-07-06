@@ -215,7 +215,7 @@ happens when a consumer falls behind is explicit:
 | ADR | Decision | Rationale |
 |-----|----------|-----------|
 | [ADR-0001](adr/0001-fixed-point-arithmetic.md) | Fixed-point over floating-point | Eliminate FPU stalls and NaN guards |
-| [ADR-0002](adr/0002-btreemap-orderbook.md) | BTreeMap for L2 book | O(1) best bid/ask via sorted iteration |
+| [ADR-0002](adr/0002-btreemap-orderbook.md) | BTreeMap for L2 book | ~3 ns best bid/ask measured; dense-array alternative benchmarked |
 | [ADR-0003](adr/0003-channel-message-passing.md) | Channel-based message passing | No locks on hot path |
 | [ADR-0004](adr/0004-zero-copy-deserialization.md) | Zero-copy wire deserialization | Reduce allocations on ingest path |
 | [ADR-0005](adr/0005-mimalloc-allocator.md) | mimalloc global allocator | Lower p99 latency under tokio |

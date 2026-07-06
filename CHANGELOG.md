@@ -8,6 +8,15 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Order-book design claims are now measured: a new `array_book` benchmark
+  runs an epoch-stamped dense-array book (the bounded-grid alternative an
+  order-book design discussion starts from) against `L2Book` on identical
+  workloads, and ADR-0002 records the results — the array wins the write path
+  10–19x, ties top-of-book — together with why BTreeMap is retained (book ops
+  are not the pipeline bottleneck; no grid coupling; proportional memory) and
+  the crossover condition for switching. Incorrect "O(1) best bid/ask" claims
+  in the README, architecture overview, and latency doc now cite the measured
+  ~3 ns figure instead.
 - Published performance report: `docs/PERFORMANCE.md` carries measured,
   machine/toolchain/commit-stamped Criterion medians for every hot-path stage
   (wire deserialize, dispatcher normalize + shadow-book, WAL encode/append,
