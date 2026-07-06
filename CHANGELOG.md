@@ -8,6 +8,14 @@ is practical to do so.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-07-06
+
+The first tagged release: the ingestion, durability, replay, and workstation
+surfaces are complete and verified end to end, the demo paths run with zero
+infrastructure, and the release pipeline publishes runnable artifacts.
+
 - Hardening bundle: `unsafe` is now forbidden workspace-wide via
   `[workspace.lints]` (pb-types alone overrides to `deny` for its four
   SAFETY-documented, miri-verified serializer sites — policy recorded in
