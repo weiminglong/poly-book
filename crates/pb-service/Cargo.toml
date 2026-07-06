@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "Transport-neutral domain service layer for the poly-book workstation"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 pb-book = { workspace = true }

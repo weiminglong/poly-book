@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "In-memory L2 order book engine used by the poly-book workspace"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 thiserror = { workspace = true }

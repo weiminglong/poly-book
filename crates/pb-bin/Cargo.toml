@@ -14,6 +14,9 @@ description = "CLI entrypoint for the poly-book Polymarket ingestion and replay 
 name = "poly-book"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 pb-api = { workspace = true }

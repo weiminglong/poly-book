@@ -8,6 +8,16 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Hardening bundle: `unsafe` is now forbidden workspace-wide via
+  `[workspace.lints]` (pb-types alone overrides to `deny` for its four
+  SAFETY-documented, miri-verified serializer sites — policy recorded in
+  SECURITY.md); two liveness alerts close the blindest failure mode
+  (`TargetDown` on `up == 0` and `IngestAbsent` on a missing ingest series,
+  with promtool incident tests and runbook sections — every other alert
+  evaluates to an empty vector when the process is simply gone); and a new
+  `integration-docker` CI job runs the previously `#[ignore]`d Docker-backed
+  integration cases (ClickHouse roundtrips, Parquet-vs-ClickHouse cross-backend
+  equivalence, MinIO S3 roundtrip) on every PR.
 - Order-book design claims are now measured: a new `array_book` benchmark
   runs an epoch-stamped dense-array book (the bounded-grid alternative an
   order-book design discussion starts from) against `L2Book` on identical

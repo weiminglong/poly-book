@@ -150,6 +150,7 @@ impl fmt::Display for FixedPrice {
         let mut buf = [0u8; 16];
         let len = self.write_to_buf(&mut buf);
         // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
+        #[allow(unsafe_code)]
         let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         f.write_str(s)
     }
@@ -176,6 +177,7 @@ impl Serialize for FixedPrice {
         let mut buf = [0u8; 16];
         let len = self.write_to_buf(&mut buf);
         // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
+        #[allow(unsafe_code)]
         let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         serializer.serialize_str(s)
     }
@@ -261,6 +263,7 @@ impl fmt::Display for FixedSize {
         let mut buf = [0u8; 32];
         let len = self.write_to_buf(&mut buf);
         // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
+        #[allow(unsafe_code)]
         let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         f.write_str(s)
     }
@@ -286,6 +289,7 @@ impl Serialize for FixedSize {
         let mut buf = [0u8; 32];
         let len = self.write_to_buf(&mut buf);
         // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
+        #[allow(unsafe_code)]
         let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         serializer.serialize_str(s)
     }

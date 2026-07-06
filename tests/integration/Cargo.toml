@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { path = "../../crates/pb-types" }
 pb-book = { path = "../../crates/pb-book" }

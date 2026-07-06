@@ -31,6 +31,40 @@ PagerDuty/Slack integration and a running Alertmanager remain environment setup.
 
 ---
 
+## TargetDown
+
+**Severity: critical.**
+
+The scrape target stopped answering: the process died, the host is gone, or
+the metrics listener stopped. Every other alert in this runbook is blind while
+this fires — `rate()`/`increase()` over an absent series returns an empty
+vector — so total process death pages through this rule, not through
+`FeedSilent`/`WalAppendFailing`.
+
+1. Check whether the process is running (`docker compose ps`, `systemctl
+   status`, or the orchestrator's task list) and restart it if not. Ingest
+   resumes from the WAL; serve re-hydrates from the latest checkpoint.
+2. If the process is up, the metrics listener may have died or the bind
+   address changed — `curl http://<host>:9090/metrics` and compare against
+   `metrics.listen_addr` / the Prometheus scrape config.
+3. After recovery, check `WalConsumerLagHigh` and run `poly-book doctor` on
+   the host before closing the incident.
+
+## IngestAbsent
+
+**Severity: critical.**
+
+`pb_messages_received_total` does not exist in Prometheus at all — either no
+ingest process ever came up after a deploy, or the series aged out during a
+long outage. Companion to `TargetDown` for setups where the scrape job label
+does not match its `up{}` selector.
+
+1. Confirm an ingest process is deployed and scraped (same steps as
+   `TargetDown`).
+2. If this fires with `TargetDown` quiet, the scrape job label has drifted —
+   fix the Prometheus scrape config or the alert selector so the pair stays
+   consistent.
+
 ## WalAppendFailing
 **Severity: critical — active data loss.**
 

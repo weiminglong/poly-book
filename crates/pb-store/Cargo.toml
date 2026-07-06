@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "Parquet and ClickHouse storage sinks for the poly-book workspace"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-types = { workspace = true }
 pb-metrics = { path = "../pb-metrics" }

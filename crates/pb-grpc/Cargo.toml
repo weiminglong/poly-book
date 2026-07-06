@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "gRPC read surface for the poly-book workstation"
 
+[lints]
+workspace = true
+
 [dependencies]
 pb-service = { workspace = true }
 pb-types = { workspace = true }

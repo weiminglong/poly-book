@@ -9,6 +9,37 @@
 # `for:` durations are short (seconds) for the data-loss-class alerts so paging is
 # second-scale.
 groups:
+  - name: poly-book-liveness
+    rules:
+      - alert: TargetDown
+        expr: up{job=~".*poly-book.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "poly-book process on {{ $labels.instance }} is not being scraped"
+          description: >-
+            The scrape target is down: the process died, the host is gone, or the
+            metrics listener stopped. Every other alert in this file is blind
+            while this fires — rate()/increase() over an absent series returns an
+            empty vector, so the worst failure mode (total process death) pages
+            through this rule.
+          runbook: monitoring/RUNBOOK.md#targetdown
+
+      - alert: IngestAbsent
+        expr: absent(pb_messages_received_total)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No ingest metrics exist at all"
+          description: >-
+            pb_messages_received_total is absent from Prometheus — either no
+            ingest process has ever come up, or its series aged out after a long
+            outage. Belt-and-braces companion to TargetDown for setups where the
+            job label does not match the up{} selector.
+          runbook: monitoring/RUNBOOK.md#ingestabsent
+
   - name: poly-book-data-loss
     rules:
       - alert: WalAppendFailing

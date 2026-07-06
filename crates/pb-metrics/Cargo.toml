@@ -10,6 +10,9 @@ homepage.workspace = true
 readme.workspace = true
 description = "Prometheus metrics helpers and HTTP exporter for poly-book"
 
+[lints]
+workspace = true
+
 [dependencies]
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

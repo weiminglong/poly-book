@@ -21,7 +21,7 @@ commands so they can be re-checked instead of trusted.
 | 4 | WAL corruption on disk (bit flips, torn writes, zero-filled tails) | `fuzz_wal_corruption` (write, corrupt bytes, assert reader never panics and returns only CRC-valid records) | pb-wal unit tests for truncated-tail recovery, CRC/length corruption, prune safety (80 test attributes) + 2 proptest properties | yes (`fuzz`, `test`) |
 | 5 | Silent WAL byte-format drift between builds | Golden-bytes fixture `golden_codec_book_v2_bytes_are_stable` (pb-wal): any codec change that alters encoded bytes fails the build | `fuzz_codec_decode` (arbitrary bytes into `codec::decode`: error, never panic); version byte rejected on mismatch | yes (`test`, `fuzz`) |
 | 6 | Non-deterministic replay (same events, different book) | Determinism fixture `tests/integration/book_determinism.rs` (3 tests) | Golden replay regression `golden_replay_produces_expected_book` (pb-replay), 47 pb-replay test attributes | yes (`test`) |
-| 7 | Parquet and ClickHouse answering the same query differently | 3 cross-backend equivalence tests (replay, integrity, execution) in `tests/integration/cross_backend_service.rs` | 5 ClickHouse round-trip tests, 1 S3/MinIO round-trip; `reconcile` rebuilds Parquet from the WAL when they do diverge | **no — `#[ignore]`d, Docker-backed, run locally** |
+| 7 | Parquet and ClickHouse answering the same query differently | 3 cross-backend equivalence tests (replay, integrity, execution) in `tests/integration/cross_backend_service.rs` | 5 ClickHouse round-trip tests, 1 S3/MinIO round-trip; `reconcile` rebuilds Parquet from the WAL when they do diverge | yes (`integration-docker` runs the `#[ignore]`d Docker-backed cases via testcontainers) |
 | 8 | SQL escaping the read-only query workbench | `fuzz_query_guard` (guarded SQL must be a fixed point of the guard) | Guard unit tests in pb-service/pb-api; server-side readonly + LIMIT enforcement | yes (`fuzz`, `test`) |
 | 9 | Crash/restart data loss across the ingest/serve boundary | 2 checkpoint + WAL hydration integration tests (`checkpoint_wal_hydration.rs`) | pb-wal reopen-recovery and position-file tests; standby-writer flock takeover test | yes (`test`) |
 | 10 | Undefined behavior / memory unsafety | Miri on pb-types and pb-book unit tests | Workspace is overwhelmingly safe Rust; `clippy -D warnings` | yes (`miri`) |
@@ -133,9 +133,10 @@ promtool test rules monitoring/alerts_test.yml
 amtool check-config monitoring/alertmanager.yml
 ```
 
-`monitoring/alerts.yml` defines 13 alert rules. `monitoring/alerts_test.yml`
-replays 8 simulated incidents offline (WAL append failure, WAL decode error,
-silent feed, consumer lag, and so on) with 10 assertions covering both that
+`monitoring/alerts.yml` defines 15 alert rules. `monitoring/alerts_test.yml`
+replays 11 simulated incidents offline (target down, absent ingest series,
+WAL append failure, WAL decode error, silent feed, consumer lag, and so on)
+with assertions covering both that
 the alert fires with the expected labels and that a healthy signal does not
 fire. CI additionally asserts the Alertmanager severity→receiver
 routing (`critical` → PagerDuty, `warning`/`info` → Slack) so routing cannot
@@ -197,9 +198,6 @@ Being explicit about what is *not* covered:
 - **No chaos injection.** Disk-full, ClickHouse partitions mid-batch, and
   clock skew are handled by code paths with unit tests, but nothing injects
   those faults into a running topology.
-- **Cross-backend equivalence is not in CI.** The three equivalence tests and
-  the ClickHouse/MinIO round-trips need Docker and are `#[ignore]`d; they run
-  locally and are the main guard against warm/cold divergence (matrix row 7).
 - **Performance regressions are not gated in CI** — the harness is
   compile-checked only; measurement is a local, manual step.
 - **Miri covers only pb-types and pb-book**, and skips their proptest suites.

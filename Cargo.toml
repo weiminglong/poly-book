@@ -122,6 +122,13 @@ tokio-util = "0.7"
 futures-util = "0.3"
 governor = "0.10"
 
+# Workspace-wide lint policy: unsafe code is forbidden. The one exception is
+# pb-types, which overrides to `deny` for four SAFETY-documented,
+# miri-verified from_utf8_unchecked sites in its fixed-point serializers
+# (see SECURITY.md).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
