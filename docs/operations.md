@@ -359,6 +359,26 @@ just parquet-stats
 
 ## Workstation API
 
+### Offline Demo (`demo`)
+
+```bash
+# Replay the committed capture (demo/data) as a simulated live feed + full API
+cargo run --release -- demo            # or: just demo
+
+# Fast-forward playback, custom capture location
+cargo run --release -- demo --speed 10 --data-dir /path/to/capture
+```
+
+`demo` discovers assets and the time window from the capture's Parquet layout,
+pre-seeds every asset's book from its first captured venue snapshot, then
+streams the records into the same read model the live pipeline uses — at
+original cadence (divided by `--speed`), looping forever, with provenance
+timestamps shifted to the wall clock so live surfaces read as current.
+Historical routes (replay, integrity, execution) answer from the capture with
+its original timestamps; the startup banner prints copy-paste examples with
+known-good values. The SQL workbench stays disabled (ClickHouse-only). Any
+directory produced by `ingest`/`auto-ingest` works as `--data-dir`.
+
 ### Docker Compose (one command)
 
 ```bash

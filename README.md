@@ -34,7 +34,19 @@ If you want to contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
-### One command (Docker)
+### One command (offline, no Docker)
+
+```bash
+just demo        # or: cargo run --release -- demo
+```
+
+Replays a committed capture of real Polymarket BTC-5-minute market data as a
+simulated live feed behind the full API — the book ticks at its original
+cadence, and replay/integrity/execution answer from the capture. No network,
+no venue dependency, deterministic. The startup banner prints copy-paste
+`curl` examples with known-good timestamps.
+
+### One command (Docker, live venue)
 
 ```bash
 docker compose --profile minimal up --build

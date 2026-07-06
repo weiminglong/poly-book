@@ -105,6 +105,13 @@ metrics:
 metrics-grep pattern:
     @curl -s localhost:9090/metrics | grep '{{pattern}}'
 
+# ── Demo ──────────────────────────────────────────────────────
+
+# Offline demo: replay the committed capture as a simulated live feed behind
+# the full API (no network, no venue dependency). Add --speed for fast-forward.
+demo:
+    cargo run --release -- demo
+
 # ── Docker Compose ────────────────────────────────────────────
 
 # One-container live workstation (feed + API + UI) at http://localhost:3000

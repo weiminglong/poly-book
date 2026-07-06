@@ -8,6 +8,14 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Offline demo: a new `demo` subcommand replays a committed capture of real
+  BTC-5-minute market data (`demo/data/`, recorded with `auto-ingest`) as a
+  simulated live feed behind the full workstation API — original cadence
+  (`--speed` to fast-forward), looping, provenance timestamps shifted to the
+  wall clock, every asset pre-seeded from its first captured venue snapshot so
+  live routes answer immediately. Replay, integrity, and execution answer from
+  the capture with original timestamps, and the startup banner prints
+  copy-paste examples with known-good values. `just demo` wraps it.
 - One-command local topologies: a top-level `docker-compose.yml` with three
   profiles — `minimal` (one container: live feed + API + web UI),
   `full` (production process separation: ingest + serve over a shared WAL

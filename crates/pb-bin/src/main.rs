@@ -119,6 +119,19 @@ enum Commands {
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
     },
+    /// Replay a committed capture as a simulated live feed behind the full
+    /// workstation API/UI — fully offline, no venue dependency
+    Demo {
+        /// Directory containing the capture's Parquet tree
+        #[arg(long, default_value = "demo/data")]
+        data_dir: String,
+        /// Playback speed multiplier (0.1–100)
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        /// Enable metrics server (use --metrics=false to disable)
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
+        metrics: bool,
+    },
     /// Start the read-only API server with a live feed and replay access
     ServeApi {
         /// Comma-separated token IDs to subscribe to
@@ -325,6 +338,14 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Demo {
+            data_dir,
+            speed,
+            metrics,
+        } => {
+            commands::demo::run(settings, data_dir, speed, metrics, shutdown, slug_registry)
+                .await?;
+        }
         Commands::ServeApi {
             tokens,
             auto_rotate,
@@ -382,6 +403,49 @@ mod tests {
                 assert_eq!(limit, 100);
             }
             _ => panic!("expected Discover"),
+        }
+    }
+
+    #[test]
+    fn parse_demo_defaults() {
+        let cli = Cli::try_parse_from(["poly-book", "demo"]).unwrap();
+        match cli.command {
+            Commands::Demo {
+                data_dir,
+                speed,
+                metrics,
+            } => {
+                assert_eq!(data_dir, "demo/data");
+                assert_eq!(speed, 1.0);
+                assert!(metrics);
+            }
+            _ => panic!("expected Demo"),
+        }
+    }
+
+    #[test]
+    fn parse_demo_with_args() {
+        let cli = Cli::try_parse_from([
+            "poly-book",
+            "demo",
+            "--data-dir",
+            "/tmp/capture",
+            "--speed",
+            "4",
+            "--metrics=false",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Demo {
+                data_dir,
+                speed,
+                metrics,
+            } => {
+                assert_eq!(data_dir, "/tmp/capture");
+                assert_eq!(speed, 4.0);
+                assert!(!metrics);
+            }
+            _ => panic!("expected Demo"),
         }
     }
 
