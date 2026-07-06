@@ -62,6 +62,11 @@ http_request_timeout_secs = 30
 # Leave unset for the default loopback-only workstation. Required before exposing
 # the API or gRPC on any non-loopback interface. Override: PB__API__AUTH_TOKEN.
 # auth_token = ""
+# Optional directory of built web UI assets (web/dist). When set (non-empty),
+# unknown routes serve the SPA with an index.html fallback, so one process
+# hosts both the API and the workstation UI. The Docker image sets this to its
+# bundled assets. Override: PB__API__STATIC_ASSETS_DIR.
+# static_assets_dir = ""
 
 [grpc]
 enabled = false

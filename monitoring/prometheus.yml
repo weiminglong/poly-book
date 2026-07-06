@@ -1,0 +1,22 @@
+# Prometheus config for the docker-compose observability profile.
+# Scrapes every poly-book process the compose topologies can start; targets
+# that are not running in the chosen profile simply show as down.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: poly-book
+    static_configs:
+      - targets:
+          - workstation:9090
+          - ingest:9090
+          - serve:9090

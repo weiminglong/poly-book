@@ -105,6 +105,24 @@ metrics:
 metrics-grep pattern:
     @curl -s localhost:9090/metrics | grep '{{pattern}}'
 
+# ── Docker Compose ────────────────────────────────────────────
+
+# One-container live workstation (feed + API + UI) at http://localhost:3000
+up:
+    docker compose --profile minimal up --build
+
+# Full topology: ingest + serve (shared WAL) + ClickHouse
+up-full:
+    docker compose --profile full up --build
+
+# Full topology plus Prometheus/Alertmanager/Grafana (Grafana at :3001)
+up-obs:
+    docker compose --profile full --profile observability up --build
+
+# Stop and remove all compose services (data volumes are kept)
+down:
+    docker compose --profile minimal --profile full --profile observability down
+
 # ── Housekeeping ──────────────────────────────────────────────
 
 # Clean build artifacts

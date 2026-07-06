@@ -45,6 +45,11 @@ pub struct ApiConfig {
     /// keeps the read-only workstation open on its loopback bind;
     /// auth is required before it is reachable on any non-loopback interface.
     pub auth_token: Option<String>,
+    /// Optional directory of built SPA assets to serve on non-API paths. When
+    /// `Some`, unknown routes fall back to the SPA (with `index.html` for
+    /// client-side routes) so one process serves both the API and the UI.
+    /// `None` (default) keeps the API-only behavior.
+    pub static_assets_dir: Option<String>,
 }
 
 #[derive(Clone)]
@@ -173,12 +178,26 @@ pub fn router(state: AppState) -> Router {
         )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
-    Router::new()
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
-        .merge(protected)
-        .layer(middleware::from_fn(track_request_metrics))
+        .merge(protected);
+
+    // Optional SPA hosting: unknown paths serve the built web assets, with
+    // index.html as the fallback so client-side routes (/orderbook, /replay)
+    // deep-link correctly. API and health routes above always win; static
+    // requests carry no MatchedPath and meter as "<unmatched>", so they cannot
+    // blow up metric cardinality.
+    if let Some(dir) = state.config.static_assets_dir.as_deref() {
+        let index = std::path::Path::new(dir).join("index.html");
+        app = app.fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        );
+    }
+
+    app.layer(middleware::from_fn(track_request_metrics))
         .with_state(state)
 }
 
@@ -740,6 +759,7 @@ mod tests {
                 // saturated by other crates' test binaries).
                 http_request_timeout_secs: 600,
                 auth_token: None,
+                static_assets_dir: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
@@ -1791,6 +1811,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_assets_serve_spa_with_index_fallback_when_configured() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        std::fs::write(assets.path().join("index.html"), "<html>spa</html>").unwrap();
+        std::fs::write(assets.path().join("app.js"), "console.log(1)").unwrap();
+
+        let mut state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        state.config.static_assets_dir = Some(assets.path().to_string_lossy().to_string());
+        let app = router(state);
+
+        // A real asset is served as-is.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // An unknown path (a client-side route) falls back to index.html so
+        // SPA deep links work.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orderbook")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"<html>spa</html>");
+
+        // API routes still take precedence over the static fallback.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/feed/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_is_404_without_static_assets() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
+        let app = router(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orderbook")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn feed_status_returns_200_with_valid_response() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
@@ -1934,6 +2024,7 @@ mod tests {
                 query_timeout_secs: 30,
                 http_request_timeout_secs: 600,
                 auth_token: None,
+                static_assets_dir: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),

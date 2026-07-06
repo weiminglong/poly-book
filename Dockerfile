@@ -50,6 +50,9 @@ ENV PB__STORAGE__PARQUET_BASE_PATH=/data
 # need an external bind must set PB__API__AUTH_TOKEN as well.
 ENV PB__METRICS__LISTEN_ADDR=127.0.0.1:9090
 ENV PB__API__LISTEN_ADDR=127.0.0.1:3000
+# Serve the bundled workstation UI from the same process: any non-API route
+# falls back to the SPA, so one container is API + UI.
+ENV PB__API__STATIC_ASSETS_DIR=/var/lib/poly-book/web
 
 EXPOSE 3000 9090
 
@@ -59,4 +62,8 @@ VOLUME ["/data"]
 USER poly
 
 ENTRYPOINT ["poly-book"]
-CMD ["--config", "/etc/poly-book/default.toml", "--help"]
+# Default to the combined live workstation (feed + API + UI in one process)
+# so `docker run -p 3000:3000 -e PB__API__LISTEN_ADDR=0.0.0.0:3000 <image>`
+# is a working system, not a help screen. Other subcommands (ingest, serve,
+# reconcile, ...) override this CMD; docker-compose does so explicitly.
+CMD ["--config", "/etc/poly-book/default.toml", "serve-api", "--auto-rotate"]

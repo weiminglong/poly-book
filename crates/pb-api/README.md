@@ -55,6 +55,12 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 
 - The API is intentionally read-only. No mutation routes exist in v1.
   See [docs/serve-api.md](../../docs/serve-api.md) for runtime constraints.
+- Optional bundled-SPA hosting: when `api.static_assets_dir` is set (the
+  Docker image points it at the built `web/dist`), unknown routes fall back to
+  `ServeDir` with an `index.html` fallback so client-side routes deep-link.
+  API/health/WS routes always win; static requests carry no `MatchedPath` and
+  meter as `<unmatched>`, keeping metric cardinality bounded. Unset = API-only
+  (the non-Docker default).
 - **Trust boundary**: HTTP/WS routes support optional bearer-token auth via
   `api.auth_token`; health probes stay open. The default loopback bind can stay
   open for local use, but `pb-bin` rejects non-loopback API/gRPC binds unless a

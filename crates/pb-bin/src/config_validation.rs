@@ -58,6 +58,7 @@ pub const KNOWN_CONFIG_KEYS: &[&str] = &[
     "api.query_timeout_secs",
     "api.http_request_timeout_secs",
     "api.auth_token",
+    "api.static_assets_dir",
     // [grpc]
     "grpc.enabled",
     "grpc.listen_addr",

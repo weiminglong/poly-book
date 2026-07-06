@@ -1,0 +1,147 @@
+# Local topologies for poly-book. Every service carries an explicit profile so
+# the topologies cannot collide on ports — pick exactly one of:
+#
+#   docker compose --profile minimal up --build
+#       One container: live feed + API + workstation UI at http://localhost:3000.
+#       In-memory only (no WAL, no warm storage) — the fastest way to see the
+#       system against the real venue.
+#
+#   docker compose --profile full up --build
+#       The production process separation: `ingest` (feed -> WAL + Parquet +
+#       ClickHouse sinks) and `serve` (checkpoint hydration -> WAL tail -> API
+#       + UI) over a shared data volume, plus ClickHouse warm storage.
+#       UI at http://localhost:3000, ClickHouse at http://localhost:8123.
+#
+#   docker compose --profile full --profile observability up --build
+#       Adds Prometheus (alert rules loaded), Alertmanager, and Grafana with
+#       the committed dashboard provisioned. Grafana at http://localhost:3001
+#       (anonymous admin, local only), Prometheus at http://localhost:9091.
+#
+# Trust boundary: only the UI/API, Grafana, Prometheus, and ClickHouse HTTP
+# ports are mapped to the host. Metrics endpoints stay on the compose-internal
+# network. Do not expose this compose file's ports beyond localhost without
+# setting PB__API__AUTH_TOKEN.
+
+name: poly-book
+
+services:
+  # --- minimal: combined live workstation ---------------------------------
+  workstation:
+    build: .
+    image: poly-book:local
+    profiles: [minimal]
+    command:
+      ["--config", "/etc/poly-book/default.toml", "serve-api", "--auto-rotate"]
+    environment:
+      # 0.0.0.0 binds are container-internal; compose maps them to localhost.
+      PB__API__LISTEN_ADDR: 0.0.0.0:3000
+      PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
+      PB__LOGGING__LEVEL: info
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - workstation-data:/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # --- full: production process separation --------------------------------
+  ingest:
+    build: .
+    image: poly-book:local
+    profiles: [full]
+    command:
+      ["--config", "/etc/poly-book/default.toml", "auto-ingest"]
+    environment:
+      PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
+      PB__STORAGE__CLICKHOUSE_URL: http://clickhouse:8123
+      PB__LOGGING__LEVEL: info
+    volumes:
+      - pipeline-data:/data
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  serve:
+    build: .
+    image: poly-book:local
+    profiles: [full]
+    command:
+      ["--config", "/etc/poly-book/default.toml", "serve"]
+    environment:
+      PB__API__LISTEN_ADDR: 0.0.0.0:3000
+      PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
+      PB__STORAGE__CLICKHOUSE_URL: http://clickhouse:8123
+      PB__API__HISTORICAL_BACKEND: clickhouse
+      PB__LOGGING__LEVEL: info
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Same volume as ingest: serve hydrates from checkpoints and tails the
+      # WAL segments ingest writes. The WAL's single-writer flock only guards
+      # writers, so one writer + one tailing reader is the intended topology.
+      - pipeline-data:/data
+    depends_on:
+      - ingest
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    profiles: [full]
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --- observability: Prometheus + Alertmanager + Grafana ------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "127.0.0.1:9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    profiles: [observability]
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: [observability]
+    environment:
+      # Local-only convenience: skip the login screen. Never expose this port.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana-dashboard.json:/var/lib/grafana/dashboards/poly-book.json:ro
+
+volumes:
+  workstation-data:
+  pipeline-data:
+  clickhouse-data:
