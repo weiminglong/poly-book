@@ -4,33 +4,54 @@
 [![Supply Chain](https://github.com/weiminglong/poly-book/actions/workflows/supply-chain.yml/badge.svg)](https://github.com/weiminglong/poly-book/actions/workflows/supply-chain.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-`poly-book` is a Rust workspace for collecting Polymarket order book data, storing
-it in replay-friendly formats, and reconstructing market state later.
+A production-grade market-data system for Polymarket order books, written in
+Rust: lock-free single-writer ingestion over zero-copy WebSocket
+deserialization, an embedded CRC-framed write-ahead log with torn-tail crash
+recovery and flock-based writer failover, split Parquet + ClickHouse storage,
+deterministic point-in-time book reconstruction, and a read-only quant
+workstation (HTTP/WS/gRPC + React UI) on top.
 
 **[Live demo](https://weiminglong.github.io/poly-book/)** — the workstation UI
-with a simulated market stream, no backend or install required. Explore the
-orderbook ladder, depth chart, replay, integrity, and query pages directly in
-the browser.
+in the browser, no install. Or fully offline with real captured market data:
+`just demo`.
 
-It is aimed at people building or studying low-latency market-data systems:
+![poly-book quant workstation: live order book ladder and depth chart](docs/assets/workstation-demo.png)
 
-- live WebSocket and REST ingestion
-- split Parquet and ClickHouse storage
-- checkpoint-based historical replay
-- read-only workstation API for live and historical inspection
-- metrics and operational hooks
+Measured hot-path medians (Apple M3, full context and 49-benchmark table in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+| Operation | Median | Rate |
+|---|---|---|
+| Book delta apply | 9 ns | 108 M/s |
+| WAL codec encode | 87 ns | 11.5 M/s |
+| WAL append + flush | 509 ns/record | 2.0 M/s |
+| Dispatcher normalize + shadow-book cross-check | 484 ns/entry | 2.1 M/s |
+| WS `price_change` deserialize (zero-copy) | 504 ns | 2.0 M/s |
+| Read-model snapshot (50 levels) | 154 ns | 6.5 M/s |
+
+## Review this repo in 15 minutes
+
+1. **[Live demo](https://weiminglong.github.io/poly-book/)** or `just demo` —
+   see it run (10 seconds / one command).
+2. **[crates/pb-wal/README.md](crates/pb-wal/README.md)** — the embedded WAL:
+   CRC-over-length framing, torn-tail truncation on recovery, single-writer
+   `flock` that doubles as failover, independent tailing consumers.
+3. **[TESTING.md](TESTING.md)** — the failure-mode → defense matrix: 762
+   tests, 35 property suites, 6 fuzz targets, miri, offline alert-rule
+   incident tests, and an honest list of what is not yet covered.
+4. **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — measured, machine-stamped
+   numbers for every pipeline stage.
+5. **[research/orderbook_analysis.ipynb](research/orderbook_analysis.ipynb)** —
+   microstructure analytics (order-flow imbalance, microprice, realized
+   spread) computed straight off the committed Parquet capture.
+6. **[docs/adr/](docs/adr/)** — eleven ADRs from fixed-point arithmetic to the
+   read-only workstation boundary, each with alternatives and tradeoffs.
 
 ## Project Status
 
-This is an active personal project that is open to outside contributions.
-
-Current expectations:
-
-- the core ingestion and replay path is working and covered by tests
-- APIs and storage layout may still evolve
-- the repository is optimized for contributor readability, not long-term API stability
-
-If you want to contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
+An active personal project, open to outside contributions. The ingestion,
+durability, and replay paths are working and heavily tested; APIs and storage
+layout may still evolve. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
@@ -234,9 +255,8 @@ bug, with real counts and run commands — lives in [TESTING.md](TESTING.md).
 Measured results — hardware- and commit-stamped medians for every hot-path
 stage (wire deserialize, dispatcher normalize, WAL append, book ops, read
 model) — live in [docs/PERFORMANCE.md](docs/PERFORMANCE.md), regenerated with
-`just bench-report`. Highlights from the committed run (Apple M3): book delta
-apply 9 ns, WAL codec encode 87 ns, WAL append+flush 509 ns/record, dispatcher
-normalize with shadow-book cross-check 484 ns/entry (2.1 M entries/s).
+`just bench-report`; the headline medians are in the table at the top of this
+README.
 
 ```bash
 cargo bench                 # all benchmarks
@@ -363,6 +383,18 @@ Near-term work that would make strong public contributions:
 This repository uses [OpenSpec](https://github.com/Fission-AI/OpenSpec) for larger
 feature work. Archived proposals, designs, specs, and tasks live under
 `openspec/changes/archive/`.
+
+### Engineering process
+
+This project is built AI-assisted under human design direction and review.
+Correctness does not rest on review alone: every change passes hard
+verification gates — the full test suite (fuzzing, property tests, miri,
+golden byte fixtures, offline alert-rule incident simulations; see
+[TESTING.md](TESTING.md)), adversarial review passes hunting for bugs rather
+than confirming intent, and live end-to-end verification against the real
+venue before merge. Design decisions and their rejected alternatives are
+recorded in [docs/adr/](docs/adr/) and the archived OpenSpec changes rather
+than in tooling history.
 
 For contribution standards and PR expectations, see:
 
