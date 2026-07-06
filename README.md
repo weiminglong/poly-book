@@ -231,10 +231,18 @@ bug, with real counts and run commands — lives in [TESTING.md](TESTING.md).
 
 ### Benchmarks
 
+Measured results — hardware- and commit-stamped medians for every hot-path
+stage (wire deserialize, dispatcher normalize, WAL append, book ops, read
+model) — live in [docs/PERFORMANCE.md](docs/PERFORMANCE.md), regenerated with
+`just bench-report`. Highlights from the committed run (Apple M3): book delta
+apply 9 ns, WAL codec encode 87 ns, WAL append+flush 509 ns/record, dispatcher
+normalize with shadow-book cross-check 484 ns/entry (2.1 M entries/s).
+
 ```bash
 cargo bench                 # all benchmarks
 cargo bench -p pb-types     # fixed-point ops + wire deserialization throughput
 cargo bench -p pb-book      # book operations, depth iteration, mixed workloads
+just bench-report           # full suite + regenerate docs/PERFORMANCE.md
 ```
 
 ### Property-Based Testing
