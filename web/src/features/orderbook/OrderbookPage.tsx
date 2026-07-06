@@ -36,7 +36,7 @@ export default function OrderbookPage() {
   // Merge WS data with HTTP snapshot. Memoized so a new object identity is only
   // produced when an input actually changes — otherwise every render (including
   // unrelated state changes) would hand memoized children new props and force
-  // them to re-render on the high-frequency live path (HFT-review #19).
+  // them to re-render on the high-frequency live path.
   const httpSnapshot = snapshotQuery.data
   const liveSnapshot: LiveOrderBookSnapshot | null = useMemo(
     () =>
@@ -49,8 +49,7 @@ export default function OrderbookPage() {
             best_ask: wsSnapshot.asks[0] ?? null,
             mid_price: wsSnapshot.mid_price,
             spread: wsSnapshot.spread,
-            // True totals from the WS message, not the depth-capped array lengths
-            // (HFT-review #4).
+            // True totals from the WS message, not the depth-capped array lengths.
             bid_depth: wsSnapshot.bid_depth,
             ask_depth: wsSnapshot.ask_depth,
             bids: wsSnapshot.bids,

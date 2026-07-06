@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -5,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
+    Connector,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -159,15 +161,16 @@ impl WsClient {
         token: &CancellationToken,
         session_id: &str,
     ) -> Result<(), FeedError> {
-        // Pass no explicit connector: with the `rustls-tls-webpki-roots` feature
-        // tokio-tungstenite builds a default rustls connector using the bundled
-        // Mozilla root store, so we depend only on rustls (no openssl/native-tls
-        // C dependency).
         let mut ws_limits = WebSocketConfig::default();
         ws_limits.max_message_size = Some(MAX_WS_TEXT_BYTES);
         ws_limits.max_frame_size = Some(MAX_WS_TEXT_BYTES);
-        let (ws_stream, _) =
-            connect_async_tls_with_config(&self.config.ws_url, Some(ws_limits), true, None).await?;
+        let (ws_stream, _) = connect_async_tls_with_config(
+            &self.config.ws_url,
+            Some(ws_limits),
+            true,
+            Some(build_tls_connector()?),
+        )
+        .await?;
         let (mut sink, mut stream) = ws_stream.split();
         info!(url = %self.config.ws_url, session_id, "ws connected");
 
@@ -316,9 +319,40 @@ fn fastrand_jitter(max: u64) -> u64 {
     hash % max
 }
 
+/// Build the WS TLS connector with an explicit rustls crypto provider and the
+/// bundled Mozilla root store (no openssl/native-tls C dependency).
+///
+/// The provider must be pinned explicitly: the dependency graph links two
+/// rustls crypto providers (`ring` via the WS stack, `aws-lc-rs` via the
+/// metrics exporter's hyper-rustls), and with both present rustls cannot
+/// auto-select one — the default connector tokio-tungstenite builds internally
+/// panics at connect time unless a process-level default was installed first.
+fn build_tls_connector() -> Result<Connector, FeedError> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Connector::Rustls(Arc::new(config)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_connector_builds_without_process_level_crypto_provider() {
+        // Regression test: this test process never installs a default
+        // CryptoProvider, and the graph contains both `ring` and `aws-lc-rs`,
+        // so any code path that falls back to rustls auto-selection (like the
+        // default connector used before this function existed) panics here.
+        let connector = build_tls_connector().expect("tls connector must build");
+        assert!(matches!(connector, Connector::Rustls(_)));
+    }
 
     #[test]
     fn backoff_attempt_zero_equals_base() {

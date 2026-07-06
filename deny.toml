@@ -2,8 +2,8 @@
 exclude-unpublished = true
 
 [advisories]
-# Detect unmaintained crates in the workspace and its direct dependencies
-# (audit finding A.36); transitive-only unmaintained crates are not failed on to
+# Detect unmaintained crates in the workspace and its direct dependencies;
+# transitive-only unmaintained crates are not failed on to
 # avoid breaking CI on upstreams we cannot control.
 unmaintained = "workspace"
 yanked = "deny"
@@ -14,6 +14,17 @@ ignore = [
     # pb-wal's WAL frame codec; moving to bincode 2.x / postcard would change the
     # on-disk WAL format. Revisit if an actual security issue is reported.
     "RUSTSEC-2025-0141",
+    # quick-xml DoS advisories (quadratic attribute check, unbounded namespace
+    # allocation). Both are fixed only in quick-xml >= 0.41.0, but every
+    # object_store release (<= 0.14.0) pins an older range, so no upgrade path
+    # exists yet. quick-xml is reachable only through object_store's S3 XML
+    # response parsing — the XML comes from the operator-configured object
+    # store (AWS S3 / MinIO), not untrusted input, and the default local-FS
+    # Parquet path never touches it. Both are DoS-only, no memory unsafety.
+    # Remove when object_store ships with quick-xml >= 0.41 (also drop the
+    # matching ignore in ci.yml's Security Audit step).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 # The astral-tokio-tar advisories (0.5.6: RUSTSEC-2026-0066/0112/0113; 0.6.1:
 # RUSTSEC-2026-0145) are resolved by pinning that test-only crate (pulled by the
@@ -37,8 +48,8 @@ allow = [
 ]
 
 [bans]
-# Surface duplicate transitive versions rather than allowing them unbounded
-# (audit finding A.141); warn keeps it visible without failing CI.
+# Surface duplicate transitive versions rather than allowing them unbounded;
+# warn keeps it visible without failing CI.
 multiple-versions = "warn"
 wildcards = "allow"
 

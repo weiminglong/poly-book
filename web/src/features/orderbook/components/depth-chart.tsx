@@ -23,12 +23,12 @@ export const DepthChart = memo(function DepthChart({ bids, asks }: DepthChartPro
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Cached CSS-pixel size + dpr, updated only by the ResizeObserver — so the hot
   // draw path (which runs on every WS update) does no getBoundingClientRect and
-  // never writes canvas.width/height, avoiding read/write layout thrash
-  // (HFT-review #22). canvas.width is reset only when the size actually changes.
+  // never writes canvas.width/height, avoiding read/write layout thrash.
+  // canvas.width is reset only when the size actually changes.
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 })
 
   // Cumulative depth is derived from the levels, so memoize it instead of
-  // recomputing on every render/draw (HFT-review #20).
+  // recomputing on every render/draw.
   const cumBids = useMemo(() => computeCumulative(bids), [bids])
   const cumAsks = useMemo(() => computeCumulative(asks), [asks])
 
@@ -49,8 +49,7 @@ export const DepthChart = memo(function DepthChart({ bids, asks }: DepthChartPro
     if (cumBids.length === 0 && cumAsks.length === 0) return
 
     // Single pass for min/max instead of Math.min(...spread)/Math.max(...spread),
-    // which allocate intermediate arrays and blow the call stack on deep books
-    // (HFT-review #20).
+    // which allocate intermediate arrays and blow the call stack on deep books.
     let minPrice = Number.POSITIVE_INFINITY
     let maxPrice = Number.NEGATIVE_INFINITY
     let maxSize = 1
@@ -141,7 +140,7 @@ export const DepthChart = memo(function DepthChart({ bids, asks }: DepthChartPro
   drawRef.current = draw
 
   // Size tracking via ResizeObserver so the chart re-fits its container, not just
-  // the window (HFT-review #13). Measures + resizes the backing store + redraws.
+  // the window. Measures + resizes the backing store + redraws.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return

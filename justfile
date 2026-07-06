@@ -19,7 +19,7 @@ bench:
 # Measure the durability-layer failover RTO (primary crash -> standby lease
 # acquire + tail recovery + resume + re-hydrate). Run on the TARGET hardware for a
 # realistic baseline. The full deployment RTO additionally includes container
-# scheduling + health-check time, which needs a live cluster to measure (P3-HA-1).
+# scheduling + health-check time, which needs a live cluster to measure.
 failover-drill:
     cargo test -p pb-wal --lib measure_failover_handoff_rto -- --ignored --nocapture
 

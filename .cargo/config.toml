@@ -1,6 +1,6 @@
 # Intentionally no `target-cpu=native` here.
 #
-# A checked-in `target-cpu=native` (audit finding A.34) makes builds
+# A checked-in `target-cpu=native` makes builds
 # non-reproducible across machines, risks SIGILL when a binary built on one host
 # runs on an older microarchitecture, and tunes Criterion baselines to whatever
 # host happened to build them. It was also overridden by CI `RUSTFLAGS` and never
