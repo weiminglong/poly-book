@@ -5,6 +5,9 @@ pub enum FeedError {
     #[error("websocket error: {0}")]
     Ws(Box<tokio_tungstenite::tungstenite::Error>),
 
+    #[error("tls configuration error: {0}")]
+    Tls(#[from] rustls::Error),
+
     #[error("rest API error: {0}")]
     Rest(#[from] reqwest::Error),
 

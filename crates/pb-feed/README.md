@@ -63,6 +63,12 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 
 ## Design Notes
 
+- The WS TLS connector is built with an explicitly pinned rustls crypto
+  provider (`ring`) and the bundled webpki root store. The dependency graph
+  links two providers (`ring` and, via the metrics exporter's hyper-rustls,
+  `aws-lc-rs`), and rustls panics at connection setup if neither is selected —
+  so the connector never relies on rustls auto-detection or on the embedding
+  process having installed a default provider.
 - Dispatcher uses `FxHashMap` for hot-path lookups on trusted venue data.
   See [ADR-0006](../../docs/adr/0006-fxhashmap-dispatcher.md).
 - Unified `parse_side()` function for bid/ask parsing (deduplicated from previous

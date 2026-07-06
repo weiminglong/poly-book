@@ -38,6 +38,7 @@ object_store = { workspace = true }
 url = { workspace = true }
 clickhouse = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 mimalloc = { workspace = true }
 
 [dev-dependencies]

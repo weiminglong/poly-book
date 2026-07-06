@@ -146,6 +146,14 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install a process-level rustls crypto provider before anything opens a
+    // TLS connection. The dependency graph links two providers (`ring` and
+    // `aws-lc-rs` via the metrics exporter), and rustls panics on first use if
+    // no default is selected. pb-feed pins its own provider for the WS
+    // connector; this covers every other rustls consumer in the process.
+    // Err(_) means a provider is already installed, which is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     // Load config first so we can use logging settings. An explicitly-passed

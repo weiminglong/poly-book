@@ -211,6 +211,11 @@ fn spawn_fixed_runtime(
             }
         });
 
+        // Drain only after shutdown is requested: shutdown_handles applies a
+        // 10s deadline per handle, so calling it while the runtime is healthy
+        // logs spurious "did not shut down within timeout" warnings and stops
+        // supervising the still-running tasks after the deadline passes.
+        shutdown.cancelled().await;
         pipeline::shutdown_handles(vec![ws_handle, dispatcher_handle], "live runtime").await;
     })
 }

@@ -40,8 +40,18 @@ pb-grpc = { path = "crates/pb-grpc" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-# rustls (no openssl/native-tls C dependency) — audit finding P2-BUILD-3.
+# rustls (no openssl/native-tls C dependency).
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# Direct rustls dep so the WS connector can pin an explicit crypto provider.
+# The graph contains both `ring` (WS stack) and `aws-lc-rs` (metrics exporter's
+# hyper-rustls), and rustls panics at TLS setup when neither is selected.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+webpki-roots = "1.0"
 
 # HTTP — rustls instead of the default native-tls; keep the other defaults
 # (charset, http2, system-proxy) that `default-features = false` would drop.

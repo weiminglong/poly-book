@@ -8,6 +8,15 @@ is practical to do so.
 
 ## [Unreleased]
 
+- Fixed: all live-feed commands (`ingest`, `auto-ingest`, `serve-api`) panicked
+  at WebSocket TLS setup ("Could not automatically determine the process-level
+  CryptoProvider") because the dependency graph links two rustls crypto
+  providers. The WS connector now pins the `ring` provider explicitly, and the
+  binary installs a process-level default at startup for all other TLS users.
+- Fixed: `serve-api --tokens` logged spurious "live runtime did not shut down
+  within timeout" warnings during healthy operation (and stopped supervising
+  the feed tasks after 20s) because the shutdown drain ran at spawn time
+  instead of after a shutdown request.
 - CLOB V2 ingest compatibility (Polymarket cutover 2026-04-28):
   parse the new `tick_size_change` WebSocket event (no PersistedRecord;
   observed via the `pb_messages_received_total{event_type="tick_size_change"}`
