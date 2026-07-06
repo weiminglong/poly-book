@@ -95,6 +95,18 @@ pub async fn run(
         (recv, ordinal.unwrap_or(u64::MAX))
     });
     let event_count = records.len();
+    // Anchor playback and the printed window to the actual event timestamps.
+    // `capture.start_us/end_us` are padded by an hour on each side for the
+    // hour-partition reader query; anchoring the feeder to the padded start
+    // would replay an hour of silence before the first event on every loop.
+    let first_event_us = records
+        .first()
+        .and_then(|r| r.recv_timestamp_us())
+        .unwrap_or(capture.start_us);
+    let last_event_us = records
+        .last()
+        .and_then(|r| r.recv_timestamp_us())
+        .unwrap_or(capture.end_us);
 
     let api_listen_addr: SocketAddr = settings
         .get_string("api.listen_addr")
@@ -147,7 +159,7 @@ pub async fn run(
 
     let feeder_records = records;
     let feeder_shutdown = shutdown.child_token();
-    let feeder_start = capture.start_us;
+    let feeder_start = first_event_us;
     let feeder_tx = event_tx.clone();
     let feeder_handle = tokio::spawn(async move {
         loop {
@@ -238,7 +250,13 @@ pub async fn run(
     };
     let listener = tokio::net::TcpListener::bind(api_listen_addr).await?;
 
-    print_cheat_sheet(&capture, event_count, api_listen_addr);
+    print_cheat_sheet(
+        &capture.assets,
+        first_event_us,
+        last_event_us,
+        event_count,
+        api_listen_addr,
+    );
 
     let serve_result = pb_api::serve(listener, state, shutdown.child_token()).await;
     drop(event_tx);
@@ -352,22 +370,28 @@ fn discover_capture(book_events_dir: &Path) -> Result<Capture> {
     })
 }
 
-fn print_cheat_sheet(capture: &Capture, event_count: usize, addr: SocketAddr) {
-    let mid_us = capture.start_us + (capture.end_us - capture.start_us) / 2;
-    let asset = capture.assets.first().cloned().unwrap_or_default();
+fn print_cheat_sheet(
+    assets: &[String],
+    first_event_us: u64,
+    last_event_us: u64,
+    event_count: usize,
+    addr: SocketAddr,
+) {
+    let mid_us = first_event_us + (last_event_us - first_event_us) / 2;
+    let asset = assets.first().cloned().unwrap_or_default();
     println!("\n=== poly-book offline demo ===");
     println!("workstation UI + API:  http://{addr}/  (UI requires the Docker image or api.static_assets_dir)");
-    println!("assets: {}", capture.assets.join(", "));
+    println!("assets: {}", assets.join(", "));
     println!(
         "capture window (us): {} .. {}  ({} events, replayed on a loop)",
-        capture.start_us, capture.end_us, event_count
+        first_event_us, last_event_us, event_count
     );
     println!("\ncopy-paste examples against the capture:");
     println!("  curl 'http://{addr}/api/v1/orderbooks/{asset}/snapshot'");
     println!("  curl 'http://{addr}/api/v1/replay/reconstruct?asset_id={asset}&at_us={mid_us}&mode=recv_time'");
     println!(
         "  curl 'http://{addr}/api/v1/integrity/summary?asset_id={asset}&start_us={}&end_us={}'",
-        capture.start_us, capture.end_us
+        first_event_us, last_event_us
     );
     println!("==============================\n");
 }
