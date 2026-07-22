@@ -124,18 +124,24 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # quick-xml DoS advisories with no upgrade path yet (object_store
-          # pins quick-xml < 0.41). Rationale and removal condition are
-          # documented on the matching ignore entries in deny.toml.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          toolchain: stable
+      # Keep cargo-audit's own dependency graph locked. Installing without
+      # --locked can resolve transitive crates whose MSRV exceeds the stable
+      # compiler selected above, failing before the repository is audited.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit Rust dependencies
+        # quick-xml DoS advisories with no upgrade path yet (object_store pins
+        # quick-xml < 0.41). Rationale and removal condition are documented on
+        # the matching ignore entries in deny.toml.
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
 
   monitoring:
     name: Monitoring Rules
