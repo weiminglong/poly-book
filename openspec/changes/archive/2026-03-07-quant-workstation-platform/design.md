@@ -137,6 +137,17 @@ The target serving split for historical reads is:
 This allows the workstation to scale interactive serving without redefining
 replay truth around the serving backend itself.
 
+Parquet access is object-store-native in both directions: deployed readers use
+the same configured `object_store` backend as writers. Offline WAL recovery only
+publishes fully covered UTC hours for datasets partitioned exactly by receive
+time (book, trade, and ingest), and switches an individual partition through a
+versioned manifest after its replacement object is durable. Independently
+timestamped datasets remain untouched because WAL endpoints cannot prove them
+complete. This avoids both the local-only S3 read gap and delete-before-write
+recovery windows. Recovery validates the retained WAL without retaining decoded
+records, then publishes one eligible hour at a time to bound maintenance-task
+memory.
+
 ## Product Surfaces
 
 ### Live Feed

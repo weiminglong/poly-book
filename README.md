@@ -237,6 +237,22 @@ just backfill <TOKEN_ID>
 cargo run -- backfill --tokens <TOKEN_ID> --interval-secs 60
 ```
 
+### Recover complete Parquet hours from WAL
+
+```bash
+# Stop ingest and every other Parquet writer first. The command verifies the
+# exclusive WAL lease; standalone backfill/append writers are an operator check.
+cargo run -- reconcile
+```
+
+Recovery fails closed on WAL corruption and partial boundary hours. For every
+fully covered receive-time-partitioned UTC hour (`book_events`, `trade_events`,
+and `ingest_events`) it writes and verifies a new Parquet object, publishes an
+authoritative manifest, and only then cleans superseded objects. Checkpoint,
+validation, and execution partitions are left untouched because their partition
+timestamps do not provide the same WAL coverage proof. Local files and S3 use
+the same object-store reader and manifest semantics.
+
 ### Inspect local Parquet output
 
 ```bash

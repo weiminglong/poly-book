@@ -49,6 +49,26 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: ./.github/actions/setup-protobuf
+      - name: Start MinIO and create the integration bucket
+        run: |
+          docker run --detach --name pb-minio \
+            --publish 9100:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9100/minio/health/ready >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs pb-minio
+              exit 1
+            fi
+            sleep 1
+          done
+          docker run --rm --network host --entrypoint /bin/sh \
+            minio/mc:RELEASE.2025-07-21T05-28-08Z \
+            -c 'mc alias set local http://127.0.0.1:9100 minioadmin minioadmin && mc mb --ignore-existing local/poly-book-test'
       # The #[ignore]d cases: ClickHouse roundtrips, Parquet-vs-ClickHouse
       # cross-backend equivalence, and the MinIO S3 roundtrip — the strongest
       # consistency evidence in the suite, previously never enforced in CI.
@@ -56,6 +76,8 @@ jobs:
       # Single-threaded: the containers are memory-hungry and the tests share
       # fixed host ports.
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
+        env:
+          PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
 
   clippy:
     name: Clippy

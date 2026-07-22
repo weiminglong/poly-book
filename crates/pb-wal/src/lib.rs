@@ -14,7 +14,7 @@ mod writer;
 pub use error::WalError;
 pub use reader::{WalPosition, WalReader};
 pub use segment::HEADER_SIZE;
-pub use writer::WalWriter;
+pub use writer::{WalMaintenanceGuard, WalWriter};
 
 /// Configuration for the write-ahead log.
 #[derive(Debug, Clone)]
@@ -97,7 +97,7 @@ mod tests {
         }
         writer.flush().unwrap();
 
-        let mut reader = WalReader::open(config, "test-consumer").unwrap();
+        let mut reader = WalReader::open(config.clone(), "test-consumer").unwrap();
         for expected in &payloads {
             let record = reader.next().unwrap();
             assert!(record.is_some(), "expected a record");
@@ -144,7 +144,7 @@ mod tests {
             "expected multiple segments, got {segment_count}"
         );
 
-        let mut reader = WalReader::open(config, "test-consumer").unwrap();
+        let mut reader = WalReader::open(config.clone(), "test-consumer").unwrap();
         let mut total_read = 0;
         while let Some(data) = reader.next().unwrap() {
             assert_eq!(data, payload);
@@ -189,7 +189,7 @@ mod tests {
         }
         std::fs::write(&seg_path, &data).unwrap();
 
-        let mut reader = WalReader::open(config, "test-consumer").unwrap();
+        let mut reader = WalReader::open(config.clone(), "test-consumer").unwrap();
         // First record should be fine.
         let first = reader.next().unwrap();
         assert_eq!(first.as_deref(), Some(b"good-record".as_slice()));
@@ -201,6 +201,16 @@ mod tests {
 
         // No more records.
         assert!(reader.next().unwrap().is_none());
+
+        let mut strict = WalReader::open_from_start(config, "strict-recovery").unwrap();
+        assert_eq!(
+            strict.next_strict().unwrap().as_deref(),
+            Some(b"good-record".as_slice())
+        );
+        assert!(matches!(
+            strict.next_strict().unwrap_err(),
+            WalError::CrcMismatch { .. }
+        ));
     }
 
     /// A reader that has cached a segment including an incomplete (torn) trailing
@@ -744,6 +754,50 @@ mod tests {
         }
         // After the first writer drops, a new one can acquire the lock.
         assert!(WalWriter::open(config).is_ok());
+    }
+
+    #[test]
+    fn maintenance_guard_requires_writer_to_be_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            max_segments: 4,
+            ..WalConfig::default()
+        };
+        let writer = WalWriter::open(config.clone()).unwrap();
+        assert!(matches!(
+            WalMaintenanceGuard::acquire(&config).unwrap_err(),
+            WalError::WriterLocked { .. }
+        ));
+        drop(writer);
+        assert!(WalMaintenanceGuard::acquire(&config).is_ok());
+    }
+
+    #[test]
+    fn strict_reader_rejects_internal_segment_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 32,
+            max_segments: 8,
+            ..WalConfig::default()
+        };
+        let payload = vec![7u8; 20];
+        let mut writer = WalWriter::open(config.clone()).unwrap();
+        for _ in 0..3 {
+            writer.append(&payload).unwrap();
+        }
+        writer.sync().unwrap();
+        drop(writer);
+        std::fs::remove_file(config.base_path.join("segment_00000000000000000001.wal")).unwrap();
+
+        let mut reader = WalReader::open_from_start(config, "strict-gap").unwrap();
+        assert_eq!(reader.next_strict().unwrap(), Some(payload));
+        assert!(matches!(
+            reader.next_strict().unwrap_err(),
+            WalError::SegmentGap { .. }
+        ));
     }
 
     #[test]
@@ -1587,11 +1641,17 @@ mod tests {
         std::fs::write(&seg_files[0], &data).unwrap();
 
         // The reader must terminate (not hang).
-        let mut reader = WalReader::open(config, "zero-len-test").unwrap();
+        let mut reader = WalReader::open(config.clone(), "zero-len-test").unwrap();
         let mut count = 0;
         while let Ok(Some(_)) = reader.next() {
             count += 1;
             assert!(count < 100, "reader appears to be looping");
         }
+
+        let mut strict = WalReader::open_from_start(config, "zero-len-strict").unwrap();
+        assert!(matches!(
+            strict.next_strict().unwrap_err(),
+            WalError::TruncatedRecord { .. }
+        ));
     }
 }

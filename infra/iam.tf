@@ -143,8 +143,9 @@ resource "aws_iam_role_policy" "ecs_task_reconcile_s3" {
     Version = "2012-10-17"
     Statement = [
       {
-        # Required by the offline `reconcile` command, which replaces stale
-        # Parquet partitions (delete-then-write) when rebuilding from the WAL.
+        # Required by the offline `reconcile` command, which stages and
+        # manifest-publishes replacement Parquet partitions before cleaning up
+        # superseded objects.
         # Keep this destructive permission off the always-on ingest/serve role.
         Effect = "Allow"
         Action = [

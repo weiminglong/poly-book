@@ -17,6 +17,9 @@ pub enum StoreError {
     #[error("object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
 
+    #[error("unsafe parquet recovery refused: {0}")]
+    UnsafeRecovery(String),
+
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
 

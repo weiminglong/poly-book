@@ -93,7 +93,9 @@ token when one is configured.
 Historical routes (replay, integrity, execution) are served through `pb-service`
 traits with configurable backends:
 
-- `api.historical_backend = "parquet"` (default) — uses `ParquetReader` via `pb-replay`
+- `api.historical_backend = "parquet"` (default) — uses `ParquetReader` via
+  `pb-replay`; local files and cloud object stores share the same range-read path
+  and recovered partitions are selected through atomic recovery manifests
 - `api.historical_backend = "clickhouse"` — uses `ClickHouseReader` via `pb-replay`
 
 If ClickHouse is configured but unavailable at startup, the system probes
@@ -115,7 +117,12 @@ read model is fed directly from the dispatcher channel.
 - **`serve`**: Reads the latest `BookCheckpoint` from Parquet, replays WAL from
   the checkpoint's offset, then live-tails the WAL for new records. Serves HTTP/WS.
   The live WAL consumer commits its position periodically during steady-state
-  tailing.
+  tailing. Startup inventories checkpoints once for all configured assets and
+  applies a distinct WAL cutoff for each asset; any asset without a checkpoint
+  is replayed from the earliest retained WAL record, and a checkpoint without a
+  WAL cut is ignored rather than mixed with older WAL records. Readiness stays at 503 if
+  object-store checkpoint access, WAL access, or WAL decoding fails; an
+  empty/partial recovery is not marked hydrated.
 
 The `serve` process can be killed and restarted without data loss. On restart it
 re-hydrates from the latest checkpoint and catches up from the WAL.

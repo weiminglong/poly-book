@@ -44,9 +44,9 @@ reconnect_max_delay_ms = 30000
 rate_limit_requests = 1500
 rate_limit_window_secs = 10
 
-# parquet_base_path accepts a local path OR a URL scheme (s3://bucket/prefix,
-# gs://..., file://...); an s3:// path is wired to a real S3 object store.
-# Cloud backends are configured from the process environment (parsed via
+# parquet_base_path accepts a local path, file:// URL, or s3://bucket/prefix.
+# An s3:// path is wired to a real S3 object store. S3 is configured from the
+# process environment (parsed via
 # object_store::parse_url_opts(url, env::vars())): for s3://, set AWS_REGION and
 # either static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or rely on the default AWS
 # provider chain (ECS task role / instance profile). For an S3-compatible endpoint
@@ -151,11 +151,22 @@ cargo run -- serve-api --tokens <TOKEN_ID>
 
 ## Data Layout
 
-Parquet data is partitioned by dataset and time:
+Parquet data is partitioned by dataset and time. Offline recovery also owns two
+hidden prefixes below the configured Parquet base path:
 
 ```text
-data/<dataset>/<year>/<month>/<day>/<hour>/*.parquet
+data/
+├── <dataset>/<year>/<month>/<day>/<hour>/*.parquet
+├── _recovery_objects/<dataset>/<year>/<month>/<day>/<hour>/*.parquet
+│   # temporary immutable staging objects; an interrupted run may leave one active
+└── _recovery_manifests/<dataset>/<year>/<month>/<day>/<hour>/<asset>.json
+    # authoritative manifest-aware view for a recovered asset/hour
 ```
+
+Successful recovery promotes the active object into the normal dataset tree and
+removes its hidden staging object. The manifest remains authoritative so an
+interrupted cleanup cannot make superseded normal files visible to application
+readers. Raw DuckDB/Polars globs do not interpret these manifests.
 
 Primary datasets:
 
@@ -220,12 +231,15 @@ deliberate act.
    store: stop `ingest`, let `serve` consume to the end, then let the new build
    create fresh segments. Old segments are not auto-upgraded — a version mismatch
    is surfaced, not papered over.
-5. **Re-snapshot / backfill (Parquet/ClickHouse).** Historical Parquet files keep
+5. **Re-snapshot / migrate Parquet and ClickHouse.** Historical Parquet files keep
    their original `pb_schema_version`. Either (a) keep readers able to accept the
-   prior version for the retention window, or (b) re-write affected partitions
-   from the source-of-truth (`backfill` / `reconcile`) so all files carry the new
-   version. ClickHouse column changes go through a normal `ALTER TABLE` migration
-   before the new writer starts.
+   prior version for the retention window, or (b) use a dedicated migration or
+   re-export from the durable source of truth for every affected dataset.
+   `backfill` only creates book checkpoints, while `reconcile` only republishes
+   complete retained-WAL hours for book, trade, and ingest data; neither is a
+   general migration path for all six datasets or arbitrary history. ClickHouse
+   column changes go through a normal `ALTER TABLE` migration before the new
+   writer starts.
 6. **Verify with replay.** Run the golden replay regression and a
    `replay validate` over a migrated window before promoting the deploy.
 
@@ -449,16 +463,60 @@ Parquet — but the WAL captured the same records durably. To rebuild the lost
 storage window from the WAL:
 
 ```bash
-# Stop the ingest process first (reconcile must run offline — it replaces whole
-# (dataset, asset, hour) partitions and would race a live sink).
+# Stop ingest and every other process writing the same Parquet prefix first.
+# Reconcile acquires the exclusive WAL lease and refuses to run while ingest is
+# active; standalone backfill/append writers must be stopped operationally.
 cargo run -- reconcile
 ```
 
-`reconcile` reads the retained WAL and, for every `(dataset, asset, hour)`
-partition it covers, deletes the existing Parquet files and rewrites the complete
-partition from the WAL. It is idempotent (safe to re-run) and authoritative for
-any partition it touches. It does not commit a consumer position, so each run
-reconciles the full retained WAL. ClickHouse is not rebuilt by this command.
+`reconcile` starts at the earliest retained segment and uses strict WAL reads:
+CRC failures, truncation, internal segment gaps, and codec failures abort before
+publication. A UTC hour is eligible only when the first supported receive
+timestamp is strictly before its start and the last supported receive timestamp
+reaches or passes its end. This deliberately excludes the hour containing the
+first retained record even when that record lands exactly on an hour boundary:
+retention may have cut through an equal-timestamp snapshot batch. A trailing
+partial hour is also skipped. An empty WAL is a successful no-op; a non-empty WAL
+that proves no complete eligible hour exits non-zero and changes no Parquet data.
+Receive timestamps must also be nondecreasing in WAL order; a clock/order
+regression fails closed rather than weakening the coverage proof.
+The command validates coverage in a first streaming pass, then replays one
+eligible hour at a time, so it does not materialize the whole retained WAL in
+memory. Before publication, it also refuses any eligible hour above 2,000,000
+records or 128 MiB of encoded WAL payload to bound working-set risk for the
+default 512 MiB maintenance-task class.
+
+Only datasets partitioned exactly by receive time are eligible: `book_events`,
+`trade_events`, and `ingest_events`. `book_checkpoints` uses exchange snapshot
+time, while validation and execution timestamps are independently supplied;
+those partitions are left untouched because the retained WAL endpoints cannot
+prove them complete.
+
+For each eligible `(dataset, asset, hour)`, recovery performs a two-phase cut:
+
+1. Write and size-verify an immutable object under `_recovery_objects/`, then
+   publish a versioned manifest under `_recovery_manifests/` that makes that
+   staged object authoritative to manifest-aware readers.
+2. Write and verify the same bytes in the normal dataset/hour partition, then
+   publish the final manifest pointing at the promoted normal object.
+3. Delete superseded normal/staged objects. Their manifest tombstones remain so
+   delayed or manually restored stale objects cannot become visible again.
+
+Manifest-aware readers switch at each publication point and ignore superseded
+files, so a crash leaves a complete authoritative view. Cleanup is retryable by
+re-running `reconcile`. If any deletion remains unresolved, the authoritative
+application view is still published but the command exits non-zero; direct
+DuckDB/Polars scans are unsafe until a rerun reports zero cleanup failures.
+After clean promotion and cleanup, the active object is in the normal tree for
+direct inspection. The command is idempotent and does not commit a consumer
+position. ClickHouse is not rebuilt by this command.
+Do not run `backfill`, `execution-append`, or another Parquet-writing task
+against the same prefix concurrently: those commands do not share the WAL lease,
+and a write racing the manifest cut would make the recovered view ambiguous.
+Application reads retry manifest resolution once if cleanup crosses a request.
+Stop ad-hoc DuckDB/Polars scans during the maintenance cut, and do not resume
+them after a non-zero cleanup result, because those tools do not interpret
+recovery manifests.
 In ECS, run this as a maintenance task using the dedicated reconcile task role;
 the always-on ingest task role intentionally lacks `s3:DeleteObject`.
 
@@ -480,7 +538,7 @@ Recovery objectives by failure mode:
 |---|---|---|---|
 | `serve` (API) process crash | Restart; re-hydrate from latest checkpoint + WAL tail | 0 (read-only; no data originates here) | seconds — bounded by checkpoint hydration + WAL replay |
 | `ingest` process crash, same host | Restart `ingest`; flock is already released; it resumes appending to the last segment | ≤ `wal.sync_interval_ms` of un-`fdatasync`'d records (default 200 ms) on OS-crash/power-loss; **0** on a clean process kill | seconds — process start + lock acquire |
-| Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` rebuilds affected partitions from the durable WAL (offline) | 0 for any window the WAL still retains | minutes — offline rebuild, scales with window |
+| Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` strictly republishes complete hourly partitions from the durable WAL (offline); the earliest retained hour and any trailing partial hour remain untouched | 0 for a fully covered, gap-free WAL hour | minutes — offline rebuild, scales with window |
 | Host loss (WAL on durable/EFS volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
 | Host loss (WAL on ephemeral storage) | Parquet on S3 is durable; the in-flight WAL tail is lost | the un-flushed Parquet window not yet mirrored to the WAL volume | minutes |
 

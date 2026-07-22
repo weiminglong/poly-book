@@ -21,7 +21,8 @@ pub async fn run(
             let base_path = settings
                 .get_string("storage.parquet_base_path")
                 .unwrap_or_else(|_| "./data".to_string());
-            let reader = pb_replay::ParquetReader::new(&base_path);
+            let (store, base_path) = super::pipeline::build_object_store(&base_path)?;
+            let reader = pb_replay::ParquetReader::from_store(store, base_path);
             let engine = pb_replay::ReplayEngine::new(reader);
             engine
                 .execution_events(order_id.as_deref(), start_us, end_us)

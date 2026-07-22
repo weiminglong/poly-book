@@ -27,11 +27,11 @@ with an explicit division of authority:
 
 - **`ParquetSink` — cold, source of truth.** 5-minute flush windows, Zstd
   level-3 compression, `DELTA_BINARY_PACKED` on timestamp/price/size/sequence
-  columns. Written through the `object_store` trait, so local disk, S3, and
-  GCS are interchangeable without code changes. Object names embed a content
-  hash + byte length, making retries idempotent and silent overwrites
-  impossible. Replay correctness (`pb-replay`) and crash recovery
-  (`reconcile`) read from Parquet.
+  columns. Written through the `object_store` trait with local-disk and S3
+  backends. Object names embed a content hash + byte length, making retries
+  idempotent and silent overwrites impossible. Replay correctness (`pb-replay`)
+  reads Parquet; crash recovery (`reconcile`) strictly reads retained WAL and
+  republishes complete, receive-time-partitioned Parquet hours.
 - **`ClickHouseSink` — warm, interactive.** 1-second batches (or 10,000
   rows), `MergeTree` tables partitioned by date with composite ORDER BY keys.
   Per-batch deduplication tokens make re-inserts after partial failures
@@ -61,8 +61,9 @@ the Parquet backend with a warning.
   same source-of-truth reason as ClickHouse-only.
 
 ## Consequences
-- **Each read pattern gets the right engine**: replay and reconciliation work
-  from immutable portable files; the workstation gets indexed columnar SQL.
+- **Each read pattern gets the right engine**: replay works from immutable
+  portable files, recovery validates the durable WAL before publishing those
+  files, and the workstation gets indexed columnar SQL.
 - **Dual write paths are a real cost**: two flush cadences, two retry paths,
   and two schema representations to keep in step. Mitigated by shared schema
   functions, a single version constant, and both sinks flushing with bounded
@@ -72,8 +73,8 @@ the Parquet backend with a warning.
   cross-backend equivalence tests (replay, integrity, execution in
   `tests/integration/cross_backend_service.rs`) verify both backends give the
   same answers over the same records, and `reconcile` rebuilds a lost Parquet
-  window from the WAL. The equivalence tests are Docker-backed and
-  `#[ignore]`d — they run locally, not in CI (TESTING.md row 7).
+  window from the WAL. The equivalence tests are Docker-backed and `#[ignore]`d
+  for ordinary unit runs; the `integration-docker` CI job executes them.
 - **Storage lag never blocks durability**: sinks consume from their own
   bounded fan-out channels and may fall behind; the WAL (ADR-0008) remains
   the unconditionally-blocking consumer, so a slow sink degrades freshness,

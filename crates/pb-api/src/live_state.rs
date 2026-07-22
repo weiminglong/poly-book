@@ -519,8 +519,8 @@ enum ProjectorCommand {
     ConfigureBroadcast(crate::streaming::PerAssetBroadcast, usize),
     /// Apply a checkpoint directly (used during hydration).
     HydrateCheckpoint(BookCheckpoint, oneshot::Sender<()>),
-    /// Mark the read model as hydrated (ready to serve).
-    MarkHydrated(oneshot::Sender<()>),
+    /// Set whether the read model has a trustworthy hydrated state.
+    SetHydrated(bool, oneshot::Sender<()>),
 }
 
 // ---------------------------------------------------------------------------
@@ -576,9 +576,9 @@ impl Projector {
                 self.publish();
                 let _ = ack.send(());
             }
-            ProjectorCommand::MarkHydrated(ack) => {
-                self.state.hydrated = true;
-                self.published.hydrated = true;
+            ProjectorCommand::SetHydrated(hydrated, ack) => {
+                self.state.hydrated = hydrated;
+                self.published.hydrated = hydrated;
                 self.publish();
                 let _ = ack.send(());
             }
@@ -862,7 +862,17 @@ impl LiveReadModel {
         let (ack_tx, ack_rx) = oneshot::channel();
         let _ = self
             .cmd_tx
-            .send(ProjectorCommand::MarkHydrated(ack_tx))
+            .send(ProjectorCommand::SetHydrated(true, ack_tx))
+            .await;
+        let _ = ack_rx.await;
+    }
+
+    /// Mark the read model unready while recovery is incomplete or failed.
+    pub async fn mark_unhydrated(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(ProjectorCommand::SetHydrated(false, ack_tx))
             .await;
         let _ = ack_rx.await;
     }

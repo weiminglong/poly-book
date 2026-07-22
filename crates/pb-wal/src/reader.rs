@@ -55,6 +55,24 @@ impl WalReader {
         Ok(reader)
     }
 
+    /// Open at the earliest retained segment, ignoring any committed consumer
+    /// position. Offline recovery uses this to inspect the entire retained WAL
+    /// without mutating or trusting a previous maintenance cursor.
+    pub fn open_from_start(config: WalConfig, consumer_name: &str) -> Result<Self, WalError> {
+        let available = segment::list_segment_ids(&config.base_path)?;
+        let start_seg = available.first().copied().unwrap_or(0);
+        let mut reader = Self {
+            config,
+            consumer_name: consumer_name.to_string(),
+            current_segment_id: start_seg,
+            current_offset: 0,
+            current_data: None,
+            available_segments: available,
+        };
+        reader.load_segment(start_seg)?;
+        Ok(reader)
+    }
+
     /// Open a WAL reader at an explicit position instead of the last committed
     /// consumer position. This is useful for handing off from checkpoint/WAL
     /// hydration directly into live tailing without replaying already-applied
@@ -145,6 +163,54 @@ impl WalReader {
                 if self.reload_when_unloaded()? {
                     continue;
                 }
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Read the next record without skipping corruption or internal segment gaps.
+    ///
+    /// Live readers deliberately tolerate and surface some damage so they can
+    /// continue serving. Recovery must be stricter: publishing a partition from
+    /// a stream with a missing frame would make that incomplete stream
+    /// authoritative and permanently delete valid history.
+    pub fn next_strict(&mut self) -> Result<Option<Vec<u8>>, WalError> {
+        loop {
+            if let Some(data) = &self.current_data {
+                if self.current_offset < data.len()
+                    && data.len() - self.current_offset < crate::FRAME_HEADER_LEN
+                {
+                    return Err(WalError::TruncatedRecord {
+                        segment_id: self.current_segment_id,
+                        offset: self.current_offset as u64,
+                    });
+                }
+                if self.current_offset < data.len() {
+                    let len = u32::from_le_bytes(
+                        data[self.current_offset..self.current_offset + 4]
+                            .try_into()
+                            .expect("strict reader checked the complete frame header"),
+                    );
+                    if len == 0 {
+                        return Err(WalError::TruncatedRecord {
+                            segment_id: self.current_segment_id,
+                            offset: self.current_offset as u64,
+                        });
+                    }
+                }
+                match segment::read_record_at(data, self.current_offset, self.current_segment_id) {
+                    Ok(Some((payload, next_offset))) => {
+                        self.current_offset = next_offset;
+                        return Ok(Some(payload));
+                    }
+                    Ok(None) => {
+                        if !self.advance_segment_strict()? {
+                            return Ok(None);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if !self.reload_when_unloaded()? {
                 return Ok(None);
             }
         }
@@ -278,6 +344,28 @@ impl WalReader {
             }
             // No later segment exists yet: the active segment may have grown
             // since we last read it. Top it up incrementally.
+            None => self.top_up_current_segment(),
+        }
+    }
+
+    fn advance_segment_strict(&mut self) -> Result<bool, WalError> {
+        self.available_segments = segment::list_segment_ids(&self.config.base_path)?;
+        let next = self
+            .available_segments
+            .iter()
+            .find(|&&id| id > self.current_segment_id)
+            .copied();
+
+        match next {
+            Some(next_id) if next_id != self.current_segment_id + 1 => Err(WalError::SegmentGap {
+                consumer: self.consumer_name.clone(),
+                committed_segment: self.current_segment_id,
+                earliest_available: next_id,
+            }),
+            Some(next_id) => {
+                self.current_offset = 0;
+                self.load_segment(next_id)
+            }
             None => self.top_up_current_segment(),
         }
     }

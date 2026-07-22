@@ -16,14 +16,17 @@ use crate::{
 /// Replay service backed by Parquet event files.
 #[derive(Clone)]
 pub struct ParquetReplayService {
-    base_path: String,
+    reader: ParquetReader,
 }
 
 impl ParquetReplayService {
     pub fn new(base_path: impl Into<String>) -> Self {
-        Self {
-            base_path: base_path.into(),
-        }
+        let base_path = base_path.into();
+        Self::from_reader(ParquetReader::new(base_path))
+    }
+
+    pub fn from_reader(reader: ParquetReader) -> Self {
+        Self { reader }
     }
 }
 
@@ -35,8 +38,7 @@ impl ReplayService for ParquetReplayService {
         mode: pb_types::event::ReplayMode,
         depth: Option<usize>,
     ) -> Result<ReplayResult, ServiceError> {
-        let reader = ParquetReader::new(&self.base_path);
-        let engine = ReplayEngine::new(reader);
+        let engine = ReplayEngine::new(self.reader.clone());
         let result = engine
             .reconstruct_at(asset_id, at_us, mode)
             .await
@@ -52,14 +54,17 @@ impl ReplayService for ParquetReplayService {
 /// Integrity service backed by Parquet event files.
 #[derive(Clone)]
 pub struct ParquetIntegrityService {
-    base_path: String,
+    reader: ParquetReader,
 }
 
 impl ParquetIntegrityService {
     pub fn new(base_path: impl Into<String>) -> Self {
-        Self {
-            base_path: base_path.into(),
-        }
+        let base_path = base_path.into();
+        Self::from_reader(ParquetReader::new(base_path))
+    }
+
+    pub fn from_reader(reader: ParquetReader) -> Self {
+        Self { reader }
     }
 }
 
@@ -70,12 +75,13 @@ impl IntegrityService for ParquetIntegrityService {
         start_us: u64,
         end_us: u64,
     ) -> Result<IntegritySummary, ServiceError> {
-        let reader = ParquetReader::new(&self.base_path);
-        let window = reader
+        let window = self
+            .reader
             .read_market_data(asset_id, start_us, end_us)
             .await
             .map_err(map_replay_error)?;
-        let validations = reader
+        let validations = self
+            .reader
             .read_validations(asset_id, start_us, end_us)
             .await
             .map_err(map_replay_error)?;
@@ -96,14 +102,17 @@ impl IntegrityService for ParquetIntegrityService {
 /// Execution service backed by Parquet event files.
 #[derive(Clone)]
 pub struct ParquetExecutionService {
-    base_path: String,
+    reader: ParquetReader,
 }
 
 impl ParquetExecutionService {
     pub fn new(base_path: impl Into<String>) -> Self {
-        Self {
-            base_path: base_path.into(),
-        }
+        let base_path = base_path.into();
+        Self::from_reader(ParquetReader::new(base_path))
+    }
+
+    pub fn from_reader(reader: ParquetReader) -> Self {
+        Self { reader }
     }
 }
 
@@ -118,8 +127,8 @@ impl ExecutionService for ParquetExecutionService {
         offset: usize,
         descending: bool,
     ) -> Result<ExecutionTimeline, ServiceError> {
-        let reader = ParquetReader::new(&self.base_path);
-        let events = reader
+        let events = self
+            .reader
             .read_execution_events(order_id, start_us, end_us)
             .await
             .map_err(map_replay_error)?;

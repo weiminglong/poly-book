@@ -51,7 +51,7 @@ tests:
               instance: serve-1
             exp_annotations:
               summary: "WAL frame failed to decode during live tailing on serve-1"
-              description: "A CRC-valid WAL frame could not be decoded by the codec and was skipped during live tailing — the serve read model has diverged from the WAL for that record. This should be near-impossible (a codec version mismatch or CRC collision). Investigate the WAL/codec version and reconcile."
+              description: "A CRC-valid WAL frame could not be decoded by the codec and was skipped during live tailing — the serve read model has diverged from the WAL for that record. This should be near-impossible (a codec version mismatch or CRC collision). Investigate the WAL/codec version; strict `reconcile` refuses this frame and is not a repair for this alert."
               runbook: monitoring/RUNBOOK.md#waldecodeerror
 
   - interval: 1m

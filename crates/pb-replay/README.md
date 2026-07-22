@@ -11,7 +11,7 @@ and supports periodic REST snapshot backfill for checkpoint seeding.
 | `ReplayEngine` | Reconstructs `L2Book` at a target timestamp by reading checkpoints and applying events forward. |
 | `ReplayResult` | Output of reconstruction: the rebuilt `L2Book`, replay mode, whether a checkpoint was used, and continuity (ingest) events encountered. |
 | `EventReader` | Trait abstracting storage backends for reading events by time range and asset. |
-| `ParquetReader` | `EventReader` implementation for local/S3 Parquet files. |
+| `ParquetReader` | `EventReader` implementation for local/S3 Parquet objects through `object_store`. |
 | `ClickHouseReader` | `EventReader` implementation for ClickHouse tables. |
 | `BackfillConfig` | Configuration for periodic REST snapshot fetching. |
 | `ReplayError` | Error type for replay operations. |
@@ -51,7 +51,22 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   and requires a fresh post-reset snapshot before applying later deltas.
 - The `EventReader` trait has methods for reading each dataset type:
   `read_market_data`, `read_checkpoints`, `read_latest_checkpoint`,
+  `read_latest_checkpoints`,
   `read_validations`, `read_execution_events`.
+- `ParquetReader::from_store` uses Parquet object-store range reads, so the
+  deployed S3 path is read through the same credentials and endpoint wiring as
+  the writer; it never treats `s3://` as a local filesystem path.
+- Parquet reads use bounded file concurrency and reject a dataset result above
+  500,000 rows with a request-window error instead of collecting an unbounded
+  response in the serve process.
+- Hour listings honor versioned recovery manifests. A manifest atomically swaps
+  one `(dataset, asset, hour)` view to an immutable recovered object and hides
+  superseded normal files even if post-publication cleanup was interrupted.
+- Startup latest-checkpoint lookup lists the checkpoint dataset once for the
+  entire active-asset set and walks only existing hours newest-first; it does
+  not rescan the full inventory per asset or probe empty hours back to epoch.
+- Manifest paths are parsed without re-encoding their object keys, and logical
+  asset filters handle `object_store`'s additional percent escaping.
 - Both readers support time-range filtering and asset filtering at the storage
   layer to minimize I/O. ClickHouseReader pushes `WHERE asset_id` into the query
   for server-side filtering and adds `ORDER BY` clauses on all queries.
@@ -113,6 +128,6 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 
 ## Tests
 
-28 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
+51 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
 `ParquetReader` integration, end-to-end write-then-reconstruct round-trips, and
 backfill REST response parsing.

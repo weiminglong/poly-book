@@ -16,7 +16,7 @@ pub use schema::{
     replay_validation_refs_to_record_batch, replay_validation_schema, schema_for_record,
     trade_event_refs_to_record_batch, trade_event_schema,
 };
-pub use writer::{ClickHouseRecordWriter, ParquetRecordWriter};
+pub use writer::{ClickHouseRecordWriter, ParquetRecordWriter, RecoveryCoverage, RecoveryReport};
 
 #[cfg(test)]
 mod tests;

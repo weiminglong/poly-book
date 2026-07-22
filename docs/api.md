@@ -14,6 +14,10 @@ Timeline`, `Integrity`, and `Query Workbench`. The Query Workbench is opt-in
 (`api.query_workbench_enabled = true`, requires the ClickHouse backend). Latency
 surfaces remain deferred.
 
+Parquet-backed routes are storage-location agnostic: local files and configured
+cloud object stores use the same reader, and crash-recovery manifests are applied
+below the service layer without changing response shapes.
+
 ## Security / Trust Boundary
 
 HTTP, WebSocket, and gRPC data surfaces support a shared bearer token via

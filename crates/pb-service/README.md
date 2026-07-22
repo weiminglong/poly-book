@@ -21,6 +21,11 @@ adapters (parse HTTP → call service → format response).
 | Parquet | `ParquetReplayService`, `ParquetIntegrityService`, `ParquetExecutionService` |
 | ClickHouse | `ClickHouseReplayService`, `ClickHouseIntegrityService`, `ClickHouseExecutionService`, `ClickHouseQueryService` |
 
+Each Parquet service supports `from_reader(ParquetReader)`. The runtime uses
+these constructors to share one configured local/S3 object-store reader across
+replay, integrity, and execution services; `new(path)` remains the local-path
+convenience constructor.
+
 ## Enum Dispatch
 
 Service traits use `impl Future` return types, making them not dyn-compatible.

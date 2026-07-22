@@ -90,8 +90,13 @@ its buffer; only after `MAX_FLUSH_RETRIES` does it surface the error).
 1. Identify the sink from the `sink` label (`parquet` / `clickhouse`).
 2. Parquet: check the object store (S3 creds/role, bucket policy, KMS key access),
    or local disk. ClickHouse: check the server is up and the schema matches.
-3. The WAL still has every record. Once storage is healthy, rebuild any lost
-   Parquet window with `cargo run -- reconcile` (offline — stop ingest first).
+3. If the failed sink is Parquet and the retained WAL is intact, `reconcile` can
+   republish only complete receive-time-partitioned book/trade/ingest hours.
+   Stop ingest and every other writer using the same Parquet prefix, then follow
+   `docs/operations.md` “Storage Recovery”. Partial boundary hours and
+   checkpoint/validation/execution datasets require a separate source-backed
+   repair. `reconcile` does not rebuild ClickHouse; repair or re-ingest that
+   backend separately.
 
 ## WalDecodeError
 **Severity: critical — serve read model has diverged from the WAL.**
@@ -108,8 +113,13 @@ likely, a CRC collision on a corrupt frame.
 2. The skipped record is permanently absent from that serve node's in-memory read
    model; restart serve to re-hydrate from checkpoints + replay the WAL (note: if
    the frame is genuinely corrupt, re-hydration will also skip it).
-3. If it recurs across restarts, the WAL has a poison frame — `reconcile` the
-   affected window from the source and investigate the codec/segment.
+3. If it recurs with matching binaries, preserve the WAL segment as incident
+   evidence and investigate the exact frame and codec version. Do **not** run
+   `reconcile` as a repair: strict recovery aborts on every undecodable or corrupt
+   frame so it cannot prove an authoritative Parquet hour. Restore a trusted WAL
+   copy or rebuild the affected storage interval from an independent upstream
+   source; drain/rotate the damaged WAL only after the impact and data-loss
+   decision are explicit.
 
 ## FeedSilent
 **Severity: critical — capture gap.**

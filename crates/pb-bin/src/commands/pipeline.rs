@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use config::Config;
+use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -173,13 +174,13 @@ impl Supervisor {
 
 /// Build the object store and path prefix for a configured storage base path.
 ///
-/// A path with a URL scheme (`s3://bucket/prefix`, `gs://...`, `file://...`) is
-/// wired to the matching `object_store` backend; a plain path is a local
-/// filesystem directory. This fixes a bug where an
+/// An `s3://bucket/prefix` or `file://...` URL is wired to the matching compiled
+/// `object_store` backend; a plain path is a local filesystem directory. This
+/// fixes a bug where an
 /// `s3://...` base path was silently handled by `LocalFileSystem` and written to
 /// a local directory literally named `s3:` on ephemeral container storage.
 ///
-/// For `s3://` (and other cloud schemes), configuration is taken from process
+/// For `s3://`, configuration is taken from process
 /// environment variables via `object_store::parse_url_opts(url, std::env::vars())`.
 /// This is what wires in region and credentials: `AWS_REGION`, static
 /// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or — when no static keys are set —
@@ -207,6 +208,46 @@ pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::Obje
             .to_string_lossy()
             .to_string();
         Ok((Arc::new(object_store::local::LocalFileSystem::new()), abs))
+    }
+}
+
+pub(crate) fn object_store_error_summary(error: &object_store::Error) -> &'static str {
+    match error {
+        object_store::Error::NotFound { .. } => "object or bucket not found",
+        object_store::Error::PermissionDenied { .. } => "permission denied",
+        object_store::Error::Unauthenticated { .. } => "authentication failed",
+        object_store::Error::InvalidPath { .. } => "invalid object path",
+        object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. } => {
+            "operation not supported"
+        }
+        object_store::Error::AlreadyExists { .. } => "object already exists",
+        object_store::Error::Precondition { .. } => "request precondition failed",
+        object_store::Error::NotModified { .. } => "object not modified",
+        object_store::Error::UnknownConfigurationKey { .. } => "invalid backend configuration",
+        _ => "backend request failed",
+    }
+}
+
+/// Fail startup when the configured historical object store cannot even list
+/// its prefix. An empty prefix is valid; auth, endpoint, or bucket failures are
+/// not. Reads will otherwise look like an empty dataset and readiness can turn
+/// green on a misconfigured deployment.
+async fn probe_object_store_read(
+    store: &Arc<dyn object_store::ObjectStore>,
+    prefix: &str,
+) -> Result<()> {
+    let path = object_store::path::Path::parse(prefix)
+        .map_err(|error| anyhow::anyhow!("invalid object-store prefix {prefix}: {error}"))?;
+    let mut objects = store.list(Some(&path));
+    match tokio::time::timeout(Duration::from_secs(10), objects.next()).await {
+        Ok(Some(Ok(_))) | Ok(None) => Ok(()),
+        Ok(Some(Err(error))) => Err(anyhow::anyhow!(
+            "cannot list configured Parquet prefix {prefix}: {}",
+            object_store_error_summary(&error)
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "timed out listing configured Parquet prefix {prefix} after 10s"
+        )),
     }
 }
 
@@ -479,11 +520,11 @@ pub fn redact_url_for_log(raw: &str) -> String {
 /// back to Parquet with a warning.
 pub async fn build_services(
     settings: &Config,
-) -> (
+) -> Result<(
     pb_service::AnyReplayService,
     pb_service::AnyIntegrityService,
     pb_service::AnyExecutionService,
-) {
+)> {
     let backend = settings
         .get_string("api.historical_backend")
         .unwrap_or_else(|_| "parquet".to_string());
@@ -517,7 +558,7 @@ pub async fn build_services(
                         database = %ch_db,
                         "using ClickHouse historical backend"
                     );
-                    return (
+                    return Ok((
                         pb_service::AnyReplayService::ClickHouse(
                             pb_service::ClickHouseReplayService::new(&ch_url, &ch_db),
                         ),
@@ -527,7 +568,7 @@ pub async fn build_services(
                         pb_service::AnyExecutionService::ClickHouse(
                             pb_service::ClickHouseExecutionService::new(&ch_url, &ch_db),
                         ),
-                    );
+                    ));
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
@@ -554,23 +595,29 @@ pub async fn build_services(
     }
 
     tracing::info!(path = %parquet_base_path, "using Parquet historical backend");
-    (
-        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
-            &parquet_base_path,
+    let (store, base_path) = build_object_store(&parquet_base_path)?;
+    probe_object_store_read(&store, &base_path).await?;
+    let reader = pb_replay::ParquetReader::from_store(store, base_path);
+    Ok((
+        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::from_reader(
+            reader.clone(),
         )),
-        pb_service::AnyIntegrityService::Parquet(pb_service::ParquetIntegrityService::new(
-            &parquet_base_path,
+        pb_service::AnyIntegrityService::Parquet(pb_service::ParquetIntegrityService::from_reader(
+            reader.clone(),
         )),
-        pb_service::AnyExecutionService::Parquet(pb_service::ParquetExecutionService::new(
-            &parquet_base_path,
+        pb_service::AnyExecutionService::Parquet(pb_service::ParquetExecutionService::from_reader(
+            reader,
         )),
-    )
+    ))
 }
 
 /// Build the query service from config.
 ///
 /// Returns `None` if `api.query_workbench_enabled` is not set to `true`.
-pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQueryService> {
+pub async fn build_query_service(
+    settings: &Config,
+    effective_backend_is_clickhouse: bool,
+) -> Option<pb_service::AnyQueryService> {
     let enabled = settings
         .get_bool("api.query_workbench_enabled")
         .unwrap_or(false);
@@ -579,33 +626,26 @@ pub async fn build_query_service(settings: &Config) -> Option<pb_service::AnyQue
         return None;
     }
 
-    let backend = settings
-        .get_string("api.historical_backend")
-        .unwrap_or_else(|_| "parquet".to_string());
-
-    match backend.as_str() {
-        "clickhouse" => {
-            let ch_url = settings
-                .get_string("storage.clickhouse_url")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let ch_db = settings
-                .get_string("storage.clickhouse_database")
-                .unwrap_or_else(|_| "poly_book".to_string());
-            tracing::info!(
-                url = %redact_url_for_log(&ch_url),
-                database = %ch_db,
-                "query workbench enabled (ClickHouse)"
-            );
-            Some(pb_service::AnyQueryService::ClickHouse(
-                pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
-            ))
-        }
-        _ => {
-            tracing::warn!(
-                "query workbench requires clickhouse backend, currently using {backend}"
-            );
-            None
-        }
+    if effective_backend_is_clickhouse {
+        let ch_url = settings
+            .get_string("storage.clickhouse_url")
+            .unwrap_or_else(|_| "http://localhost:8123".to_string());
+        let ch_db = settings
+            .get_string("storage.clickhouse_database")
+            .unwrap_or_else(|_| "poly_book".to_string());
+        tracing::info!(
+            url = %redact_url_for_log(&ch_url),
+            database = %ch_db,
+            "query workbench enabled (ClickHouse)"
+        );
+        Some(pb_service::AnyQueryService::ClickHouse(
+            pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
+        ))
+    } else {
+        tracing::warn!(
+            "query workbench requires the effective historical backend to be ClickHouse"
+        );
+        None
     }
 }
 
@@ -970,6 +1010,23 @@ mod tests {
         let (max_rows, timeout) = query_config_from_settings(&settings);
         assert_eq!(max_rows, 5000);
         assert_eq!(timeout, 60);
+    }
+
+    #[tokio::test]
+    async fn query_service_uses_the_effective_backend_after_fallback() {
+        let settings = Config::builder()
+            .set_override("api.query_workbench_enabled", true)
+            .unwrap()
+            .set_override("api.historical_backend", "clickhouse")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(build_query_service(&settings, false).await.is_none());
+        assert!(matches!(
+            build_query_service(&settings, true).await,
+            Some(pb_service::AnyQueryService::ClickHouse(_))
+        ));
     }
 
     // --- grpc_config_from_settings ---

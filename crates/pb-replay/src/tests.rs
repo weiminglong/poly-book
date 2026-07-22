@@ -10,7 +10,7 @@ use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence, TradeFideli
 
 use crate::engine::ReplayEngine;
 use crate::error::ReplayError;
-use crate::reader::{EventReader, ParquetReader};
+use crate::reader::{is_object_not_found, EventReader, ParquetReader};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -18,6 +18,19 @@ use crate::reader::{EventReader, ParquetReader};
 
 fn test_asset_id() -> AssetId {
     AssetId::new("BTC-5M-YES")
+}
+
+#[test]
+fn parquet_wrapped_object_not_found_is_retryable() {
+    let nested = object_store::Error::NotFound {
+        path: "missing.parquet".to_string(),
+        source: Box::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "deleted after head",
+        )),
+    };
+    let error = ReplayError::Parquet(parquet::errors::ParquetError::External(Box::new(nested)));
+    assert!(is_object_not_found(&error));
 }
 
 fn test_provenance(recv_ts: u64, seq: u64) -> EventProvenance {
@@ -719,7 +732,7 @@ fn hour_paths_single_hour() {
 
     let paths = reader.hour_paths("book_events", start, end);
     assert_eq!(paths.len(), 1);
-    let path_str = paths[0].to_str().unwrap();
+    let path_str = paths[0].as_ref();
     assert!(path_str.contains("book_events"));
 }
 
@@ -749,10 +762,7 @@ fn hour_paths_midnight_crossing() {
     assert!(paths.len() >= 2, "should cross midnight boundary");
 
     // Verify the paths contain different day patterns
-    let path_strs: Vec<String> = paths
-        .iter()
-        .map(|p| p.to_str().unwrap().to_string())
-        .collect();
+    let path_strs: Vec<String> = paths.iter().map(ToString::to_string).collect();
     // At least one path should contain /23 (hour 23)
     assert!(
         path_strs.iter().any(|p| p.contains("/23")),
@@ -811,6 +821,106 @@ async fn parquet_reader_reads_book_events() {
     assert_eq!(window.book_events[0].kind, BookEventKind::Snapshot);
     assert_eq!(window.book_events[0].side, Side::Bid);
     assert_eq!(window.book_events[0].price, FixedPrice::new(5000).unwrap());
+}
+
+#[tokio::test]
+async fn object_store_reader_honors_recovery_manifest_before_cleanup() {
+    use futures_util::StreamExt;
+    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+    use pb_store::{ParquetRecordWriter, RecoveryCoverage};
+
+    let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+    let t0 = BASE_TS;
+    let encoded_asset = AssetId::new("asset/with%separator");
+    let mut old_event = make_snapshot_event(t0, Side::Bid, 5000, 1_000_000, 1);
+    old_event.asset_id = encoded_asset.clone();
+    let old = pb_types::PersistedRecord::Book(old_event);
+    let mut new_event = make_delta_event(t0 + 1_000_000, Side::Ask, 5100, 2_000_000, 2);
+    new_event.asset_id = encoded_asset.clone();
+    let new = pb_types::PersistedRecord::Book(new_event);
+    writer.write_record(old.clone()).await.unwrap();
+
+    let old_meta = store
+        .list(Some(&object_store::path::Path::from("data/book_events")))
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    let old_bytes = store
+        .get(&old_meta.location)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let hour_start = t0 / 3_600_000_000 * 3_600_000_000;
+    let coverage = RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
+    writer
+        .write_batch_replacing(&[old, new], coverage)
+        .await
+        .unwrap();
+
+    // Simulate a crash after manifest publication but before stale-object
+    // cleanup. The old normal object is visible in the listing again, but the
+    // manifest must keep it out of the authoritative read view.
+    store
+        .put(&old_meta.location, PutPayload::from(old_bytes))
+        .await
+        .unwrap();
+
+    let reader = ParquetReader::from_store(store, "data");
+    let window = reader
+        .read_market_data(&encoded_asset, t0 - 1, t0 + 2_000_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        window.book_events.len(),
+        2,
+        "the superseded object must not be double-counted"
+    );
+}
+
+#[tokio::test]
+async fn object_store_reader_preserves_an_encoded_base_prefix() {
+    use futures_util::StreamExt;
+    use object_store::memory::InMemory;
+    use object_store::ObjectStore;
+    use pb_store::ParquetRecordWriter;
+
+    let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+    // This is the representation returned by `parse_url_opts` for an object
+    // prefix whose component contains a space. It must not become `%2520` when
+    // writer/reader child paths are constructed.
+    let base = object_store::path::Path::parse("prefix%20name/data")
+        .unwrap()
+        .to_string();
+    let writer = ParquetRecordWriter::new(store.clone(), base.clone());
+    let record = pb_types::PersistedRecord::Book(make_snapshot_event(
+        BASE_TS,
+        Side::Bid,
+        5000,
+        1_000_000,
+        1,
+    ));
+    writer.write_record(record).await.unwrap();
+
+    let paths = store
+        .list(None)
+        .map(|entry| entry.unwrap().location.to_string())
+        .collect::<Vec<_>>()
+        .await;
+    assert!(paths.iter().all(|path| path.starts_with("prefix%20name/")));
+    assert!(paths.iter().all(|path| !path.contains("%2520")));
+
+    let reader = ParquetReader::from_store(store, base);
+    let window = reader
+        .read_market_data(&test_asset_id(), BASE_TS - 1, BASE_TS + 1)
+        .await
+        .unwrap();
+    assert_eq!(window.book_events.len(), 1);
 }
 
 #[tokio::test]
@@ -941,6 +1051,17 @@ async fn parquet_reader_missing_directory_returns_empty() {
     assert!(window.book_events.is_empty());
     assert!(window.trade_events.is_empty());
     assert!(window.ingest_events.is_empty());
+}
+
+#[tokio::test]
+async fn parquet_reader_missing_checkpoint_inventory_returns_none() {
+    let dir = TempDir::new().unwrap();
+    let reader = ParquetReader::new(dir.path().join("nonexistent"));
+    assert!(reader
+        .read_latest_checkpoint(&test_asset_id(), BASE_TS)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

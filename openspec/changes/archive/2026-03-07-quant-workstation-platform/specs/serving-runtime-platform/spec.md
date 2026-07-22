@@ -88,3 +88,13 @@ When replay correctness, validation, or recovery questions arise
 Then Parquet remains available as the canonical audit and replay-truth source
 And the serving backend does not redefine historical truth by itself
 ```
+
+### Scenario: Parquet recovery publishes only complete authoritative views
+
+```
+Given retained WAL may begin or end inside an hourly Parquet partition
+When offline recovery rebuilds canonical Parquet data
+Then only hours fully proven by a gap-free, strictly decoded WAL are published
+And only datasets partitioned exactly by the proof's receive-time clock are replaced
+And readers atomically switch through a recovery manifest after the replacement object is durable
+```

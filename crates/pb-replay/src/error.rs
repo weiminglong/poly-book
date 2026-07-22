@@ -8,6 +8,9 @@ pub enum ReplayError {
     #[error("Parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
 
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
+
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 

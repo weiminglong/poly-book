@@ -1,17 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use arrow::array::{Array, AsArray, UInt64Array};
 use arrow::datatypes::{UInt32Type, UInt64Type};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
-use tokio::fs::File;
-use tracing::debug;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
+use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
 use pb_types::event::{
     BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, ExecutionEvent,
     ExecutionEventKind, IngestEvent, IngestEventKind, LatencyTrace, MarketDataWindow, ReplayMode,
     ReplayValidation, Side, TradeEvent,
 };
+use pb_types::{storage::PARQUET_RECOVERY_MANIFEST_PREFIX, ParquetRecoveryManifest};
 use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence, TradeFidelity};
 
 use crate::error::ReplayError;
@@ -37,6 +39,24 @@ pub trait EventReader: Send + Sync {
         at_us: u64,
     ) -> impl std::future::Future<Output = Result<Option<BookCheckpoint>, ReplayError>> + Send;
 
+    /// Read the latest checkpoint for many assets. Backends may override this
+    /// to share one inventory/query; the default preserves compatibility for
+    /// readers where individual lookups are already efficient.
+    fn read_latest_checkpoints(
+        &self,
+        asset_ids: &[AssetId],
+        at_us: u64,
+    ) -> impl std::future::Future<Output = Result<Vec<Option<BookCheckpoint>>, ReplayError>> + Send
+    {
+        async move {
+            let mut checkpoints = Vec::with_capacity(asset_ids.len());
+            for asset_id in asset_ids {
+                checkpoints.push(self.read_latest_checkpoint(asset_id, at_us).await?);
+            }
+            Ok(checkpoints)
+        }
+    }
+
     fn read_validations(
         &self,
         asset_id: &AssetId,
@@ -52,8 +72,10 @@ pub trait EventReader: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Vec<ExecutionEvent>, ReplayError>> + Send;
 }
 
+#[derive(Clone)]
 pub struct ParquetReader {
-    base_path: PathBuf,
+    store: Arc<dyn ObjectStore>,
+    base_path: ObjectPath,
 }
 
 /// The on-disk Parquet schema version this reader understands. Files written by
@@ -76,7 +98,7 @@ fn check_schema_version(version: Option<&str>) -> Result<(), ReplayError> {
 }
 
 const PARQUET_READ_CONCURRENCY: usize = 8;
-const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
+const MAX_PARQUET_DATASET_ROWS: usize = 500_000;
 
 /// Hard backstop on rows returned by a single unbounded ClickHouse read
 /// (ingest/execution events). Applied via `max_result_rows` +
@@ -85,13 +107,49 @@ const RECENT_CHECKPOINT_LOOKBACK_US: u64 = 6 * 3_600 * 1_000_000;
 const MAX_READ_ROWS: u64 = 5_000_000;
 
 impl ParquetReader {
-    pub fn new(base_path: impl Into<PathBuf>) -> Self {
+    /// Build a reader for a local filesystem path.
+    ///
+    /// Cloud URLs must be constructed by the runtime and passed to
+    /// [`Self::from_store`], so reads and writes share identical credentials and
+    /// endpoint configuration.
+    pub fn new(base_path: impl AsRef<std::path::Path>) -> Self {
+        let path = base_path.as_ref();
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                .join(path)
+        };
         Self {
-            base_path: base_path.into(),
+            store: Arc::new(object_store::local::LocalFileSystem::new()),
+            base_path: ObjectPath::from(absolute.to_string_lossy().as_ref()),
         }
     }
 
-    pub(crate) fn hour_paths(&self, dataset: &str, start_us: u64, end_us: u64) -> Vec<PathBuf> {
+    /// Build a Parquet reader over an arbitrary object-store backend.
+    pub fn from_store(store: Arc<dyn ObjectStore>, base_path: impl Into<String>) -> Self {
+        let base_path = base_path.into();
+        Self {
+            store,
+            // `parse_url_opts` returns an already percent-encoded object-store
+            // prefix. `Path::from` would encode `%` again, and every child path
+            // would then point at a different key.
+            base_path: ObjectPath::parse(base_path.as_str())
+                .expect("object-store prefixes must be valid object paths"),
+        }
+    }
+
+    fn child_path(&self, suffix: &str) -> ObjectPath {
+        let path = if self.base_path.as_ref().is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{}/{suffix}", self.base_path)
+        };
+        ObjectPath::parse(path).expect("validated base plus internal suffix is a valid object path")
+    }
+
+    pub(crate) fn hour_paths(&self, dataset: &str, start_us: u64, end_us: u64) -> Vec<ObjectPath> {
         use chrono::{Datelike, TimeZone, Timelike, Utc};
 
         let start_dt = Utc
@@ -118,7 +176,7 @@ impl ParquetReader {
                 current.day(),
                 current.hour(),
             );
-            paths.push(self.base_path.join(dataset).join(hour_key));
+            paths.push(self.child_path(&format!("{dataset}/{hour_key}")));
             current += chrono::Duration::hours(1);
         }
         paths
@@ -130,52 +188,202 @@ impl ParquetReader {
         asset_prefix: Option<&str>,
         start_us: u64,
         end_us: u64,
-    ) -> Result<Vec<PathBuf>, ReplayError> {
+    ) -> Result<Vec<ObjectPath>, ReplayError> {
         let mut files = Vec::new();
         for dir in self.hour_paths(dataset, start_us, end_us) {
-            let mut entries = match tokio::fs::read_dir(&dir).await {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    debug!(?dir, "hour directory not found, skipping");
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
+            let entries = self.store.list(Some(&dir)).collect::<Vec<_>>().await;
+            for entry in entries {
+                let meta = entry?;
+                let path = meta.location;
                 if !path
-                    .extension()
-                    .map(|ext| ext == "parquet")
-                    .unwrap_or(false)
+                    .filename()
+                    .is_some_and(|name| name.ends_with(".parquet"))
                 {
                     continue;
                 }
                 if let Some(prefix) = asset_prefix {
-                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    let Some(name) = path.filename() else {
                         continue;
                     };
                     let expected = pb_types::newtype::storage_key_for(prefix);
-                    if !pb_types::newtype::storage_file_matches_asset(name, &expected) {
+                    if !pb_types::newtype::storage_object_file_matches_asset(name, &expected) {
                         continue;
                     }
                 }
                 files.push(path);
             }
+
+            let manifests = self.recovery_manifests(dataset, &dir, asset_prefix).await?;
+            if !manifests.is_empty() {
+                let superseded: HashSet<&str> = manifests
+                    .iter()
+                    .flat_map(|manifest| manifest.superseded_objects.iter().map(String::as_str))
+                    .collect();
+                files.retain(|path| !superseded.contains(path.as_ref()));
+                for manifest in manifests {
+                    for object in manifest.active_objects {
+                        let path = ObjectPath::parse(&object).map_err(|error| {
+                            ReplayError::Other(format!(
+                                "invalid active object path {object} in recovery manifest: {error}"
+                            ))
+                        })?;
+                        files.push(path);
+                    }
+                }
+            }
         }
+        files.sort();
+        files.dedup();
         Ok(files)
+    }
+
+    async fn recovery_manifests(
+        &self,
+        dataset: &str,
+        hour_path: &ObjectPath,
+        asset_prefix: Option<&str>,
+    ) -> Result<Vec<ParquetRecoveryManifest>, ReplayError> {
+        let hour_suffix = hour_path
+            .as_ref()
+            .strip_prefix(self.base_path.as_ref())
+            .unwrap_or(hour_path.as_ref())
+            .trim_start_matches('/');
+        let hour_key = hour_suffix
+            .strip_prefix(dataset)
+            .unwrap_or(hour_suffix)
+            .trim_start_matches('/');
+        let manifest_prefix = self.child_path(&format!(
+            "{PARQUET_RECOVERY_MANIFEST_PREFIX}/{dataset}/{hour_key}"
+        ));
+
+        let mut manifests = Vec::new();
+        if let Some(asset_id) = asset_prefix {
+            let asset_key = pb_types::newtype::storage_key_for(asset_id);
+            let manifest_name = format!("{asset_key}.json");
+            // Both components are already percent-encoded object paths. `join`
+            // accepts a raw segment and would encode `%` a second time.
+            let path = ObjectPath::parse(format!("{manifest_prefix}/{manifest_name}"))
+                .expect("validated manifest prefix and encoded asset form a valid object path");
+            match self.store.get(&path).await {
+                Ok(result) => {
+                    let bytes = result.bytes().await?;
+                    let manifest = self.decode_manifest(&path, bytes.as_ref())?;
+                    self.validate_manifest_scope(
+                        &path,
+                        &manifest,
+                        dataset,
+                        hour_key,
+                        Some(&asset_key),
+                    )?;
+                    manifests.push(manifest);
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            let entries = self
+                .store
+                .list(Some(&manifest_prefix))
+                .collect::<Vec<_>>()
+                .await;
+            for entry in entries {
+                let meta = entry?;
+                if !meta
+                    .location
+                    .filename()
+                    .is_some_and(|name| name.ends_with(".json"))
+                {
+                    continue;
+                }
+                let bytes = self.store.get(&meta.location).await?.bytes().await?;
+                let manifest = self.decode_manifest(&meta.location, bytes.as_ref())?;
+                self.validate_manifest_scope(&meta.location, &manifest, dataset, hour_key, None)?;
+                manifests.push(manifest);
+            }
+        }
+        Ok(manifests)
+    }
+
+    fn decode_manifest(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<ParquetRecoveryManifest, ReplayError> {
+        let manifest: ParquetRecoveryManifest = serde_json::from_slice(bytes)?;
+        manifest.validate().map_err(|error| {
+            ReplayError::Other(format!("invalid recovery manifest {path}: {error}"))
+        })?;
+        Ok(manifest)
+    }
+
+    fn validate_manifest_scope(
+        &self,
+        path: &ObjectPath,
+        manifest: &ParquetRecoveryManifest,
+        dataset: &str,
+        hour_key: &str,
+        expected_asset: Option<&str>,
+    ) -> Result<(), ReplayError> {
+        let identity_matches = manifest.dataset == dataset
+            && manifest.hour_key == hour_key
+            && expected_asset.is_none_or(|asset| manifest.asset_key == asset)
+            && path
+                .filename()
+                .and_then(|name| name.strip_suffix(".json"))
+                .is_some_and(|stem| {
+                    pb_types::newtype::storage_object_component_matches_key(
+                        stem,
+                        &manifest.asset_key,
+                    )
+                });
+        let recovery_prefix = self
+            .child_path(&format!(
+                "{}/{dataset}/{hour_key}",
+                pb_types::storage::PARQUET_RECOVERY_OBJECT_PREFIX
+            ))
+            .to_string();
+        let normal_prefix = self
+            .child_path(&format!("{dataset}/{hour_key}"))
+            .to_string();
+        let matches_asset = |object: &str| {
+            object.rsplit('/').next().is_some_and(|name| {
+                pb_types::newtype::storage_object_file_matches_asset(name, &manifest.asset_key)
+            })
+        };
+        let active_objects_are_scoped = manifest.active_objects.iter().all(|object| {
+            [&normal_prefix, &recovery_prefix].iter().any(|prefix| {
+                object
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/') && suffix.ends_with(".parquet"))
+            }) && matches_asset(object)
+        });
+        let superseded_objects_are_scoped = manifest.superseded_objects.iter().all(|object| {
+            [&normal_prefix, &recovery_prefix].iter().any(|prefix| {
+                object
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/') && suffix.ends_with(".parquet"))
+            }) && matches_asset(object)
+        });
+        if !identity_matches || !active_objects_are_scoped || !superseded_objects_are_scoped {
+            return Err(ReplayError::Other(format!(
+                "recovery manifest {path} does not match its partition scope"
+            )));
+        }
+        Ok(())
     }
 
     async fn read_parquet_file<T, F>(
         &self,
-        path: &Path,
+        path: &ObjectPath,
         extractor: F,
     ) -> Result<Vec<T>, ReplayError>
     where
         F: Fn(&arrow::record_batch::RecordBatch) -> Result<Vec<T>, ReplayError>,
     {
-        let file = File::open(path).await?;
-        let builder = ParquetRecordBatchStreamBuilder::new(file).await?;
+        let meta = self.store.head(path).await?;
+        let object_reader =
+            ParquetObjectReader::new(self.store.clone(), path.clone()).with_file_size(meta.size);
+        let builder = ParquetRecordBatchStreamBuilder::new(object_reader).await?;
 
         // Reject an incompatible on-disk layout instead of silently yielding
         // empty or mis-mapped rows.
@@ -186,7 +394,7 @@ impl ParquetReader {
                 .get("pb_schema_version")
                 .map(String::as_str),
         )
-        .map_err(|e| ReplayError::Other(format!("Parquet file {path:?}: {e}")))?;
+        .map_err(|e| ReplayError::Other(format!("Parquet object {path}: {e}")))?;
 
         let mut stream = builder.build()?;
         let mut rows = Vec::new();
@@ -194,7 +402,13 @@ impl ParquetReader {
         use futures_util::StreamExt;
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            rows.extend(extractor(&batch)?);
+            let extracted = extractor(&batch)?;
+            if rows.len().saturating_add(extracted.len()) > MAX_PARQUET_DATASET_ROWS {
+                return Err(ReplayError::Other(format!(
+                    "Parquet read exceeds {MAX_PARQUET_DATASET_ROWS} rows per dataset; narrow the requested time window"
+                )));
+            }
+            rows.extend(extracted);
         }
 
         Ok(rows)
@@ -202,7 +416,7 @@ impl ParquetReader {
 
     async fn read_parquet_files<T, F>(
         &self,
-        paths: Vec<PathBuf>,
+        paths: Vec<ObjectPath>,
         extractor: F,
     ) -> Result<Vec<T>, ReplayError>
     where
@@ -216,43 +430,136 @@ impl ParquetReader {
         // for determinism because the replay engine sorts the merged events into a
         // total order (engine::sort_book_events) before applying them, so the
         // unordered read order cannot affect reconstruction output.
-        let batches = stream::iter(paths.into_iter().map(|path| {
+        stream::iter(paths.into_iter().map(|path| {
             let extractor = extractor.clone();
             async move { self.read_parquet_file(&path, extractor).await }
         }))
         .buffer_unordered(PARQUET_READ_CONCURRENCY)
-        .try_collect::<Vec<Vec<T>>>()
-        .await?;
-
-        Ok(batches.into_iter().flatten().collect())
+        .try_fold(Vec::new(), |mut rows, mut batch| async move {
+            if rows.len().saturating_add(batch.len()) > MAX_PARQUET_DATASET_ROWS {
+                return Err(ReplayError::Other(format!(
+                    "Parquet read exceeds {MAX_PARQUET_DATASET_ROWS} rows per dataset; narrow the requested time window"
+                )));
+            }
+            rows.append(&mut batch);
+            Ok(rows)
+        })
+        .await
     }
 
-    async fn latest_checkpoint_in_range(
+    /// Resolve and read one manifest-aware dataset view, retrying the complete
+    /// resolution once if post-publication garbage collection removed an object
+    /// selected immediately before the manifest changed.
+    async fn read_dataset_with_view_retry<T, F>(
         &self,
-        asset_id: &AssetId,
+        dataset: &str,
+        asset_prefix: Option<&str>,
         start_us: u64,
         end_us: u64,
-    ) -> Result<Option<BookCheckpoint>, ReplayError> {
-        let files = self
-            .dataset_files(
-                "book_checkpoints",
-                Some(asset_id.as_str()),
-                start_us,
-                end_us,
-            )
-            .await?;
-        if files.is_empty() {
-            return Ok(None);
+        extractor: F,
+    ) -> Result<Vec<T>, ReplayError>
+    where
+        T: Send,
+        F: Fn(&arrow::record_batch::RecordBatch) -> Result<Vec<T>, ReplayError>
+            + Clone
+            + Send
+            + Sync,
+    {
+        for attempt in 0..2 {
+            let files = self
+                .dataset_files(dataset, asset_prefix, start_us, end_us)
+                .await?;
+            match self.read_parquet_files(files, extractor.clone()).await {
+                Err(error) if attempt == 0 && is_object_not_found(&error) => {
+                    tracing::warn!(
+                        dataset,
+                        "Parquet recovery view changed during read; resolving manifest once more"
+                    );
+                }
+                result => return result,
+            }
         }
-
-        let mut checkpoints = self
-            .read_parquet_files(files, |batch| {
-                extract_checkpoints(batch, asset_id, start_us, end_us)
-            })
-            .await?;
-        checkpoints.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
-        Ok(checkpoints.pop())
+        unreachable!("the second view-resolution attempt always returns")
     }
+
+    /// List the checkpoint dataset once and group matching objects by their
+    /// lexicographically sortable `YYYY/MM/DD/HH` partition. This is used by
+    /// startup hydration: probing every hour while exponentially widening to
+    /// epoch turns an empty S3 checkpoint lookup into millions of sequential
+    /// LIST/GET requests.
+    async fn checkpoint_files_by_asset_and_hour(
+        &self,
+        asset_ids: &[AssetId],
+        at_us: u64,
+    ) -> Result<Vec<BTreeMap<String, Vec<ObjectPath>>>, ReplayError> {
+        use chrono::{Datelike, TimeZone, Timelike, Utc};
+
+        let at = Utc
+            .timestamp_opt(at_us as i64 / 1_000_000, 0)
+            .single()
+            .unwrap_or_default();
+        let at_hour = format!(
+            "{:04}/{:02}/{:02}/{:02}",
+            at.year(),
+            at.month(),
+            at.day(),
+            at.hour()
+        );
+        let dataset_prefix = self.child_path("book_checkpoints");
+        let relative_prefix = format!("{dataset_prefix}/");
+        let logical_assets = asset_ids
+            .iter()
+            .map(|asset_id| pb_types::newtype::storage_key_for(asset_id.as_str()))
+            .collect::<Vec<_>>();
+        let entries = self
+            .store
+            .list(Some(&dataset_prefix))
+            .collect::<Vec<_>>()
+            .await;
+        let mut by_asset = vec![BTreeMap::<String, Vec<ObjectPath>>::new(); asset_ids.len()];
+        for entry in entries {
+            let meta = entry?;
+            let Some(file_name) = meta.location.filename() else {
+                continue;
+            };
+            let Some(asset_index) = logical_assets.iter().position(|logical_asset| {
+                pb_types::newtype::storage_object_file_matches_asset(file_name, logical_asset)
+            }) else {
+                continue;
+            };
+            let Some(relative) = meta.location.as_ref().strip_prefix(&relative_prefix) else {
+                continue;
+            };
+            let Some((hour_key, _)) = relative.rsplit_once('/') else {
+                continue;
+            };
+            if hour_key.len() == "YYYY/MM/DD/HH".len() && hour_key <= at_hour.as_str() {
+                by_asset[asset_index]
+                    .entry(hour_key.to_string())
+                    .or_default()
+                    .push(meta.location);
+            }
+        }
+        Ok(by_asset)
+    }
+}
+
+/// Object-store range failures made by `ParquetObjectReader` are wrapped in
+/// `ParquetError::External`. Walk the error chain so a manifest transition that
+/// deletes an object between HEAD and a later range GET is retried just like a
+/// direct object-store `NotFound`.
+pub(crate) fn is_object_not_found(error: &ReplayError) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(source) = current {
+        if source
+            .downcast_ref::<object_store::Error>()
+            .is_some_and(|error| matches!(error, object_store::Error::NotFound { .. }))
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
 }
 
 fn parse_source(value: &str) -> Result<DataSource, ReplayError> {
@@ -953,25 +1260,37 @@ impl EventReader for ParquetReader {
         start_us: u64,
         end_us: u64,
     ) -> Result<MarketDataWindow, ReplayError> {
-        let (book_files, trade_files, ingest_files) = tokio::try_join!(
-            self.dataset_files("book_events", Some(asset_id.as_str()), start_us, end_us),
-            self.dataset_files("trade_events", Some(asset_id.as_str()), start_us, end_us),
-            self.dataset_files("ingest_events", None, start_us, end_us),
-        )?;
-
         let asset_id = asset_id.clone();
+        let asset_filter = asset_id.as_str().to_string();
+        let ingest_asset_id = asset_id.clone();
         let (book_events, trade_events, ingest_events) = tokio::try_join!(
-            self.read_parquet_files(book_files, {
-                let asset_id = asset_id.clone();
-                move |batch| extract_book_events(batch, &asset_id, start_us, end_us)
-            }),
-            self.read_parquet_files(trade_files, {
-                let asset_id = asset_id.clone();
-                move |batch| extract_trade_events(batch, &asset_id, start_us, end_us)
-            }),
-            self.read_parquet_files(ingest_files, move |batch| {
-                extract_ingest_events(batch, &asset_id, start_us, end_us)
-            }),
+            self.read_dataset_with_view_retry(
+                "book_events",
+                Some(&asset_filter),
+                start_us,
+                end_us,
+                {
+                    let asset_id = asset_id.clone();
+                    move |batch| extract_book_events(batch, &asset_id, start_us, end_us)
+                },
+            ),
+            self.read_dataset_with_view_retry(
+                "trade_events",
+                Some(&asset_filter),
+                start_us,
+                end_us,
+                {
+                    let asset_id = asset_id.clone();
+                    move |batch| extract_trade_events(batch, &asset_id, start_us, end_us)
+                },
+            ),
+            self.read_dataset_with_view_retry(
+                "ingest_events",
+                None,
+                start_us,
+                end_us,
+                move |batch| extract_ingest_events(batch, &ingest_asset_id, start_us, end_us),
+            ),
         )?;
 
         let mut book_events = book_events;
@@ -1031,20 +1350,44 @@ impl EventReader for ParquetReader {
         asset_id: &AssetId,
         at_us: u64,
     ) -> Result<Option<BookCheckpoint>, ReplayError> {
-        let mut window = RECENT_CHECKPOINT_LOOKBACK_US;
-        loop {
-            let start_us = at_us.saturating_sub(window);
-            if let Some(checkpoint) = self
-                .latest_checkpoint_in_range(asset_id, start_us, at_us)
-                .await?
-            {
-                return Ok(Some(checkpoint));
+        Ok(self
+            .read_latest_checkpoints(std::slice::from_ref(asset_id), at_us)
+            .await?
+            .pop()
+            .flatten())
+    }
+
+    async fn read_latest_checkpoints(
+        &self,
+        asset_ids: &[AssetId],
+        at_us: u64,
+    ) -> Result<Vec<Option<BookCheckpoint>>, ReplayError> {
+        // Checkpoints are intentionally not eligible for manifest recovery
+        // because their exchange-time partition cannot be proven complete from
+        // receive-time WAL endpoints. Inventory the dataset once for the entire
+        // startup asset set instead of recursively listing all objects once per
+        // asset.
+        let inventories = self
+            .checkpoint_files_by_asset_and_hour(asset_ids, at_us)
+            .await?;
+        let mut latest = Vec::with_capacity(asset_ids.len());
+        for (asset_id, by_hour) in asset_ids.iter().zip(inventories) {
+            let mut found = None;
+            for (_, files) in by_hour.into_iter().rev() {
+                let mut checkpoints = self
+                    .read_parquet_files(files, |batch| {
+                        extract_checkpoints(batch, asset_id, 0, at_us)
+                    })
+                    .await?;
+                checkpoints.sort_by_key(|checkpoint| checkpoint.checkpoint_timestamp_us);
+                if let Some(checkpoint) = checkpoints.pop() {
+                    found = Some(checkpoint);
+                    break;
+                }
             }
-            if start_us == 0 {
-                return Ok(None);
-            }
-            window = window.saturating_mul(2);
+            latest.push(found);
         }
+        Ok(latest)
     }
 
     async fn read_validations(

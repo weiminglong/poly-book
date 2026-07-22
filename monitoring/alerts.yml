@@ -64,8 +64,9 @@ groups:
           summary: "Storage sink {{ $labels.sink }} flush failing on {{ $labels.instance }}"
           description: >-
             A Parquet/ClickHouse flush failed (retried with backoff). Sustained
-            failures mean storage is falling behind the WAL; data is still durable
-            in the WAL and can be rebuilt with `reconcile`.
+            failures mean storage is falling behind the WAL. Complete retained-WAL
+            hours may be republished to Parquet offline with `reconcile`; ClickHouse
+            and partial/unprovable Parquet intervals require their own repair path.
           runbook: monitoring/RUNBOOK.md#sinkflushfailing
 
       - alert: WalDecodeError
@@ -79,7 +80,8 @@ groups:
             A CRC-valid WAL frame could not be decoded by the codec and was skipped
             during live tailing — the serve read model has diverged from the WAL for
             that record. This should be near-impossible (a codec version mismatch or
-            CRC collision). Investigate the WAL/codec version and reconcile.
+            CRC collision). Investigate the WAL/codec version; strict `reconcile`
+            refuses this frame and is not a repair for this alert.
           runbook: monitoring/RUNBOOK.md#waldecodeerror
 
       - alert: FeedSilent
