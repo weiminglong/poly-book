@@ -72,7 +72,7 @@ serde_json = "1"
 bincode = "1"
 
 # Storage
-arrow = { version = "58", features = ["prettyprint"] }
+arrow = { version = "59", features = ["prettyprint"] }
 parquet = { version = "58", features = ["async", "object_store", "zstd"] }
 object_store = { version = "0.13", features = ["aws"] }
 clickhouse = { version = "0.15", features = ["inserter"] }
