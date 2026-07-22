@@ -49,6 +49,26 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: ./.github/actions/setup-protobuf
+      - name: Start MinIO and create the integration bucket
+        run: |
+          docker run --detach --name pb-minio \
+            --publish 9100:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9100/minio/health/ready >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs pb-minio
+              exit 1
+            fi
+            sleep 1
+          done
+          docker run --rm --network host --entrypoint /bin/sh \
+            minio/mc:RELEASE.2025-07-21T05-28-08Z \
+            -c 'mc alias set local http://127.0.0.1:9100 minioadmin minioadmin && mc mb --ignore-existing local/poly-book-test'
       # The #[ignore]d cases: ClickHouse roundtrips, Parquet-vs-ClickHouse
       # cross-backend equivalence, and the MinIO S3 roundtrip — the strongest
       # consistency evidence in the suite, previously never enforced in CI.
@@ -56,6 +76,8 @@ jobs:
       # Single-threaded: the containers are memory-hungry and the tests share
       # fixed host ports.
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
+        env:
+          PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
 
   clippy:
     name: Clippy
@@ -102,18 +124,24 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # quick-xml DoS advisories with no upgrade path yet (object_store
-          # pins quick-xml < 0.41). Rationale and removal condition are
-          # documented on the matching ignore entries in deny.toml.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          toolchain: stable
+      # Keep cargo-audit's own dependency graph locked. Installing without
+      # --locked can resolve transitive crates whose MSRV exceeds the stable
+      # compiler selected above, failing before the repository is audited.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit Rust dependencies
+        # quick-xml DoS advisories with no upgrade path yet (object_store pins
+        # quick-xml < 0.41). Rationale and removal condition are documented on
+        # the matching ignore entries in deny.toml.
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195
 
   monitoring:
     name: Monitoring Rules

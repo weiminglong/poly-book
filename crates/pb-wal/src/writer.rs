@@ -12,18 +12,24 @@ pub struct WalWriter {
     /// Holds the exclusive advisory lock on the WAL directory for this writer's
     /// lifetime. Dropping it (or process exit) releases the lock — flock is
     /// crash-safe, leaving no stale lock to clear.
+    _lock: WalMaintenanceGuard,
+}
+
+/// Exclusive WAL lease used by offline maintenance commands.
+///
+/// Holding this guard proves that no live `WalWriter` is running against the
+/// directory. The advisory lock is released automatically on drop or process
+/// exit.
+#[derive(Debug)]
+pub struct WalMaintenanceGuard {
     _lock: std::fs::File,
 }
 
-impl WalWriter {
-    /// Open or create a WAL at the configured path.
-    pub fn open(config: WalConfig) -> Result<Self, WalError> {
+impl WalMaintenanceGuard {
+    pub fn acquire(config: &WalConfig) -> Result<Self, WalError> {
         std::fs::create_dir_all(&config.base_path)
             .map_err(|e| WalError::io(&config.base_path, e))?;
 
-        // Acquire an exclusive, non-blocking advisory lock so a second writer on
-        // the same directory fails fast instead of interleaving appends and
-        // corrupting the WAL.
         let lock_path = config.base_path.join(".wal.lock");
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -35,21 +41,22 @@ impl WalWriter {
             &lock_file,
             rustix::fs::FlockOperation::NonBlockingLockExclusive,
         ) {
-            Ok(()) => {}
-            // EWOULDBLOCK (== EAGAIN on this platform) means another writer holds
-            // the exclusive lock — fail fast instead of interleaving appends.
-            Err(rustix::io::Errno::WOULDBLOCK) => {
-                return Err(WalError::WriterLocked {
-                    path: config.base_path.clone(),
-                });
-            }
-            Err(e) => {
-                return Err(WalError::io(
-                    &lock_path,
-                    std::io::Error::from_raw_os_error(e.raw_os_error()),
-                ));
-            }
+            Ok(()) => Ok(Self { _lock: lock_file }),
+            Err(rustix::io::Errno::WOULDBLOCK) => Err(WalError::WriterLocked {
+                path: config.base_path.clone(),
+            }),
+            Err(e) => Err(WalError::io(
+                &lock_path,
+                std::io::Error::from_raw_os_error(e.raw_os_error()),
+            )),
         }
+    }
+}
+
+impl WalWriter {
+    /// Open or create a WAL at the configured path.
+    pub fn open(config: WalConfig) -> Result<Self, WalError> {
+        let lock = WalMaintenanceGuard::acquire(&config)?;
 
         let ids = segment::list_segment_ids(&config.base_path)?;
 
@@ -69,7 +76,7 @@ impl WalWriter {
             config,
             active,
             next_segment_id: next_id,
-            _lock: lock_file,
+            _lock: lock,
         })
     }
 

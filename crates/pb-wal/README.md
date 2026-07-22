@@ -10,6 +10,7 @@ between the `ingest` and `serve` processes.
 | `WalWriter` | Appends records to the active segment, rotates on size threshold, seals completed segments. |
 | `WalReader` | Tails across segments with independent consumer position tracking. Resumes from committed offset on restart. |
 | `WalPosition` | Typed `(segment_id, offset)` handoff point for resuming a reader without consulting a consumer position file. |
+| `WalMaintenanceGuard` | Exclusive writer lease for offline maintenance; refuses acquisition while ingest owns the WAL. |
 | `WalConfig` | Segment size, base directory, max retained segments, max consumer lag bytes, and live reader position commit interval. |
 | `WalError` | Error type for WAL operations (IO, CRC, codec). |
 | `codec::encode` / `codec::decode` | Version-prefixed bincode serialization for `PersistedRecord`. |
@@ -105,6 +106,11 @@ and feeds decoded records into the live read model.
 - `WalReader::open_at()` allows a runtime to hand off directly from hydration to
   live tailing without replaying WAL records that were already applied during
   startup.
+- `WalReader::open_from_start()` plus `next_strict()` provides a fail-closed
+  recovery scan over every retained segment. Unlike the live reader, it returns
+  CRC, truncation, and internal segment-gap errors instead of skipping damage.
+- `WalMaintenanceGuard` reuses the writer's advisory lease so destructive
+  maintenance cannot race a live ingest writer.
 - **Atomic position writes**: position files are written to a temp file first, then
   fsynced and renamed into place, and the parent directory is fsynced afterward,
   preventing partial reads or lost renames on crash.

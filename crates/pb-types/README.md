@@ -15,6 +15,7 @@ the system.
 | `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
 | `PersistedRecord` | Enum dispatching to the six event datasets below. |
+| `ParquetRecoveryManifest` | Versioned, atomically published object-store view for one recovered `(dataset, asset, hour)` partition. |
 | `time::normalize_to_micros` / `parse_to_micros` | The single timestamp-unit converter: classifies a raw value as s/ms/µs/ns by magnitude and returns microseconds (0 preserved as the unknown sentinel). Used by both the dispatcher and REST backfill so they never diverge. |
 
 ## Persisted Record Model
@@ -75,8 +76,15 @@ pb-types ◄── pb-feed    (wire deserialization)
   `{asset}_{first_ts}_{content_hash}_{len}.parquet` suffix from the right, so
   callers compare the exact asset component even when the encoded asset key
   contains underscores.
+- `ParquetRecoveryManifest` is shared by `pb-store` and `pb-replay` so a
+  recovered object becomes authoritative through one versioned manifest format.
+  `_recovery_objects` holds the immutable staging generation used during the
+  first publication phase; `_recovery_manifests` holds the authoritative view.
+  A clean promotion moves authority to the corresponding object in the normal
+  dataset/hour tree, while interrupted runs may temporarily keep the staged
+  object active.
 - `proptest` suites verify fixed-point roundtrip, ordering, and serde consistency.
-- 150 tests covering boundary conditions, serde round-trips, proptest invariants,
+- 173 tests covering boundary conditions, serde round-trips, proptest invariants,
   and all persisted record types.
 
 ## Docs to Update After Changes

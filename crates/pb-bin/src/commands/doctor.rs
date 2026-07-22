@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use config::Config;
+use object_store::ObjectStoreExt;
 
 use crate::config_validation;
 
@@ -16,7 +17,7 @@ pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
     let mut checks: Vec<Check> = Vec::new();
 
     checks.push(check_config_keys(&settings));
-    checks.push(check_parquet_path(&settings));
+    checks.push(check_parquet_path(&settings).await);
     checks.push(check_wal_dir(&settings));
 
     if skip_network {
@@ -143,24 +144,70 @@ fn check_config_keys(settings: &Config) -> Check {
     }
 }
 
-fn check_parquet_path(settings: &Config) -> Check {
+async fn check_parquet_path(settings: &Config) -> Check {
     let base = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());
-    let path = Path::new(&base);
-    if !path.exists() {
-        return Check::warn(
-            "parquet",
-            format!("{base} does not exist yet (created on first run)"),
-        );
-    }
-    let probe = path.join(".doctor-write-probe");
-    match std::fs::write(&probe, b"ok") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            Check::pass("parquet", format!("{base} writable"))
+    let (store, prefix) = match super::pipeline::build_object_store(&base) {
+        Ok(result) => result,
+        Err(error) => {
+            return Check::fail("parquet", format!("{base} configuration failed: {error}"));
         }
-        Err(e) => Check::fail("parquet", format!("{base} not writable: {e}")),
+    };
+    let nonce = format!(
+        ".doctor-write-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let encoded = if prefix.is_empty() {
+        nonce
+    } else {
+        format!("{prefix}/{nonce}")
+    };
+    let probe = match object_store::path::Path::parse(&encoded) {
+        Ok(path) => path,
+        Err(error) => {
+            return Check::fail(
+                "parquet",
+                format!("{base} has invalid object prefix: {error}"),
+            );
+        }
+    };
+
+    let probe_result = tokio::time::timeout(Duration::from_secs(10), async {
+        store
+            .put(
+                &probe,
+                object_store::PutPayload::from_static(b"poly-book-doctor"),
+            )
+            .await?;
+        let bytes = store.get(&probe).await?.bytes().await?;
+        if bytes.as_ref() != b"poly-book-doctor" {
+            return Err(object_store::Error::Generic {
+                store: "doctor",
+                source: Box::new(std::io::Error::other(
+                    "storage probe returned different bytes",
+                )),
+            });
+        }
+        store.delete(&probe).await?;
+        Ok::<(), object_store::Error>(())
+    })
+    .await;
+
+    match probe_result {
+        Ok(Ok(())) => Check::pass("parquet", format!("{base} write/read/delete probe passed")),
+        Ok(Err(error)) => Check::fail(
+            "parquet",
+            format!(
+                "{base} probe failed: {}",
+                super::pipeline::object_store_error_summary(&error)
+            ),
+        ),
+        Err(_) => Check::fail("parquet", format!("{base} probe timed out after 10s")),
     }
 }
 

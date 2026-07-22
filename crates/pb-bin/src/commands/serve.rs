@@ -60,18 +60,20 @@ pub async fn run(
         .await;
 
     // Hydrate from checkpoints + WAL.
-    let reader = pb_replay::ParquetReader::new(&parquet_base_path);
+    let (parquet_store, parquet_prefix) = pipeline::build_object_store(&parquet_base_path)?;
+    let reader = pb_replay::ParquetReader::from_store(parquet_store, parquet_prefix);
     let hydration_result =
         pb_api::hydration::hydrate(&live, Some(&reader), Some(&wal_config), &token_ids).await;
     tracing::info!(
         checkpoints = hydration_result.checkpoints_loaded,
         wal_records = hydration_result.wal_records_replayed,
+        recovery_succeeded = hydration_result.recovery_succeeded,
         "serve runtime hydration complete"
     );
 
     // Health tracking atomics shared between WAL tailer and API.
     let wal_lag_bytes = Arc::new(AtomicU64::new(0));
-    let needs_resync = Arc::new(AtomicBool::new(false));
+    let needs_resync = Arc::new(AtomicBool::new(!hydration_result.recovery_succeeded));
 
     let max_consumer_lag = wal_config.max_consumer_lag_bytes;
 
@@ -80,7 +82,7 @@ pub async fn run(
         wal_config,
         live.clone(),
         token_ids.clone(),
-        parquet_base_path.clone(),
+        reader.clone(),
         hydration_result.wal_end_position,
         shutdown.child_token(),
         wal_lag_bytes.clone(),
@@ -90,8 +92,11 @@ pub async fn run(
 
     // Build and start HTTP/WS server.
     let (replay_service, integrity_service, execution_service) =
-        pipeline::build_services(&settings).await;
-    let query_service = pipeline::build_query_service(&settings).await;
+        pipeline::build_services(&settings).await?;
+    let effective_backend_is_clickhouse =
+        matches!(&replay_service, pb_service::AnyReplayService::ClickHouse(_));
+    let query_service =
+        pipeline::build_query_service(&settings, effective_backend_is_clickhouse).await;
     let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
     let auth_token = pipeline::api_auth_token_from_settings(&settings);
 
@@ -192,7 +197,7 @@ fn spawn_wal_tailer(
     config: pb_wal::WalConfig,
     live: pb_api::LiveReadModel,
     token_ids: Vec<String>,
-    parquet_base_path: String,
+    parquet_reader: pb_replay::ParquetReader,
     start_position: Option<pb_wal::WalPosition>,
     shutdown: CancellationToken,
     lag_bytes_atomic: Arc<AtomicU64>,
@@ -265,7 +270,6 @@ fn spawn_wal_tailer(
                 TailOutcome::Resync => {
                     needs_resync_atomic.store(true, Ordering::Relaxed);
                     tracing::warn!("WAL segment gap detected; re-hydrating live read model");
-                    let parquet_reader = pb_replay::ParquetReader::new(&parquet_base_path);
                     let hydration = pb_api::hydration::hydrate(
                         &live,
                         Some(&parquet_reader),
@@ -489,7 +493,7 @@ mod tests {
             config,
             live,
             vec!["tok1".to_string()],
-            dir.path().to_string_lossy().to_string(),
+            pb_replay::ParquetReader::new(dir.path()),
             None,
             shutdown.clone(),
             Arc::new(AtomicU64::new(0)),

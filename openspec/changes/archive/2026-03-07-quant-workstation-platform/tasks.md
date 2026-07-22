@@ -119,6 +119,9 @@ Phase 5.3 (deployment packaging) ── independent, last
   serving-oriented backend such as ClickHouse (ClickHouse service implementations with Parquet fallback)
 - [x] Keep Parquet as the audit and replay-truth source for validation,
   reproducibility, and recovery (maintained — Parquet remains primary, ClickHouse is interactive overlay)
+- [x] Make Parquet reads object-store-native and WAL recovery fail closed on
+  partial coverage/corruption or independently timestamped datasets, with
+  manifest-based crash-consistent publication
 - [x] Define readiness, resync, and backpressure behavior for stateless serving
   replicas (WAL gap detection, lag tracking, backpressure pruning, /api/v1/health endpoint)
 - [x] Document the clean-slate serving topology as a future replacement for the

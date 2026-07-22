@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use object_store::local::LocalFileSystem;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
+use object_store::PutPayload;
 use parquet::basic::Compression;
 use parquet::file::reader::FileReader;
 use tempfile::TempDir;
@@ -21,7 +22,7 @@ use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence, TradeFideli
 
 use crate::schema::*;
 use crate::writer::ParquetRecordWriter;
-use crate::ParquetSink;
+use crate::{ParquetSink, StoreError};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -547,15 +548,24 @@ async fn reconcile_replaces_hour_partitions_idempotently() {
     let store = local_store(&dir);
     let writer = ParquetRecordWriter::new(store.clone(), "data");
 
-    async fn count_files(store: &Arc<dyn ObjectStore>) -> usize {
+    async fn count_parquet_files(store: &Arc<dyn ObjectStore>) -> usize {
         store
             .list(None)
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .filter_map(|r| r.ok())
+            .filter(|meta| {
+                meta.location
+                    .filename()
+                    .is_some_and(|name| name.ends_with(".parquet"))
+            })
             .count()
     }
+
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let coverage =
+        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
 
     // Two separate live flushes for the same (asset, hour) produce two files
     // that, read together, would double-count the window (the double-count hazard).
@@ -563,23 +573,165 @@ async fn reconcile_replaces_hour_partitions_idempotently() {
     let r2 = PersistedRecord::Book(make_book_event(FIXED_TS_US + 1_000_000));
     writer.write_record(r1.clone()).await.unwrap();
     writer.write_record(r2.clone()).await.unwrap();
-    assert_eq!(count_files(&store).await, 2);
+    assert_eq!(count_parquet_files(&store).await, 2);
 
     // Reconciling from the authoritative WAL stream rebuilds the hour as one
     // complete file, replacing the fragmented live-sink files.
-    writer
-        .write_batch_replacing(&[r1.clone(), r2.clone()])
+    let report = writer
+        .write_batch_replacing(&[r1.clone(), r2.clone()], coverage)
         .await
         .unwrap();
+    assert_eq!(report.cleanup_failures, 0);
     assert_eq!(
-        count_files(&store).await,
+        count_parquet_files(&store).await,
         1,
         "reconcile should collapse the hour to a single authoritative file"
     );
 
     // Re-running is idempotent: the same single file, no duplication.
-    writer.write_batch_replacing(&[r1, r2]).await.unwrap();
-    assert_eq!(count_files(&store).await, 1, "reconcile must be idempotent");
+    writer
+        .write_batch_replacing(&[r1, r2], coverage)
+        .await
+        .unwrap();
+    assert_eq!(
+        count_parquet_files(&store).await,
+        1,
+        "reconcile must be idempotent"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_collects_an_abandoned_pre_manifest_stage() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+    let r1 = PersistedRecord::Book(make_book_event(FIXED_TS_US));
+    let r2 = PersistedRecord::Book(make_book_event(FIXED_TS_US + 1_000_000));
+    writer.write_record(r1.clone()).await.unwrap();
+
+    let normal = store
+        .list(Some(&object_store::path::Path::from("data/book_events")))
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    let bytes = store
+        .get(&normal.location)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let hour_key = crate::writer::partition_hour_key(FIXED_TS_US);
+    let abandoned = object_store::path::Path::parse(format!(
+        "data/{}/book_events/{hour_key}/{}",
+        pb_types::storage::PARQUET_RECOVERY_OBJECT_PREFIX,
+        normal.location.filename().unwrap()
+    ))
+    .unwrap();
+    store
+        .put(&abandoned, PutPayload::from(bytes))
+        .await
+        .unwrap();
+
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let coverage =
+        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
+    writer
+        .write_batch_replacing(&[r1, r2], coverage)
+        .await
+        .unwrap();
+
+    let hidden = store
+        .list(Some(&object_store::path::Path::from(format!(
+            "data/{}",
+            pb_types::storage::PARQUET_RECOVERY_OBJECT_PREFIX
+        ))))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        hidden.is_empty(),
+        "abandoned recovery stages must be collected"
+    );
+}
+
+#[test]
+fn recovery_coverage_requires_a_record_before_the_hour_boundary() {
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let ends_after_hour = hour_start + 3_600_000_000;
+
+    let boundary_only = crate::writer::RecoveryCoverage::new(hour_start, ends_after_hour).unwrap();
+    assert!(!boundary_only.contains_complete_hour(hour_start));
+
+    let proven = crate::writer::RecoveryCoverage::new(hour_start - 1, ends_after_hour).unwrap();
+    assert!(proven.contains_complete_hour(hour_start));
+}
+
+#[tokio::test]
+async fn reconcile_refuses_partial_hour_without_deleting_existing_data() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+    let record = PersistedRecord::Book(make_book_event(FIXED_TS_US));
+    writer.write_record(record.clone()).await.unwrap();
+
+    let coverage =
+        crate::writer::RecoveryCoverage::new(FIXED_TS_US - 1_000_000, FIXED_TS_US + 1_000_000)
+            .unwrap();
+    let error = writer
+        .write_batch_replacing(&[record], coverage)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::UnsafeRecovery(_)));
+
+    let parquet_files = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|meta| {
+            meta.location
+                .filename()
+                .is_some_and(|name| name.ends_with(".parquet"))
+        })
+        .count();
+    assert_eq!(parquet_files, 1, "existing parquet must remain untouched");
+}
+
+#[tokio::test]
+async fn reconcile_refuses_dataset_without_receive_time_partition_proof() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+    let record = PersistedRecord::Execution(make_execution_event(FIXED_TS_US));
+    writer.write_record(record.clone()).await.unwrap();
+
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let coverage =
+        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
+    let error = writer
+        .write_batch_replacing(&[record], coverage)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::UnsafeRecovery(_)));
+
+    let parquet_files = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|meta| {
+            meta.location
+                .filename()
+                .is_some_and(|name| name.ends_with(".parquet"))
+        })
+        .count();
+    assert_eq!(
+        parquet_files, 1,
+        "unsupported dataset must remain untouched"
+    );
 }
 
 #[tokio::test]
@@ -597,7 +749,14 @@ async fn reconcile_delete_matches_asset_component_exactly() {
     writer.write_record(foo.clone()).await.unwrap();
     writer.write_record(foo_bar).await.unwrap();
 
-    writer.write_batch_replacing(&[foo]).await.unwrap();
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let coverage =
+        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
+    let report = writer
+        .write_batch_replacing(&[foo], coverage)
+        .await
+        .unwrap();
+    assert_eq!(report.cleanup_failures, 0);
 
     let file_names: Vec<String> = store
         .list(None)
@@ -605,6 +764,11 @@ async fn reconcile_delete_matches_asset_component_exactly() {
         .await
         .into_iter()
         .filter_map(|r| r.ok())
+        .filter(|meta| {
+            meta.location
+                .filename()
+                .is_some_and(|name| name.ends_with(".parquet"))
+        })
         .map(|meta| meta.location.filename().unwrap_or_default().to_string())
         .collect();
 
@@ -619,6 +783,71 @@ async fn reconcile_delete_matches_asset_component_exactly() {
     assert!(file_names
         .iter()
         .any(|name| pb_types::newtype::storage_file_matches_asset(name, "foo_bar")));
+}
+
+#[tokio::test]
+async fn reconcile_rejects_manifest_that_widens_cleanup_scope() {
+    let dir = TempDir::new().unwrap();
+    let store = local_store(&dir);
+    let writer = ParquetRecordWriter::new(store.clone(), "data");
+
+    let foo = PersistedRecord::Book(make_book_event_for_asset(AssetId::new("foo"), FIXED_TS_US));
+    let foo_bar = PersistedRecord::Book(make_book_event_for_asset(
+        AssetId::new("foo_bar"),
+        FIXED_TS_US,
+    ));
+    writer.write_record(foo.clone()).await.unwrap();
+    writer.write_record(foo_bar).await.unwrap();
+
+    let foo_bar_path = store
+        .list(None)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|meta| meta.location)
+        .find(|path| {
+            path.filename()
+                .is_some_and(|name| pb_types::newtype::storage_file_matches_asset(name, "foo_bar"))
+        })
+        .unwrap();
+    let hour_key = crate::writer::partition_hour_key(FIXED_TS_US);
+    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
+    let manifest = pb_types::ParquetRecoveryManifest {
+        version: pb_types::storage::PARQUET_RECOVERY_MANIFEST_VERSION,
+        dataset: "book_events".to_string(),
+        asset_key: "foo".to_string(),
+        hour_key: hour_key.clone(),
+        covered_start_us: hour_start,
+        covered_end_us: hour_start + 3_600_000_000,
+        // This is valid JSON metadata but deliberately points at a different
+        // asset's normal object, which must never enter reconcile's cleanup set.
+        active_objects: vec![foo_bar_path.to_string()],
+        superseded_objects: Vec::new(),
+    };
+    let manifest_path = object_store::path::Path::from(format!(
+        "data/{}/book_events/{hour_key}/foo.json",
+        pb_types::storage::PARQUET_RECOVERY_MANIFEST_PREFIX
+    ));
+    store
+        .put(
+            &manifest_path,
+            PutPayload::from(serde_json::to_vec(&manifest).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let coverage =
+        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
+    let error = writer
+        .write_batch_replacing(&[foo], coverage)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::UnsafeRecovery(_)));
+    assert!(
+        store.head(&foo_bar_path).await.is_ok(),
+        "out-of-scope object must survive a corrupt manifest"
+    );
 }
 
 #[tokio::test]

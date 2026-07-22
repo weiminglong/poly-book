@@ -199,8 +199,13 @@ happens when a consumer falls behind is explicit:
 - **Storage sinks may lag.** Sinks consume from their own bounded fan-out
   channels and flush with bounded-retry. A sink falling behind does not block
   ingest indefinitely; sustained failure surfaces as `pb_sink_flush_failures_total`
-  (alerted) and the WAL remains the source of truth — a lost storage window is
-  rebuildable with `reconcile`.
+  (alerted). A lost Parquet window is recoverable only for a complete, strictly
+  decoded WAL hour: `reconcile` writes a replacement object, atomically publishes
+  its manifest, and then cleans old objects. This applies only to book, trade,
+  and ingest datasets partitioned by receive time; independently timestamped
+  datasets and partial boundary hours fail closed.
+  Validation is a streaming first pass; publication replays at most one complete
+  hour in memory at a time.
 - **Channel depth is observable.** The ingest event-channel depth is exported as
   `pb_channel_depth{channel="ingest_events"}`; rising depth is the leading
   indicator of a downstream stall, before latency (`pb_recv_to_durable_us`)

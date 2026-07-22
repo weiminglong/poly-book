@@ -75,6 +75,12 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   delta, and checkpoint apply it runs `L2Book::check_integrity`; a crossed/locked
   book increments `pb_crossed_books_total` and surfaces a `crossed_book`
   continuity warning instead of being served silently.
+- Separated `serve` hydration inventories Parquet checkpoints once for the full
+  active-asset set and replays the retained WAL with a distinct checkpoint
+  offset per asset. An asset without a checkpoint forces replay from the
+  earliest retained WAL record; a legacy checkpoint without a WAL cut is
+  ignored when WAL replay is configured. `/health/ready` stays at 503 when checkpoint
+  inventory, WAL open/read, or record decoding fails.
 - The projector keeps a cached published projection and only rebuilds
   `AssetReadView` snapshots for assets touched by a record, instead of
   re-materializing every tracked book on each update.
@@ -108,6 +114,6 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 
 ## Tests
 
-68 tests covering health states, error format consistency, depth and time parameter
+83 tests covering health states, error format consistency, depth and time parameter
 validation, execution limits, `ServiceError` to `ApiError` mapping,
 `PerAssetBroadcast` unit tests, and `LiveReadModel` tests.

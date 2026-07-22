@@ -5,9 +5,9 @@
 //! resolved with `object_store::parse_url_opts(url, std::env::vars())` (the same
 //! call `pb_bin::commands::pipeline::build_object_store` makes), the production
 //! `ParquetSink` writes Parquet objects into the bucket, a *fresh* store handle
-//! (simulating a process restart) still sees them, and the bytes round-trip back
-//! to the original records. It also asserts no local `s3:`-named directory is
-//! created.
+//! (simulating a process restart) still sees them, and the production
+//! `ParquetReader` reads the original records through object-store range reads.
+//! It also asserts no local `s3:`-named directory is created.
 //!
 //! Run with a MinIO/LocalStack endpoint:
 //!   PB_TEST_S3_ENDPOINT=http://127.0.0.1:9100 \
@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::ObjectStore;
+use pb_replay::{EventReader, ParquetReader};
 use pb_store::ParquetSink;
 use pb_types::event::{
     BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side, TradeEvent,
@@ -78,7 +79,7 @@ fn build_s3_store(base_path: &str) -> (Arc<dyn ObjectStore>, String) {
 }
 
 async fn list_parquet_objects(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<String> {
-    let prefix_path = object_store::path::Path::from(prefix);
+    let prefix_path = object_store::path::Path::parse(prefix).unwrap();
     let mut stream = store.list(Some(&prefix_path));
     let mut out = Vec::new();
     while let Some(meta) = stream.next().await {
@@ -94,10 +95,8 @@ async fn list_parquet_objects(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec
 #[tokio::test]
 #[ignore]
 async fn s3_base_path_persists_parquet_and_survives_restart() {
-    let Ok(endpoint) = std::env::var("PB_TEST_S3_ENDPOINT") else {
-        eprintln!("PB_TEST_S3_ENDPOINT not set; skipping S3 persistence test");
-        return;
-    };
+    let endpoint = std::env::var("PB_TEST_S3_ENDPOINT")
+        .expect("PB_TEST_S3_ENDPOINT is required for this explicitly ignored S3 integration test");
     let bucket =
         std::env::var("PB_TEST_S3_BUCKET").unwrap_or_else(|_| "poly-book-test".to_string());
     let access =
@@ -167,33 +166,12 @@ async fn s3_base_path_persists_parquet_and_survives_restart() {
         "objects must persist across a fresh store handle (restart): before={written:?} after={after_restart:?}"
     );
 
-    // --- Bytes round-trip: download a book_events object and parse it back ---
-    let book_obj = after_restart
-        .iter()
-        .find(|p| p.contains("book_events"))
-        .expect("a book_events object");
-    let bytes = store2
-        .get(&object_store::path::Path::from(book_obj.as_str()))
-        .await
-        .unwrap()
-        .bytes()
+    // --- Application round-trip: the production reader must read S3 directly ---
+    let reader = ParquetReader::from_store(store2, prefix2);
+    let window = reader
+        .read_market_data(&AssetId::new("token-s3"), base_ts - 1, base_ts + 2_000_000)
         .await
         .unwrap();
-    assert_eq!(
-        &bytes[..4],
-        b"PAR1",
-        "downloaded object must be a Parquet file"
-    );
-
-    let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-    let reader = builder.build().unwrap();
-    let mut rows = 0usize;
-    for batch in reader {
-        rows += batch.unwrap().num_rows();
-    }
-    assert_eq!(
-        rows, 2,
-        "the two book events must round-trip back out of S3-persisted Parquet"
-    );
+    assert_eq!(window.book_events.len(), 2);
+    assert_eq!(window.trade_events.len(), 1);
 }

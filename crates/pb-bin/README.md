@@ -17,7 +17,7 @@ to the appropriate subsystem.
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
 | `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
-| `reconcile` | Offline recovery: rebuild Parquet partitions from the durable WAL after a crash lost a buffered window. Idempotent (per-partition replace). |
+| `reconcile` | Offline recovery: strictly rebuild only complete Parquet hours proven by the retained WAL; boundary hours and corruption fail closed. |
 
 ## Config Layering
 
@@ -62,11 +62,14 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   continuing with a dead component or exiting 0. In `auto_ingest` the rotating
   per-market feed generations are deliberately *not* supervised this way (their
   cycling is the expected steady state and is managed via `Generation`).
-- **WAL→storage reconciliation**: `reconcile` reads the durable WAL and rebuilds
-  the Parquet partitions it covers via `ParquetRecordWriter::write_batch_replacing`
-  (per-`(dataset, asset, hour)` delete-then-write), so a storage window lost when
-  a crash dropped the in-memory Parquet buffer is recoverable from the WAL.
-  Run it offline (ingest stopped); it is idempotent.
+- **WAL→storage reconciliation**: with all Parquet-writing tasks stopped,
+  `reconcile` acquires the exclusive WAL lease,
+  starts at the earliest retained segment, and aborts on CRC, segment, or decode
+  damage. It skips boundary hours and non-receive-time-partitioned datasets, then
+  publishes complete book/trade/ingest hours through crash-consistent manifests
+  before cleaning old objects. Running while ingest is active is refused;
+  standalone append/backfill writers are an operator-enforced stop condition;
+  re-running is idempotent.
 
 ## Docs to Update After Changes
 

@@ -7,8 +7,11 @@
 //!    all subsequent records through the projector.
 //! 4. Mark the read model as hydrated (ready to serve).
 //!
-//! Fallback: if no checkpoints exist, tail WAL from earliest offset.
-//! If no WAL exists, fall back to feed-only mode (mark hydrated immediately).
+//! Fallback: if no checkpoints exist, tail WAL from earliest offset. A
+//! configured but missing/unreadable WAL keeps the standalone serve runtime
+//! unready instead of presenting an empty state as healthy.
+
+use std::collections::HashMap;
 
 use pb_types::AssetId;
 use tracing::{info, warn};
@@ -26,13 +29,15 @@ pub struct HydrationResult {
     pub wal_resume_offset: Option<u64>,
     /// The exact WAL position after hydration replay finishes.
     pub wal_end_position: Option<pb_wal::WalPosition>,
+    /// Whether every configured recovery source completed without error.
+    pub recovery_succeeded: bool,
 }
 
 /// Hydrate the read model from the latest checkpoint per asset, then replay
 /// any WAL records written after the checkpoint.
 ///
-/// If `wal_path` is `None` or the WAL directory doesn't exist, skips WAL
-/// replay and marks hydrated immediately.
+/// If `wal_config` is `None`, the caller explicitly requested feed-only mode.
+/// A configured but missing WAL is a recovery failure and remains unready.
 ///
 /// If no reader is provided or no checkpoints exist, skips checkpoint loading.
 pub async fn hydrate<R: pb_replay::EventReader>(
@@ -46,48 +51,75 @@ pub async fn hydrate<R: pb_replay::EventReader>(
         wal_records_replayed: 0,
         wal_resume_offset: None,
         wal_end_position: None,
+        recovery_succeeded: true,
     };
 
+    if wal_config.is_some() {
+        model.mark_unhydrated().await;
+    }
+
     // Phase 1: Load latest checkpoint per asset.
-    let mut min_wal_offset: Option<u64> = None;
+    let mut checkpoint_offsets = HashMap::<String, u64>::new();
 
     if let Some(reader) = reader {
         let now_us = now_us();
-        for asset_id_str in active_assets {
-            let asset_id = AssetId::new(asset_id_str.as_str());
-            match reader.read_latest_checkpoint(&asset_id, now_us).await {
-                Ok(Some(checkpoint)) => {
-                    if let Some(offset) = checkpoint.wal_offset {
-                        min_wal_offset = Some(match min_wal_offset {
-                            Some(current) => current.min(offset),
-                            None => offset,
-                        });
+        let asset_ids = active_assets
+            .iter()
+            .map(|asset_id| AssetId::new(asset_id.as_str()))
+            .collect::<Vec<_>>();
+        match reader.read_latest_checkpoints(&asset_ids, now_us).await {
+            Ok(checkpoints) => {
+                for (asset_id_str, checkpoint) in active_assets.iter().zip(checkpoints) {
+                    if let Some(checkpoint) = checkpoint {
+                        if wal_config.is_some() && checkpoint.wal_offset.is_none() {
+                            warn!(
+                                asset_id = %asset_id_str,
+                                checkpoint_ts = checkpoint.checkpoint_timestamp_us,
+                                "checkpoint has no WAL cut; ignoring it and replaying retained WAL"
+                            );
+                            continue;
+                        }
+                        if let Some(offset) = checkpoint.wal_offset {
+                            checkpoint_offsets.insert(asset_id_str.clone(), offset);
+                        }
+                        info!(
+                            asset_id = %asset_id_str,
+                            checkpoint_ts = checkpoint.checkpoint_timestamp_us,
+                            wal_offset = ?checkpoint.wal_offset,
+                            "hydrating from checkpoint"
+                        );
+                        model.hydrate_checkpoint(checkpoint).await;
+                        result.checkpoints_loaded += 1;
+                    } else {
+                        info!(
+                            asset_id = %asset_id_str,
+                            "no checkpoint found, starting empty"
+                        );
                     }
-                    info!(
-                        asset_id = %asset_id_str,
-                        checkpoint_ts = checkpoint.checkpoint_timestamp_us,
-                        wal_offset = ?checkpoint.wal_offset,
-                        "hydrating from checkpoint"
-                    );
-                    model.hydrate_checkpoint(checkpoint).await;
-                    result.checkpoints_loaded += 1;
                 }
-                Ok(None) => {
-                    info!(
-                        asset_id = %asset_id_str,
-                        "no checkpoint found, starting empty"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        asset_id = %asset_id_str,
-                        error = %e,
-                        "failed to read checkpoint, starting empty"
-                    );
-                }
+            }
+            Err(e) => {
+                result.recovery_succeeded = false;
+                warn!(
+                    error = %e,
+                    assets = active_assets.len(),
+                    "failed to inventory checkpoints, starting from retained WAL"
+                );
             }
         }
     }
+
+    // A global fast-forward is safe only when every active asset has a durable
+    // checkpoint cut. Otherwise start at the earliest retained WAL record so an
+    // asset without a checkpoint is not silently left empty. Per-asset cutoffs
+    // below still prevent older records from being applied on top of newer
+    // checkpoints whose offsets differ.
+    let wal_resume_offset = (!active_assets.is_empty()
+        && active_assets
+            .iter()
+            .all(|asset_id| checkpoint_offsets.contains_key(asset_id)))
+    .then(|| checkpoint_offsets.values().copied().min())
+    .flatten();
 
     // Phase 2: Replay WAL tail from the minimum checkpoint offset, using the
     // operator-configured WalConfig so the global-offset math matches the
@@ -95,22 +127,27 @@ pub async fn hydrate<R: pb_replay::EventReader>(
     // records under a non-default `wal.segment_size_mb`).
     if let Some(cfg) = wal_config {
         if cfg.base_path.exists() {
-            let (wal_records_replayed, wal_end_position) =
-                replay_wal_tail(model, cfg, min_wal_offset).await;
+            let (wal_records_replayed, wal_end_position, replay_succeeded) =
+                replay_wal_tail(model, cfg, wal_resume_offset, &checkpoint_offsets).await;
             result.wal_records_replayed = wal_records_replayed;
-            result.wal_resume_offset = min_wal_offset;
+            result.wal_resume_offset = wal_resume_offset;
             result.wal_end_position = wal_end_position;
+            result.recovery_succeeded &= replay_succeeded;
         } else {
-            info!(path = %cfg.base_path.display(), "WAL directory not found, skipping WAL replay");
+            result.recovery_succeeded = false;
+            warn!(path = %cfg.base_path.display(), "WAL directory not found; serve remains unready");
         }
     }
 
-    // Phase 3: Mark hydrated.
-    model.mark_hydrated().await;
+    // Phase 3: only trustworthy recovery is ready to serve.
+    if result.recovery_succeeded {
+        model.mark_hydrated().await;
+    }
 
     info!(
         checkpoints = result.checkpoints_loaded,
         wal_records = result.wal_records_replayed,
+        recovery_succeeded = result.recovery_succeeded,
         "hydration complete"
     );
 
@@ -125,14 +162,15 @@ async fn replay_wal_tail(
     model: &LiveReadModel,
     config: &pb_wal::WalConfig,
     from_global_offset: Option<u64>,
-) -> (usize, Option<pb_wal::WalPosition>) {
+    checkpoint_offsets: &HashMap<String, u64>,
+) -> (usize, Option<pb_wal::WalPosition>, bool) {
     let config = config.clone();
 
     let mut reader = match pb_wal::WalReader::open(config.clone(), "serve-hydration") {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "failed to open WAL reader for hydration");
-            return (0, None);
+            return (0, None, false);
         }
     };
 
@@ -142,6 +180,7 @@ async fn replay_wal_tail(
     let skip_to = from_global_offset.unwrap_or(0);
     let mut records_replayed = 0;
     let mut records_skipped = 0;
+    let mut replay_succeeded = true;
 
     loop {
         match reader.next() {
@@ -159,16 +198,26 @@ async fn replay_wal_tail(
                 // Decode the versioned WAL payload.
                 match pb_wal::codec::decode(&payload) {
                     Ok(record) => {
+                        if checkpoint_offsets
+                            .get(record.asset_partition())
+                            .is_some_and(|offset| current_global <= *offset)
+                        {
+                            records_skipped += 1;
+                            continue;
+                        }
                         model.apply_record(record).await;
                         records_replayed += 1;
                     }
                     Err(e) => {
-                        warn!(error = %e, "failed to decode WAL record during hydration, skipping");
+                        replay_succeeded = false;
+                        warn!(error = %e, "failed to decode WAL record during hydration; serve remains unready");
+                        break;
                     }
                 }
             }
             Ok(None) => break, // Caught up to head.
             Err(e) => {
+                replay_succeeded = false;
                 warn!(error = %e, "WAL read error during hydration, stopping replay");
                 break;
             }
@@ -182,7 +231,11 @@ async fn replay_wal_tail(
         );
     }
 
-    (records_replayed, Some(reader.current_position()))
+    (
+        records_replayed,
+        Some(reader.current_position()),
+        replay_succeeded,
+    )
 }
 
 fn now_us() -> u64 {
@@ -217,6 +270,14 @@ mod tests {
                 ingest_ordinal: None,
             },
         })
+    }
+
+    fn snapshot_record_for_asset(asset_id: &str, price: u32, seq: u64) -> PersistedRecord {
+        let mut record = snapshot_record(Side::Bid, price, 10.0, seq);
+        if let PersistedRecord::Book(event) = &mut record {
+            event.asset_id = AssetId::new(asset_id);
+        }
+        record
     }
 
     fn delta_record() -> PersistedRecord {
@@ -274,7 +335,9 @@ mod tests {
         let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
         live.set_active_assets(vec!["tok1".to_string()]).await;
 
-        let (replayed, _pos) = replay_wal_tail(&live, &config, Some(cutoff)).await;
+        let (replayed, _pos, succeeded) =
+            replay_wal_tail(&live, &config, Some(cutoff), &HashMap::new()).await;
+        assert!(succeeded);
         // Only the four records appended after the cutoff are replayed. With the
         // old hardcoded 64 MB segment size, nothing would be skipped and all
         // seven would replay — this asserts the configured size is used.
@@ -308,10 +371,54 @@ mod tests {
         let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
         live.set_active_assets(vec!["tok1".to_string()]).await;
 
-        let (replayed, _pos) = replay_wal_tail(&live, &config, Some(cutoff)).await;
+        let (replayed, _pos, succeeded) =
+            replay_wal_tail(&live, &config, Some(cutoff), &HashMap::new()).await;
+        assert!(succeeded);
         assert_eq!(
             replayed, 1,
             "record at the exact checkpoint offset must be skipped, only the later record replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_wal_tail_honors_each_assets_checkpoint_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().to_path_buf(),
+            segment_size: 4096,
+            ..pb_wal::WalConfig::default()
+        };
+        let mut writer = pb_wal::WalWriter::open(config.clone()).unwrap();
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record_for_asset("tok1", 5000, 0)).unwrap())
+            .unwrap();
+        let tok1_cutoff = writer.global_offset();
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record_for_asset("tok1", 5001, 1)).unwrap())
+            .unwrap();
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record_for_asset("tok2", 6000, 0)).unwrap())
+            .unwrap();
+        let tok2_cutoff = writer.global_offset();
+        writer
+            .append(&pb_wal::codec::encode(&snapshot_record_for_asset("tok2", 6001, 1)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string(), "tok2".to_string()])
+            .await;
+        let checkpoint_offsets = HashMap::from([
+            ("tok1".to_string(), tok1_cutoff),
+            ("tok2".to_string(), tok2_cutoff),
+        ]);
+
+        let (replayed, _position, succeeded) =
+            replay_wal_tail(&live, &config, Some(tok1_cutoff), &checkpoint_offsets).await;
+        assert!(succeeded);
+        assert_eq!(
+            replayed, 2,
+            "tok2 records already represented by its newer checkpoint must not be applied over it"
         );
     }
 
@@ -362,5 +469,23 @@ mod tests {
         let decoded = pb_wal::codec::decode(&payload).unwrap();
         assert_eq!(decoded, delta);
         assert!(reader.next().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_missing_wal_keeps_model_unready() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = pb_wal::WalConfig {
+            base_path: dir.path().join("missing-wal"),
+            ..pb_wal::WalConfig::default()
+        };
+        let live = LiveReadModel::new(crate::dto::FeedMode::FixedTokens);
+        live.set_active_assets(vec!["tok1".to_string()]).await;
+
+        let result =
+            hydrate::<pb_replay::ParquetReader>(&live, None, Some(&config), &["tok1".to_string()])
+                .await;
+
+        assert!(!result.recovery_succeeded);
+        assert!(!live.is_hydrated());
     }
 }

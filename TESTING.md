@@ -15,13 +15,13 @@ commands so they can be re-checked instead of trusted.
 
 | # | Failure mode | Primary defense | Backstop | Runs in CI? |
 |---|--------------|-----------------|----------|-------------|
-| 1 | Numeric precision loss or rounding drift in prices/sizes | 16 proptest properties on `FixedPrice`/`FixedSize` (roundtrip, ordering, serde) | `fuzz_fixed_price` (parse + serde roundtrip assert), 170 unit tests in pb-types | yes (`test`, `fuzz`) |
+| 1 | Numeric precision loss or rounding drift in prices/sizes | 16 proptest properties on `FixedPrice`/`FixedSize` (roundtrip, ordering, serde) | `fuzz_fixed_price` (parse + serde roundtrip assert), 173 unit tests in pb-types | yes (`test`, `fuzz`) |
 | 2 | Order-book invariant violations (mis-sorted levels, wrong size accounting) | 17 proptest properties on `L2Book` | `fuzz_book_delta` (arbitrary snapshots + deltas, ordering asserted after every step), 74 unit tests in pb-book | yes (`test`, `fuzz`) |
 | 3 | Malformed venue input crashing ingest | `fuzz_ws_deser` (arbitrary bytes into the wire parser: must error, never panic) | 67 unit tests in pb-feed (dispatcher normalization, reconnect paths) | yes (`fuzz`, `test`) |
-| 4 | WAL corruption on disk (bit flips, torn writes, zero-filled tails) | `fuzz_wal_corruption` (write, corrupt bytes, assert reader never panics and returns only CRC-valid records) | pb-wal unit tests for truncated-tail recovery, CRC/length corruption, prune safety (80 test attributes) + 2 proptest properties | yes (`fuzz`, `test`) |
+| 4 | WAL corruption on disk (bit flips, torn writes, zero-filled tails) | `fuzz_wal_corruption` (write, corrupt bytes, assert reader never panics and returns only CRC-valid records) | pb-wal unit tests for truncated-tail recovery, CRC/length corruption, prune safety (82 test attributes) + 2 proptest properties | yes (`fuzz`, `test`) |
 | 5 | Silent WAL byte-format drift between builds | Golden-bytes fixture `golden_codec_book_v2_bytes_are_stable` (pb-wal): any codec change that alters encoded bytes fails the build | `fuzz_codec_decode` (arbitrary bytes into `codec::decode`: error, never panic); version byte rejected on mismatch | yes (`test`, `fuzz`) |
-| 6 | Non-deterministic replay (same events, different book) | Determinism fixture `tests/integration/book_determinism.rs` (3 tests) | Golden replay regression `golden_replay_produces_expected_book` (pb-replay), 47 pb-replay test attributes | yes (`test`) |
-| 7 | Parquet and ClickHouse answering the same query differently | 3 cross-backend equivalence tests (replay, integrity, execution) in `tests/integration/cross_backend_service.rs` | 5 ClickHouse round-trip tests, 1 S3/MinIO round-trip; `reconcile` rebuilds Parquet from the WAL when they do diverge | yes (`integration-docker` runs the `#[ignore]`d Docker-backed cases via testcontainers) |
+| 6 | Non-deterministic replay (same events, different book) | Determinism fixture `tests/integration/book_determinism.rs` (3 tests) | Golden replay regression `golden_replay_produces_expected_book` (pb-replay), 51 pb-replay test attributes | yes (`test`) |
+| 7 | Parquet and ClickHouse answering the same query differently | 3 cross-backend equivalence tests (replay, integrity, execution) in `tests/integration/cross_backend_service.rs` | 5 ClickHouse round-trip tests; S3/MinIO write + production-reader round-trip; manifest-switch and partial-hour refusal tests for `reconcile` | yes (`integration-docker` runs the `#[ignore]`d Docker-backed cases) |
 | 8 | SQL escaping the read-only query workbench | `fuzz_query_guard` (guarded SQL must be a fixed point of the guard) | Guard unit tests in pb-service/pb-api; server-side readonly + LIMIT enforcement | yes (`fuzz`, `test`) |
 | 9 | Crash/restart data loss across the ingest/serve boundary | 2 checkpoint + WAL hydration integration tests (`checkpoint_wal_hydration.rs`) | pb-wal reopen-recovery and position-file tests; standby-writer flock takeover test | yes (`test`) |
 | 10 | Undefined behavior / memory unsafety | Miri on pb-types and pb-book unit tests | Workspace is overwhelmingly safe Rust; `clippy -D warnings` | yes (`miri`) |
@@ -46,14 +46,14 @@ Test attributes (`#[test]` + `#[tokio::test]`) per crate at this revision:
 
 | Crate | Tests | Crate | Tests |
 |-------|------:|-------|------:|
-| pb-types | 170 | pb-replay | 47 |
-| pb-api | 81 | pb-store | 36 |
-| pb-wal | 80 | pb-grpc | 25 |
+| pb-types | 173 | pb-replay | 51 |
+| pb-api | 83 | pb-store | 41 |
+| pb-wal | 82 | pb-grpc | 25 |
 | pb-book | 74 | pb-metrics | 14 |
-| pb-bin | 74 | pb-service | 72 |
+| pb-bin | 75 | pb-service | 72 |
 | pb-feed | 67 | `tests/integration` | 22 |
 
-Total: 762 test attributes. These counts include `#[ignore]`d tests: one in
+Total: 779 test attributes. These counts include `#[ignore]`d tests: one in
 pb-wal (a failover timing drill, run via `just failover-drill`) and nine in the
 integration package (see below).
 
@@ -62,10 +62,12 @@ The integration package (`tests/integration/`) splits cleanly:
 - **Run in CI** (13 tests): book determinism (3), checkpoint + WAL hydration
   (2), dispatcher pipeline (2), Parquet round-trip (2), replay engine (2),
   schema conversion (2).
-- **`#[ignore]`d, Docker-backed, not run in CI** (9 tests): ClickHouse
+- **`#[ignore]`d, Docker-backed, run by the `integration-docker` CI job** (9 tests): ClickHouse
   round-trips (5), cross-backend Parquet/ClickHouse equivalence for replay,
-  integrity, and execution (3), and an S3/MinIO round-trip (1). They use
-  `testcontainers` and require a local Docker daemon:
+  integrity, and execution (3), and an S3/MinIO round-trip through the production
+  `ParquetReader` (1). The ClickHouse cases use `testcontainers`; the S3 case
+  requires a running MinIO/S3-compatible endpoint in `PB_TEST_S3_ENDPOINT` (CI
+  starts MinIO explicitly). Run all nine locally with:
   `cargo test -p pb-integration-tests -- --ignored`.
 
 ### Property-based tests
@@ -187,11 +189,21 @@ npx vite build && npx playwright test               # what the e2e job runs
 
 Being explicit about what is *not* covered:
 
-- **No kill -9 crash-recovery end-to-end test.** Torn-tail truncation, CRC
-  skipping, and reopen recovery are unit-tested by constructing damaged
-  segments directly, and the flock standby-takeover path has a test — but no
+- **No kill -9 crash-recovery end-to-end test.** Torn-tail truncation, live-reader
+  CRC skipping, strict recovery rejection, manifest publication, and reopen
+  recovery are unit-tested by constructing damaged segments and storage views
+  directly, and the flock standby-takeover path has a test — but no
   harness SIGKILLs a live `ingest` mid-append and asserts the full
   recover-and-reconcile path end to end.
+- **Recovery is intentionally scoped.** Crash-consistent replacement is tested
+  for receive-time-partitioned book/trade/ingest hours. Checkpoint, validation,
+  and execution partitions are rejected because WAL endpoint timestamps cannot
+  prove those independently partitioned datasets complete.
+- Recovery reader coverage includes an asset containing `/` and `%`, catching
+  double-encoding bugs across object filenames, manifests, and cleanup paths.
+- Reconcile validates the whole retained WAL without retaining it, rejects an
+  eligible hour above 2,000,000 records or 128 MiB of encoded WAL payload, then
+  bounds decoded recovery memory to one eligible hour at a time.
 - **No soak or load testing.** There is no sustained multi-hour run under
   production-like message rates; channel capacities are sized by reasoning
   plus the exported depth gauge, not by a measured burst profile.

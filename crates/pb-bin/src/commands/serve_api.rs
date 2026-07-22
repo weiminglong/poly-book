@@ -84,8 +84,11 @@ pub async fn run(
     };
 
     let (replay_service, integrity_service, execution_service) =
-        pipeline::build_services(&settings).await;
-    let query_service = pipeline::build_query_service(&settings).await;
+        pipeline::build_services(&settings).await?;
+    let effective_backend_is_clickhouse =
+        matches!(&replay_service, pb_service::AnyReplayService::ClickHouse(_));
+    let query_service =
+        pipeline::build_query_service(&settings, effective_backend_is_clickhouse).await;
     let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
     let auth_token = pipeline::api_auth_token_from_settings(&settings);
 

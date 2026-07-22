@@ -57,7 +57,7 @@ design notes, and a **Docs to Update After Changes** table.
 - `thiserror` for library crate errors, `anyhow` only in pb-bin
 - `tracing` for structured logging (not `log` or `println!`)
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization
-- Storage uses `object_store` trait for filesystem abstraction (local FS / S3 / GCS)
+- Storage uses the `object_store` trait for filesystem abstraction (local FS / S3)
 - `mimalloc` as global allocator in pb-bin for lower p99 latency
 - `FxHashMap` (rustc-hash) for internal hot-path lookups in trusted-data contexts
 - `proptest` for property-based invariant testing in pb-types and pb-book

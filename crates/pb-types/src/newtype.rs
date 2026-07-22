@@ -70,6 +70,25 @@ pub fn storage_file_matches_asset(file_name: &str, asset_key: &str) -> bool {
     storage_file_asset_key(file_name) == Some(asset_key)
 }
 
+/// Match a logical storage key against current filenames and legacy filenames
+/// produced when an already-encoded key was encoded a second time.
+pub fn storage_object_file_matches_asset(file_name: &str, asset_key: &str) -> bool {
+    let Some(file_asset) = storage_file_asset_key(file_name) else {
+        return false;
+    };
+    storage_object_component_matches_key(file_asset, asset_key)
+}
+
+/// Compare one object-path component with its logical, already-percent-encoded
+/// storage key, accepting the legacy extra `%` escaping for compatibility.
+pub fn storage_object_component_matches_key(component: &str, storage_key: &str) -> bool {
+    if component == storage_key {
+        return true;
+    }
+    let object_encoded = storage_key.replace('%', "%25");
+    component == object_encoded
+}
+
 impl fmt::Display for AssetId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -150,6 +169,15 @@ mod tests {
         assert!(!storage_file_matches_asset(foo_bar, "foo"));
         assert!(!storage_file_matches_asset(foo, "foo_bar"));
         assert!(!storage_file_matches_asset("foo_bar.parquet", "foo"));
+    }
+
+    #[test]
+    fn storage_object_file_match_handles_percent_reencoding() {
+        let logical = storage_key_for("../a/b%");
+        assert_eq!(logical, "..%2Fa%2Fb%25");
+        let object_name = "..%252Fa%252Fb%2525_1700000000000000_0123456789abcdef_42.parquet";
+        assert!(storage_object_file_matches_asset(object_name, &logical));
+        assert!(!storage_object_file_matches_asset(object_name, "another"));
     }
 
     #[test]
