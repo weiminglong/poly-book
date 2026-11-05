@@ -106,11 +106,16 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   than aborting the remaining valid deltas.
 - Venue cross-check: the dispatcher keeps a per-asset shadow `L2Book` (seeded by
   snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
-  against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
-  divergence emits an `IngestEventKind::BookMismatch` event (a queryable data
-  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt
-  updates. Shadow books are dropped on continuity reset. Frames that match no
-  known message type increment `pb_unknown_messages_dropped_total`.
+  against the venue-stated `best_bid`/`best_ask` carried by `price_change`
+  entries. Those fields describe the book after the whole message is applied,
+  so the check runs once per asset per message, after that asset's last entry.
+  The venue marks an empty side with the price bound for that side (`"0"` for
+  bids, `"1"` for asks); an empty marker only conflicts when we still hold a
+  level. A divergence emits an `IngestEventKind::BookMismatch` event (a
+  queryable data hole) + `pb_book_mismatches_total`, surfacing
+  silently-dropped/corrupt updates. Shadow books are dropped on continuity
+  reset. Frames that match no known message type increment
+  `pb_unknown_messages_dropped_total`.
 - Self-healing: on a detected divergence the dispatcher requests a resnapshot
   (`with_resnapshot_tx`); `run_resnapshot_worker` (debounced per asset) fetches a
   fresh REST book and re-injects it as a synthetic WS `book` message via the

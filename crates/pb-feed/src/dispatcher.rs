@@ -447,7 +447,16 @@ impl Dispatcher {
                 if let Some(skew) = clock_skew_us(raw.recv_timestamp_us, exchange_ts) {
                     pb_metrics::record_clock_skew(skew);
                 }
-                for entry in &pc.price_changes {
+                // The venue-stated best bid/ask on each entry describe the book
+                // after the whole message is applied, so the cross-check runs
+                // once per asset, after that asset's last entry. Comparing
+                // after every entry flagged every intermediate state of a
+                // multi-entry message as a divergence.
+                let mut last_entry_for_asset: FxHashMap<&str, usize> = FxHashMap::default();
+                for (idx, entry) in pc.price_changes.iter().enumerate() {
+                    last_entry_for_asset.insert(entry.asset_id, idx);
+                }
+                for (idx, entry) in pc.price_changes.iter().enumerate() {
                     let side = match parse_side(entry.side) {
                         Some(s) => s,
                         None => {
@@ -457,6 +466,7 @@ impl Dispatcher {
                     };
 
                     let asset_id = self.intern_asset_id(entry.asset_id);
+                    let is_last_for_asset = last_entry_for_asset.get(entry.asset_id) == Some(&idx);
                     // Skip an unparseable price/size entry instead of aborting
                     // the whole price_change batch (which would also drop the
                     // valid entries after it). Deltas are independent level
@@ -498,19 +508,21 @@ impl Dispatcher {
                     // book after applying the same delta. Only when a
                     // snapshot has seeded the book — otherwise we cannot compare.
                     let mut apply_error = None;
-                    let mismatch = if let Some(book) =
-                        self.validation_books.get_mut(asset_id.as_str())
-                    {
-                        match book.try_apply_delta(side, price, size, sequence, exchange_ts) {
-                            Ok(()) => detect_book_mismatch(book, entry.best_bid, entry.best_ask),
-                            Err(e) => {
-                                apply_error = Some(e);
-                                None
+                    let mismatch =
+                        if let Some(book) = self.validation_books.get_mut(asset_id.as_str()) {
+                            match book.try_apply_delta(side, price, size, sequence, exchange_ts) {
+                                Ok(()) if is_last_for_asset => {
+                                    detect_book_mismatch(book, entry.best_bid, entry.best_ask)
+                                }
+                                Ok(()) => None,
+                                Err(e) => {
+                                    apply_error = Some(e);
+                                    None
+                                }
                             }
-                        }
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
                     if let Some(e) = apply_error {
                         self.validation_books.remove(asset_id.as_str());
                         warn!(
@@ -735,18 +747,25 @@ fn clock_skew_us(recv_us: u64, exchange_us: u64) -> Option<u64> {
     (skew > CLOCK_SKEW_TOLERANCE_US).then_some(skew)
 }
 
-/// Whether our top-of-book price disagrees with the venue-stated one. A venue
-/// value of `"0"` (or absent/unparseable) means "no level on that side": that
-/// only conflicts when *we* still hold one. A non-zero venue value must equal our
-/// top exactly. Returns `false` when there is nothing to compare.
-fn top_price_mismatch(ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
+/// Whether our top-of-book price disagrees with the venue-stated one.
+///
+/// The venue reports an empty side with the price bound for that side: `"0"`
+/// for bids and `"1"` for asks (a 1.00 ask cannot exist on a binary market).
+/// An empty-side marker only conflicts when *we* still hold a level. Any other
+/// venue value must equal our top exactly. Absent or unparseable venue values
+/// cannot be compared and return `false`.
+fn top_price_mismatch(side: Side, ours: Option<FixedPrice>, venue: Option<&str>) -> bool {
     let Some(venue_str) = venue else {
         return false;
     };
     let Ok(venue_price) = FixedPrice::try_from(venue_str) else {
         return false;
     };
-    if venue_price.is_zero() {
+    let empty_marker = match side {
+        Side::Bid => venue_price.is_zero(),
+        Side::Ask => venue_price.raw() == FixedPrice::SCALE,
+    };
+    if empty_marker {
         ours.is_some()
     } else {
         ours != Some(venue_price)
@@ -763,8 +782,8 @@ fn detect_book_mismatch(
 ) -> Option<String> {
     let our_bid = book.best_bid().map(|(price, _)| price);
     let our_ask = book.best_ask().map(|(price, _)| price);
-    let bid_bad = top_price_mismatch(our_bid, venue_best_bid);
-    let ask_bad = top_price_mismatch(our_ask, venue_best_ask);
+    let bid_bad = top_price_mismatch(Side::Bid, our_bid, venue_best_bid);
+    let ask_bad = top_price_mismatch(Side::Ask, our_ask, venue_best_ask);
     if !bid_bad && !ask_bad {
         return None;
     }
@@ -1850,17 +1869,25 @@ mod tests {
     fn top_price_mismatch_cases() {
         let p = |v: u32| Some(FixedPrice::new(v).unwrap());
         // Nothing to compare → no mismatch.
-        assert!(!top_price_mismatch(p(5000), None));
-        assert!(!top_price_mismatch(None, None));
-        // Venue "0" means empty side: conflicts only if we still hold a level.
-        assert!(!top_price_mismatch(None, Some("0")));
-        assert!(top_price_mismatch(p(5000), Some("0")));
-        // Non-zero venue must match our top exactly.
-        assert!(!top_price_mismatch(p(5000), Some("0.5"))); // 0.5 == 5000 scaled
-        assert!(top_price_mismatch(p(5000), Some("0.6")));
-        assert!(top_price_mismatch(None, Some("0.5"))); // venue has a level, we don't
-                                                        // Unparseable venue value → cannot compare → no mismatch.
-        assert!(!top_price_mismatch(p(5000), Some("garbage")));
+        assert!(!top_price_mismatch(Side::Bid, p(5000), None));
+        assert!(!top_price_mismatch(Side::Bid, None, None));
+        // Venue "0" on the bid side means empty: conflicts only if we hold a level.
+        assert!(!top_price_mismatch(Side::Bid, None, Some("0")));
+        assert!(top_price_mismatch(Side::Bid, p(5000), Some("0")));
+        // Venue "1" on the ask side means empty (observed on live captures near
+        // resolution: best_ask="1" with no resting asks).
+        assert!(!top_price_mismatch(Side::Ask, None, Some("1")));
+        assert!(top_price_mismatch(Side::Ask, p(9900), Some("1")));
+        // The markers are side-specific: "1" is a real bid, "0" is a real ask.
+        assert!(top_price_mismatch(Side::Bid, None, Some("1")));
+        assert!(top_price_mismatch(Side::Ask, None, Some("0")));
+        // Other venue values must match our top exactly.
+        assert!(!top_price_mismatch(Side::Bid, p(5000), Some("0.5"))); // 0.5 == 5000 scaled
+        assert!(top_price_mismatch(Side::Bid, p(5000), Some("0.6")));
+        // Venue has a level, we don't.
+        assert!(top_price_mismatch(Side::Bid, None, Some("0.5")));
+        // Unparseable venue value → cannot compare → no mismatch.
+        assert!(!top_price_mismatch(Side::Bid, p(5000), Some("garbage")));
     }
 
     #[tokio::test]
@@ -1914,6 +1941,102 @@ mod tests {
             }
             other => panic!("expected BookMismatch ingest event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn price_change_cross_checks_once_per_asset_after_last_entry() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Seed: bids 0.54 / 0.53 / 0.52, ask 0.55.
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [
+                {"price": "0.54", "size": "1"},
+                {"price": "0.53", "size": "1"},
+                {"price": "0.52", "size": "1"}
+            ],
+            "asks": [{"price": "0.55", "size": "1"}]
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let _ = event_rx.recv().await.unwrap();
+        }
+
+        // One venue message removes the top two bid levels. Every entry carries
+        // the post-message best_bid (0.52). Comparing after the first entry
+        // would see our stale 0.54 and raise a false mismatch; the check must
+        // run once, after the last entry, and find the book in agreement.
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [
+                {"asset_id": "tok1", "price": "0.54", "size": "0", "side": "BUY",
+                 "best_bid": "0.52", "best_ask": "0.55"},
+                {"asset_id": "tok1", "price": "0.53", "size": "0", "side": "BUY",
+                 "best_bid": "0.52", "best_ask": "0.55"}
+            ]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+
+        let a = event_rx.recv().await.unwrap();
+        let b = event_rx.recv().await.unwrap();
+        assert!(matches!(a, PersistedRecord::Book(_)));
+        assert!(matches!(b, PersistedRecord::Book(_)));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "no BookMismatch may be emitted for a consistent multi-entry message"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_ask_side_marker_is_not_a_mismatch() {
+        let (_raw_tx, raw_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let mut dispatcher = Dispatcher::new(raw_rx, event_tx);
+
+        // Near resolution: a bid at 0.99 and no asks at all.
+        let snap = serde_json::json!({
+            "event_type": "book",
+            "asset_id": "tok1",
+            "timestamp": "1700000000000000",
+            "bids": [{"price": "0.99", "size": "10"}],
+            "asks": []
+        });
+        dispatcher
+            .dispatch(raw_message(snap.to_string()))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.unwrap();
+
+        // The venue reports the empty ask side as best_ask = "1".
+        let pc = serde_json::json!({
+            "event_type": "price_change",
+            "timestamp": "1700000000000001",
+            "price_changes": [{
+                "asset_id": "tok1", "price": "0.99", "size": "11", "side": "BUY",
+                "best_bid": "0.99", "best_ask": "1"
+            }]
+        });
+        dispatcher
+            .dispatch(raw_message(pc.to_string()))
+            .await
+            .unwrap();
+        let delta = event_rx.recv().await.unwrap();
+        assert!(matches!(delta, PersistedRecord::Book(_)));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "empty-side marker must not raise a mismatch"
+        );
     }
 
     #[tokio::test]
