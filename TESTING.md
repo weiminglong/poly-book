@@ -27,10 +27,10 @@ commands so they can be re-checked instead of trusted.
 | 10 | Undefined behavior / memory unsafety | Miri on pb-types and pb-book unit tests | Workspace is overwhelmingly safe Rust; `clippy -D warnings` | yes (`miri`) |
 | 11 | Latency-harness rot and perf regressions | `cargo bench --workspace --no-run` compiles all 8 Criterion benchmarks every CI run | Statistical regression gating against a committed baseline — local only (shared runners are too noisy) | compile: yes (`bench`); gating: **no** |
 | 12 | Alert rules that no longer fire, or page the wrong channel | `promtool test rules`: 8 simulated-incident scenarios with 10 fire/no-fire assertions against the 13 rules in `monitoring/alerts.yml` | `promtool check rules`, `amtool check-config`, and 3 severity→receiver routing assertions | yes (`monitoring`) |
-| 13 | Vulnerable dependencies, license violations, IaC misconfig | `rustsec/audit-check` on every push/PR | `cargo-deny` (advisories/bans/licenses/sources), CodeQL SAST, `tfsec` + `tflint` + `terraform validate` over `infra/` | yes (`audit`, separate workflows) |
+| 13 | Vulnerable dependencies, license violations | `rustsec/audit-check` on every push/PR | `cargo-deny` (advisories/bans/licenses/sources), CodeQL SAST | yes (`audit`, separate workflows) |
 | 14 | Frontend regressions | 140 vitest cases across 16 test files; `tsc -b` strict typecheck; `biome check` | 5 Playwright end-to-end tests (3 specs) against the built bundle | yes (`web`, `e2e`) |
 | 15 | Release-profile-only breakage (panic=abort, LTO) and Docker image rot | `cargo build --release` in CI | `docker build` of the production image in CI | yes (`release-build`, `docker-build`) |
-| 16 | Documentation and comment hygiene drift | `hygiene` job greps for internal tracking references that resolve to nothing in a public repo | Per-crate "Docs to Update After Changes" tables | yes (`hygiene`) |
+| 16 | Documentation and comment hygiene drift | `hygiene` job greps for internal tracking references that resolve to nothing in a public repo | — | yes (`hygiene`) |
 
 ## Layer detail
 
@@ -182,8 +182,6 @@ npx vite build && npx playwright test               # what the e2e job runs
   licenses sources` (`supply-chain.yml`, also weekly).
 - CodeQL SAST over the GitHub Actions workflows and the TypeScript frontend
   (`codeql.yml`).
-- `tfsec`, `tflint` (AWS ruleset), and `terraform fmt`/`validate` over
-  `infra/` (`iac-scan` job in `supply-chain.yml`).
 
 ## Known gaps
 

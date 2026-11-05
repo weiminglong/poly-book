@@ -151,14 +151,4 @@ and feeds decoded records into the live read model.
   durability hot path: `codec::encode` (~80 ns), steady-state `append+flush`
   (~260 ns/record, fsync amortized), and per-record `fdatasync` (ms-scale —
   ~10⁴× the amortized append, which is why fsync is batched on
-  `sync_interval_ms`). See `docs/latency.md` for the full pipeline budget.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| Frame format or CRC algorithm | `docs/architecture.md` WAL section |
-| Codec version or serialization format | `pb-api` hydration, `pb-bin` ingest/serve commands |
-| Config keys changed | `config/default.toml` `[wal]` section, `docs/operations.md` |
-| Segment naming or layout | `docs/operations.md` data layout section |
-| Changes affect WAL semantics | Check the active OpenSpec change under `openspec/changes/` |
+  `sync_interval_ms`). See `docs/PERFORMANCE.md` for the full pipeline table.

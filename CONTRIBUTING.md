@@ -55,7 +55,7 @@ Runs the same formatting, lint, and test flow used in CI.
 3. Add or update tests for behavior changes.
 4. Update docs when flags, workflows, or architecture assumptions change.
 
-This repository uses OpenSpec for larger changes. If you are making a meaningful feature or architecture change, inspect the relevant materials under `openspec/changes/archive/` and follow the established pattern for proposals and tasks.
+For a meaningful architecture change, add or amend an ADR under `docs/adr/` so the decision and its rejected alternatives are recorded with the code.
 
 ## Style
 

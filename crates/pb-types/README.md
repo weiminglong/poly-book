@@ -85,14 +85,3 @@ pb-types ◄── pb-feed    (wire deserialization)
 - `proptest` suites verify fixed-point roundtrip, ordering, and serde consistency.
 - 173 tests covering boundary conditions, serde round-trips, proptest invariants,
   and all persisted record types.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New event dataset added | `pb-store` schema + writer, `pb-replay` reader, `docs/architecture.md` persisted record table |
-| `FixedPrice`/`FixedSize` scaling changed | [ADR-0001](../../docs/adr/0001-fixed-point-arithmetic.md), `CLAUDE.md` conventions |
-| New newtype added | `CLAUDE.md` crate summary |
-| Wire type shape changed | `pb-feed` dispatcher deserialization |
-| `PersistedRecord` variant added | `pb-store` `schema_for_record` + `records_to_record_batch`, `pb-replay` reader |
-| Changes affect API surface or storage schema | Check the active OpenSpec change under `openspec/changes/` |

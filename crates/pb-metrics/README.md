@@ -36,11 +36,3 @@ workspace dependencies.
   avoiding `u16::to_string()` heap allocation on every request.
 - `build_router()` helper deduplicates `Router` construction across serve
   functions.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New metric registered | `docs/operations.md` metrics section |
-| Metrics port default changed | `config/default.toml` `[metrics]` section, `docs/operations.md` |
-| Recorder setup pattern changed | `pb-bin` startup code, `docs/operations.md` |

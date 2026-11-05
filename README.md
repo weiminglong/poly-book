@@ -308,8 +308,8 @@ cargo +nightly fuzz run fuzz_query_guard     # SQL query guard sanitizer + LIMIT
 
 ### Latency Design
 
-Key design choices documented in [docs/latency.md](docs/latency.md) and
-[docs/adr/](docs/adr/):
+Key design choices documented in [docs/adr/](docs/adr/), with measured
+numbers in [docs/PERFORMANCE.md](docs/PERFORMANCE.md):
 
 - Fixed-point arithmetic eliminates FPU stalls and NaN guards (ADR-0001)
 - BTreeMap book: best bid/ask in ~3 ns measured, benchmarked against a dense-array alternative (ADR-0002)
@@ -373,8 +373,8 @@ Example:
 PB__LOGGING__LEVEL=debug cargo run -- auto-ingest
 ```
 
-Operational details, deployment notes, infrastructure setup, and data layout live
-in [docs/operations.md](docs/operations.md).
+Operational details, deployment notes, and data layout live in
+[docs/operations.md](docs/operations.md).
 
 Current workstation API routes and runtime notes live in:
 
@@ -395,12 +395,6 @@ Near-term work that would make strong public contributions:
 
 ## Development Workflow
 
-This repository uses [OpenSpec](https://github.com/Fission-AI/OpenSpec) for larger
-feature work. Archived proposals, designs, specs, and tasks live under
-`openspec/changes/archive/`.
-
-### Engineering process
-
 This project is built AI-assisted under human design direction and review.
 Correctness does not rest on review alone: every change passes hard
 verification gates — the full test suite (fuzzing, property tests, miri,
@@ -408,8 +402,7 @@ golden byte fixtures, offline alert-rule incident simulations; see
 [TESTING.md](TESTING.md)), adversarial review passes hunting for bugs rather
 than confirming intent, and live end-to-end verification against the real
 venue before merge. Design decisions and their rejected alternatives are
-recorded in [docs/adr/](docs/adr/) and the archived OpenSpec changes rather
-than in tooling history.
+recorded in [docs/adr/](docs/adr/) rather than in tooling history.
 
 For contribution standards and PR expectations, see:
 

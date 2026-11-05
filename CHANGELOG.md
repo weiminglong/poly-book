@@ -24,6 +24,13 @@ is practical to do so.
 
 ### Removed
 
+- `infra/` (Terraform that was never applied), the `deploy.yml` workflow (never
+  succeeded, and it re-ran the full CI on every push to `main`), the
+  `iac-scan` job, the `openspec/` archive (its decisions live in `docs/adr/`),
+  `AGENTS.md` (a diverging copy of `CLAUDE.md`), `docs/latency.md`
+  (superseded by the measured `docs/PERFORMANCE.md`), the verbatim config
+  re-dump in `docs/operations.md`, and the per-crate "Docs to Update After
+  Changes" tables. Each fact now has one documented home.
 - The gRPC surface (`pb-grpc`, the `[grpc]` config section, the tonic/prost
   dependencies, and the `protoc` build requirement). It mirrored the HTTP
   routes, was disabled by default, and had no consumer. A fresh clone now

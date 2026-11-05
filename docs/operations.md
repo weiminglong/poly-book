@@ -1,6 +1,6 @@
 # Operations Guide
 
-This document collects configuration, deployment, and infrastructure details that
+This document collects configuration, deployment, and data layout details that
 are useful for operators but too heavy for the main README.
 
 ## Configuration
@@ -33,68 +33,17 @@ an optional component), and API/metrics port availability.
 
 Current defaults:
 
-```toml
-[feed]
-ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-rest_url = "https://clob.polymarket.com"
-gamma_url = "https://gamma-api.polymarket.com"
-ping_interval_secs = 10
-reconnect_base_delay_ms = 100
-reconnect_max_delay_ms = 30000
-rate_limit_requests = 1500
-rate_limit_window_secs = 10
+The authoritative, commented defaults are in [`config/default.toml`](../config/default.toml);
+every key there can be overridden with `PB__<SECTION>__<KEY>`.
 
-# parquet_base_path accepts a local path, file:// URL, or s3://bucket/prefix.
-# An s3:// path is wired to a real S3 object store. S3 is configured from the
-# process environment (parsed via
-# object_store::parse_url_opts(url, env::vars())): for s3://, set AWS_REGION and
-# either static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or rely on the default AWS
-# provider chain (ECS task role / instance profile). For an S3-compatible endpoint
-# (MinIO/LocalStack) also set AWS_ENDPOINT, AWS_ALLOW_HTTP=true, and
-# AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false (path-style). End-to-end persistence +
-# restart is covered by tests/integration/s3_minio_roundtrip.rs.
-[storage]
-parquet_base_path = "./data"
-parquet_flush_interval_secs = 300
-parquet_row_group_size = 65536  # reserved; not yet wired (Parquet uses a fixed row-group size)
-checkpoints_enabled = true
-checkpoint_interval_secs = 60
-clickhouse_url = "http://localhost:8123"
-clickhouse_database = "poly_book"
-clickhouse_batch_interval_secs = 1   # honored by the ClickHouse sink
-clickhouse_batch_size = 10000        # honored by the ClickHouse sink
-
-# Services default to loopback. A non-loopback API bind requires
-# api.auth_token / PB__API__AUTH_TOKEN at startup.
-[metrics]
-listen_addr = "127.0.0.1:9090"
-endpoint = "/metrics"
-
-[api]
-listen_addr = "127.0.0.1:3000"
-default_depth = 20
-max_depth = 200
-stale_after_secs = 15
-historical_backend = "parquet"  # or "clickhouse"
-query_workbench_enabled = false
-query_max_rows = 10000
-query_timeout_secs = 30
-http_request_timeout_secs = 30   # per-request HTTP timeout (504 if exceeded); not the WS stream
-# auth_token = ""                # required for a non-loopback API bind; all API/WS data routes require it (health stays open)
-
-[wal]
-base_path = "./data/wal"
-segment_size_mb = 64
-max_segments = 16             # hard cap on retained segments (incl. active); pruning enforces both this and the lag-byte budget
-max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window (lag-byte budget)
-position_commit_interval_ms = 1000
-flush_interval_ms = 20        # BufWriter flush cadence (tail-reader visibility)
-sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)
-
-[logging]
-level = "info"
-format = "pretty"   # "json" emits structured JSON logs
-```
+`storage.parquet_base_path` accepts a local path, a `file://` URL, or an
+`s3://bucket/prefix`. S3 is configured from the process environment (parsed via
+`object_store::parse_url_opts(url, env::vars())`): set `AWS_REGION` and either
+static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or rely on the default AWS
+provider chain. For an S3-compatible endpoint (MinIO/LocalStack) also set
+`AWS_ENDPOINT`, `AWS_ALLOW_HTTP=true`, and
+`AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false` (path-style). End-to-end persistence
+plus restart is covered by `tests/integration/s3_minio_roundtrip.rs`.
 
 Example overrides:
 
@@ -247,9 +196,6 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
-- `tfsec` + `tflint` (AWS ruleset) + `terraform fmt`/`validate` — Terraform
-  static security scan, provider-aware lint, and validation of `infra/`
-  (`supply-chain` workflow, `iac-scan` job)
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
   validation and offline incident unit tests; `amtool check-config` + routing
   assertions — Alertmanager routing validation (`monitoring` job)
@@ -267,18 +213,11 @@ separate weekly schedule and on pushes/PRs.
 
 ## Deployment
 
-Merges to `main` trigger the deploy workflow after CI passes.
-
-Deployment flow:
-
-1. Build the Docker image (multi-stage: Node for SPA, Rust for binary)
-2. Push the image to Amazon ECR
-3. Register a new ECS task definition
-4. Update the ECS service
-5. Wait for service stability
-
-The workflow uses GitHub OIDC and an AWS IAM role stored in the
-`AWS_DEPLOY_ROLE_ARN` repository secret.
+There is no cloud deployment in this repository. The published Docker image
+(`release.yml` pushes it to GHCR on tags) plus `docker-compose.yml` are the
+supported ways to run the system off a developer machine; any orchestrator that
+can run that image and mount a volume for `/data` works. Set
+`PB__API__AUTH_TOKEN` before binding the API off loopback.
 
 ## Deployment Packaging
 
@@ -300,72 +239,6 @@ The image's default command is the combined live workstation
 
 A later migration to separate containers (Rust API + Nginx/Caddy for static
 assets) is straightforward when traffic or team structure warrants it.
-
-## Infrastructure
-
-Terraform in `infra/` provisions the AWS resources for the deployment target:
-
-- ECR for image storage
-- ECS Fargate compute — the ingest service keeps an **on-demand base**
-  (`ingest_on_demand_base`) with Spot only for overflow, so a Spot reclaim never
-  drops all capture
-- a read-only **`serve`** API service (`serve.tf`) on the shared WAL
-- **EFS** (`efs.tf`) for the durable write-ahead log, mounted into both ingest
-  and serve (survives task restarts / host loss; pairs with the `--standby`
-  writer failover)
-- optional **single-node ClickHouse** on ECS+EFS (`clickhouse.tf`, opt-in via
-  `enable_clickhouse_service`; prefer managed ClickHouse for production), with
-  Cloud Map private DNS for `serve` discovery and password authentication
-  injected through ECS secrets
-- S3 for Parquet storage (SSE-KMS CMK, versioning, lifecycle, access logging to a
-  hardened SSE-S3 log bucket)
-- VPC (with Flow Logs), subnets, security groups (metrics port in-VPC only; EFS
-  egress scoped to the VPC), IAM (incl. scoped EFS mount perms), ECR (immutable
-  tags, scan-on-push), and CloudWatch resources
-
-Runtime secrets:
-
-- `serve_api_auth_token_secret_arn` — required when `serve_desired_count > 0`
-  because the ECS serve task binds `PB__API__LISTEN_ADDR=0.0.0.0:3000`.
-- `clickhouse_password_secret_arn` — required when `enable_clickhouse_service`
-  is true; injected as `CLICKHOUSE_PASSWORD` for the ClickHouse container.
-- `clickhouse_app_url_secret_arn` — required when `enable_clickhouse_service`
-  is true; injected as `PB__STORAGE__CLICKHOUSE_URL` for app/serve tasks. The
-  secret value should include credentials, for example
-  `http://poly_book:<password>@clickhouse.poly-book.internal:8123`.
-
-IAM is split by runtime role: the live ingest task keeps S3 read/write/list
-without `s3:DeleteObject`, offline `reconcile` has a separate maintenance task
-role with delete permission for Parquet recovery, serve uses a read-only S3 role
-plus EFS consumer-position writes, and the optional ClickHouse task has a
-separate no-S3 task role.
-
-> **Status:** the `serve`/EFS/ClickHouse/on-demand topology
-> passes `terraform validate` + `fmt` **and a `tfsec` static security scan** (CI
-> `iac-scan` job; intentional trade-offs are documented inline with
-> `#tfsec:ignore:<AVD-ID>` + rationale) but has **not** been `terraform apply`ed
-> against a live account. Applying it, plus a Spot-reclaim and a restart/failover
-> drill, is the remaining verification.
-
-Bootstrap:
-
-```bash
-cd infra
-cp terraform.tfvars.example terraform.tfvars
-terraform init
-terraform apply
-```
-
-Then:
-
-1. Set `github_org` in `terraform.tfvars`
-2. Copy the `github_actions_role_arn` output into the GitHub secret
-   `AWS_DEPLOY_ROLE_ARN`
-
-## Cost Control
-
-Set `desired_count = 0` in `infra/terraform.tfvars` and re-apply Terraform to
-stop running tasks while preserving the deployed resources.
 
 ## Local Inspection
 
@@ -517,7 +390,7 @@ Application reads retry manifest resolution once if cleanup crosses a request.
 Stop ad-hoc DuckDB/Polars scans during the maintenance cut, and do not resume
 them after a non-zero cleanup result, because those tools do not interpret
 recovery manifests.
-In ECS, run this as a maintenance task using the dedicated reconcile task role;
+In a container deployment, run this as a one-off maintenance task;
 the always-on ingest task role intentionally lacks `s3:DeleteObject`.
 
 ### Failover & Recovery (RTO/RPO)
@@ -539,7 +412,7 @@ Recovery objectives by failure mode:
 | `serve` (API) process crash | Restart; re-hydrate from latest checkpoint + WAL tail | 0 (read-only; no data originates here) | seconds — bounded by checkpoint hydration + WAL replay |
 | `ingest` process crash, same host | Restart `ingest`; flock is already released; it resumes appending to the last segment | ≤ `wal.sync_interval_ms` of un-`fdatasync`'d records (default 200 ms) on OS-crash/power-loss; **0** on a clean process kill | seconds — process start + lock acquire |
 | Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` strictly republishes complete hourly partitions from the durable WAL (offline); the earliest retained hour and any trailing partial hour remain untouched | 0 for a fully covered, gap-free WAL hour | minutes — offline rebuild, scales with window |
-| Host loss (WAL on durable/EFS volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
+| Host loss (WAL on a durable shared volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
 | Host loss (WAL on ephemeral storage) | Parquet on S3 is durable; the in-flight WAL tail is lost | the un-flushed Parquet window not yet mirrored to the WAL volume | minutes |
 
 **Automatic writer promotion** is available: start the standby as
@@ -690,8 +563,6 @@ byte retention window), so disk usage stays bounded.
 
 - latency summary endpoints
 
-The existing Docker and ECS deployment remains ingestion-oriented today. The
-workstation API is not yet part of that production deployment flow.
 
 ## Workstation Web App
 

@@ -70,13 +70,3 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   before cleaning old objects. Running while ingest is active is refused;
   standalone append/backfill writers are an operator-enforced stop condition;
   re-running is idempotent.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New subcommand added | `README.md` workflows section, `docs/operations.md` |
-| Config key added or removed | `config/default.toml`, `docs/operations.md` |
-| CLI flag changed | `README.md` workflows section |
-| Startup or shutdown behavior changed | `docs/operations.md` |
-| New subcommand affects workstation scope | Update the active OpenSpec change under `openspec/changes/` |

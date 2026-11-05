@@ -116,16 +116,6 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   timestamp. Without this, recv-vs-exchange skew could skip or double-apply deltas
   straddling the boundary.
 
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New `EventReader` method | Both `ParquetReader` and `ClickHouseReader` must implement it |
-| Reconstruction logic changed | `docs/serve-api.md` replay semantics section |
-| New storage backend reader | `docs/operations.md`, `pb-api` if the reader is used in routes |
-| Backfill config shape changed | `config/default.toml`, `docs/operations.md` |
-| Replay semantics affect API responses | `docs/api.md`, check the active OpenSpec change under `openspec/changes/` |
-
 ## Tests
 
 51 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,

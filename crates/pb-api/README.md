@@ -100,18 +100,6 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 - WebSocket `asset_id` accepts either the canonical token ID or a registered
   slug, matching the REST snapshot route.
 
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| Route added or removed | `docs/api.md`, `docs/serve-api.md`, `CLAUDE.md` current routes list |
-| DTO shape changed | `docs/api.md` response schema, `web/src/types.ts` TypeScript interfaces |
-| New deferred route documented | `docs/serve-api.md` deferred section |
-| `LiveReadModel` behavior changed | `docs/serve-api.md` runtime section |
-| WebSocket protocol changed | `web/src/useOrderBookStream.ts`, `docs/api.md` |
-| Route or capability added/removed | Update the active OpenSpec change `tasks.md`, `proposal.md` if scope shifts |
-| API config keys changed | `config/default.toml` `[api]` section, `docs/operations.md` |
-
 ## Tests
 
 83 tests covering health states, error format consistency, depth and time parameter

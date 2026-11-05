@@ -121,17 +121,6 @@ pb-service trait method
   full book/trade window just to count it. The Parquet backend, which
   already holds the full window, still uses `build_integrity_summary`.
 
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New service trait or method | `pb-api` handler, `docs/api.md` route docs |
-| New domain type | `pb-api` DTO mapping, `docs/api.md` response schemas |
-| New backend implementation | Enum dispatch variant, `pb-bin` `build_services()` |
-| Error variant added | `pb-api` `ServiceError → ApiError` mapping |
-| Changes affect API contracts | `docs/api.md`, `docs/serve-api.md` |
-| New query guard rule or type | `pb-api` query handler, `docs/api.md` query routes |
-
 ## Tests
 
 Unit tests cover shared helper functions (error mapping, continuity gap detection,

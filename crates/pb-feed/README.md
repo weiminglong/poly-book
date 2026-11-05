@@ -135,15 +135,4 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - **Benchmark** (`cargo bench -p pb-feed`, `benches/dispatcher.rs`) measures the
   normalize hot path end-to-end through the async pipeline — JSON parse +
   normalize + shadow-book apply + venue cross-check + channel handoff — at
-  ~480 ns / ~2.1M `price_change` entries per second. See `docs/latency.md`.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New venue message type | `pb-types` wire types, `Dispatcher` parsing logic |
-| WS reconnect behavior | `docs/operations.md` feed config section |
-| New `PersistedRecord` variant from feed | `pb-store` schema + writer, `pb-replay` reader |
-| Rate limiter config | `config/default.toml` `[feed]` section, `docs/operations.md` |
-| Feed config keys added/removed | `config/default.toml`, `docs/operations.md` |
-| Changes affect ingest topology | `docs/architecture.md`, check the active OpenSpec change |
+  ~480 ns / ~2.1M `price_change` entries per second. See `docs/PERFORMANCE.md`.

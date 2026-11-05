@@ -107,17 +107,6 @@ PersistedRecord channel
 - WAL→storage reconciliation is provided by `write_batch_replacing` / the
   `reconcile` command with strict full-hour coverage and manifest publication.
 
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New event dataset schema | `pb-types` event struct, `pb-replay` reader, `docs/architecture.md` persisted record table |
-| Schema column added/removed | `pb-replay` reader, `pb-api` if column is exposed in routes |
-| Flush interval or compression changed | `docs/operations.md`, `docs/latency.md` |
-| Storage backend added | `docs/operations.md` config section |
-| Storage config keys changed | `config/default.toml` `[storage]` section, `docs/operations.md` |
-| Changes affect storage layout or schema | Check the active OpenSpec change under `openspec/changes/` |
-
 ## Tests
 
 41 tests covering schema validation, record batch conversion, `ParquetRecordWriter`

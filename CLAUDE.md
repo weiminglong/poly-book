@@ -42,13 +42,16 @@ Full system diagram, crate dependency graph, and runtime topology:
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
-design notes, and a **Docs to Update After Changes** table.
+and design notes. Read it before modifying the crate, and update it if you
+change the crate's public API or behavior.
 
-**MANDATORY**: Before modifying a crate, read its README. After making changes:
-1. Update the crate's own README if you changed its public API, types, or behavior
-2. Check the **Docs to Update After Changes** table and propagate to every listed
-   target (docs/, config, CLAUDE.md, other crate READMEs, web/)
-3. Do not consider a task complete until doc propagation is done
+Each fact has one home. Do not restate it elsewhere; link instead:
+- routes and error semantics: `docs/api.md`
+- config keys and defaults: `config/default.toml` (commented)
+- commands, ports, data layout: `docs/operations.md`
+- runtime modes and trust boundary: `docs/serve-api.md`
+- crate graph and data flow: `docs/architecture.md`
+- design decisions and rejected alternatives: `docs/adr/`
 
 ## Conventions
 - Fixed-point over floating-point for prices and sizes — never use `f64` for orderbook state
@@ -73,12 +76,9 @@ these in order:
 1. `docs/serve-api.md` — current runtime purpose, constraints, and deferred scope
 2. `docs/api.md` — current route contract and error semantics
 3. `docs/operations.md` — config, ports, and local run commands
-4. `openspec/changes/archive/2026-03-07-quant-workstation-platform/` — archived workstation scope and future module boundaries
 
-If you are changing replay, storage, or integrity semantics, also read:
-
-1. `openspec/changes/archive/2026-03-06-market-data-upgrades/`
-2. `docs/operations.md`
+If you are changing replay, storage, or integrity semantics, also read
+`docs/adr/0008` through `0011` and `docs/operations.md`.
 
 ## Persisting Design Decisions
 Do not leave major boundary decisions only in chat history.
@@ -89,11 +89,11 @@ When you change the workstation/API/runtime scope:
 - update `docs/api.md` for route shape and error semantics
 - update `docs/operations.md` for commands, config, and ports
 - update `README.md` if contributor discovery changes
-- update the archived OpenSpec change under `openspec/changes/archive/2026-03-07-quant-workstation-platform/` if scope boundaries change
+- add or amend an ADR in `docs/adr/` if a boundary decision changes
 
 When you implement only part of a planned capability, explicitly document what
-shipped and what remains deferred. Keep the docs and OpenSpec honest about
-current boundaries.
+shipped and what remains deferred. Keep the docs honest about current
+boundaries.
 
 ## Current Workstation Boundary
 The workstation backend is read-only with process separation:
@@ -137,21 +137,10 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `fuzz` — 30s smoke fuzz runs (WAL corruption, book delta, query guard, WS deser, WAL codec decode, fixed-point parse)
 - `miri` — undefined behavior checks on pb-types, pb-book
 
-Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny + `iac-scan`: `tfsec` security scan + `tflint` (AWS ruleset) provider lint + `terraform fmt`/`validate` of `infra/`).
+Additional workflows: `codeql.yml` (SAST), `supply-chain.yml` (cargo-deny).
 
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)
 - **Commit**: imperative sentence, PR number suffix (e.g. `Fix discover command ... (#6)`)
 - **PR**: squash-merge into `main`, auto-delete branch on merge is enabled
 - Always run `cargo test` before committing
-
-## OpenSpec
-Spec-driven development artifacts live under `openspec/changes/`.
-
-- Active changes define current and upcoming work
-- Archived changes live under `openspec/changes/archive/`
-- Each change has: `proposal.md`, `design.md`, `specs/*/spec.md`, `tasks.md`
-
-For workstation work, refer to the archived change
-`openspec/changes/archive/2026-03-07-quant-workstation-platform/` for scope and
-module boundary definitions.
