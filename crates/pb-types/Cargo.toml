@@ -10,18 +10,16 @@ homepage.workspace = true
 readme.workspace = true
 description = "Shared fixed-point, wire, and persisted event types for poly-book"
 
-[lints.rust]
-# Override of the workspace `forbid`: four SAFETY-documented unsafe sites
-# in the fixed-point serializers (miri-verified in CI).
-unsafe_code = "deny"
+[lints]
+workspace = true
 
 [dependencies]
-itoa = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bincode = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 

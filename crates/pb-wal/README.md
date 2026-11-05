@@ -43,10 +43,11 @@ The `codec` module adds a version byte prefix before bincode serialization:
 └──────────────┴───────────────────────┘
 ```
 
-Currently version 2 (`codec::CURRENT_VERSION`). Unknown versions produce a
-`WalError::Codec` error; version 1 (which predates the provenance ingest
-ordinal) is explicitly rejected with a drain-the-WAL hint, because positional
-bincode would silently misparse the changed field count.
+Currently version 3 (`codec::CURRENT_VERSION`): prices and sizes are raw
+scaled integers (v2 stored them as decimal strings; v1 predates the provenance
+ingest ordinal). Unknown versions produce a `WalError::Codec` error; v1 and v2
+are explicitly rejected with a drain-the-WAL hint, because positional bincode
+would silently misparse the changed layout.
 
 ## Data Flow
 
@@ -68,7 +69,7 @@ and feeds decoded records into the live read model.
   reducing write syscalls by ~3x.
 - **Efficient framing**: the 8-byte frame header (4-byte length + 4-byte CRC32C)
   is stack-assembled and written in a single call instead of two separate writes.
-- **Steady-state durability cadence**: the `ingest`/`auto-ingest` event loop
+- **Steady-state durability cadence**: the `ingest` WAL drain loop
   drives `WalWriter::flush()` on `wal.flush_interval_ms` (default 20 ms, for
   tail-reader visibility) and `WalWriter::sync()` (`fdatasync`) on
   `wal.sync_interval_ms` (default 200 ms, bounding the OS-crash data-loss
@@ -151,14 +152,4 @@ and feeds decoded records into the live read model.
   durability hot path: `codec::encode` (~80 ns), steady-state `append+flush`
   (~260 ns/record, fsync amortized), and per-record `fdatasync` (ms-scale —
   ~10⁴× the amortized append, which is why fsync is batched on
-  `sync_interval_ms`). See `docs/latency.md` for the full pipeline budget.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| Frame format or CRC algorithm | `docs/architecture.md` WAL section |
-| Codec version or serialization format | `pb-api` hydration, `pb-bin` ingest/serve commands |
-| Config keys changed | `config/default.toml` `[wal]` section, `docs/operations.md` |
-| Segment naming or layout | `docs/operations.md` data layout section |
-| Changes affect WAL semantics | Check the active OpenSpec change under `openspec/changes/` |
+  `sync_interval_ms`). See `docs/PERFORMANCE.md` for the full pipeline table.

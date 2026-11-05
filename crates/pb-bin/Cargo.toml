@@ -20,14 +20,12 @@ workspace = true
 [dependencies]
 pb-types = { workspace = true }
 pb-api = { workspace = true }
-pb-book = { workspace = true }
 pb-feed = { workspace = true }
 pb-store = { workspace = true }
 pb-replay = { workspace = true }
 pb-metrics = { workspace = true }
 pb-wal = { workspace = true }
 pb-service = { workspace = true }
-pb-grpc = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }
@@ -40,11 +38,9 @@ anyhow = { workspace = true }
 object_store = { workspace = true }
 futures-util = { workspace = true }
 url = { workspace = true }
-clickhouse = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 mimalloc = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-toml = "1"

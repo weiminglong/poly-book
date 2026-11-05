@@ -6,7 +6,7 @@ Thanks for contributing. This repository is a Rust workspace for Polymarket mark
 
 - Read the [README](README.md) for project scope and the fastest local workflow.
 - Use the pinned Rust toolchain or Rust 1.94+.
-- Install Docker if you want to run the full integration suite. The ClickHouse integration tests use `testcontainers`.
+- Install Docker if you want to run the full integration suite. The S3 round-trip test needs an S3-compatible endpoint (CI uses `adobe/s3mock`).
 - Install `just` if you want the shortcut commands. Cargo commands work directly too.
 
 ## Local Setup
@@ -21,12 +21,11 @@ Optional tools:
 
 - `just` for task aliases
 - `duckdb` for local Parquet inspection
-- ClickHouse for manual warm-storage testing
 
 ## Test Matrix
 
 [TESTING.md](TESTING.md) maps each failure mode to the layer that catches it
-(unit/property tests, fuzzing, golden fixtures, Miri, monitoring rule tests)
+(unit/property tests, fuzzing, golden fixtures, monitoring rule tests)
 and lists what is deliberately not covered. For day-to-day work, use the
 smallest command that validates your change:
 
@@ -40,7 +39,7 @@ Runs unit tests and fast workspace checks without the integration package.
 cargo test -p pb-integration-tests
 ```
 
-Runs integration tests, including the ClickHouse round-trip coverage. Docker must be available.
+Runs integration tests. The `#[ignore]`d S3 round-trip additionally needs Docker and `PB_TEST_S3_ENDPOINT` (`-- --ignored`).
 
 ```bash
 just ci
@@ -55,7 +54,7 @@ Runs the same formatting, lint, and test flow used in CI.
 3. Add or update tests for behavior changes.
 4. Update docs when flags, workflows, or architecture assumptions change.
 
-This repository uses OpenSpec for larger changes. If you are making a meaningful feature or architecture change, inspect the relevant materials under `openspec/changes/archive/` and follow the established pattern for proposals and tasks.
+For a meaningful architecture change, add or amend an ADR under `docs/adr/` so the decision and its rejected alternatives are recorded with the code.
 
 ## Style
 
@@ -63,7 +62,7 @@ This repository uses OpenSpec for larger changes. If you are making a meaningful
 - Run `cargo clippy --workspace -- -D warnings`.
 - Prefer explicit, typed interfaces over stringly-typed plumbing.
 - Keep hot-path code simple and measurable.
-- Preserve split dataset semantics across `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`, `replay_validations`, and `execution_events`.
+- Preserve split dataset semantics across `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`, and `replay_validations`.
 
 ## Pull Requests
 

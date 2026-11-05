@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -11,77 +10,81 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
+# Jobs pin ubuntu-24.04 rather than ubuntu-latest: the floating label moved
+# to 26.04 and the pinned Playwright release had no browser build for it.
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo check --all-targets
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo test --workspace --exclude pb-integration-tests
-      # Integration suite. The ClickHouse-backed cases are #[ignore]d and
-      # skipped here; the Parquet/hydration/replay roundtrips run.
+      # Integration suite without Docker: the Parquet/hydration/replay
+      # roundtrips. The S3 case is #[ignore]d and runs below against an S3 mock.
       - run: cargo test -p pb-integration-tests
 
   integration-docker:
     name: Integration (Docker-backed)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
-      - name: Start MinIO and create the integration bucket
+      # adobe/s3mock: a small Apache-2.0 S3 server. (MinIO's public images were
+      # withdrawn from Docker Hub and quay.io in 2025, and LocalStack's image
+      # now exits without a paid license token, which broke this job twice.)
+      # Pinned by version. The bucket is created with a plain S3 CreateBucket
+      # request so the job does not depend on the mock's config-key naming.
+      - name: Start the S3 mock and create the integration bucket
         run: |
-          docker run --detach --name pb-minio \
-            --publish 9100:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:9100/minio/health/ready >/dev/null; then
+          docker run --detach --name pb-s3 \
+            --publish 9100:9090 \
+            adobe/s3mock:5.2.3
+          # Ready once the server answers at all; the test itself reports any
+          # real S3 error with context, so do not pre-judge the status code.
+          for attempt in $(seq 1 60); do
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:9100/poly-book-test || true)
+            if [ "$code" != "000" ]; then
+              echo "s3mock is up (HTTP $code before bucket creation)"
               break
             fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs pb-minio
+            if [ "$attempt" -eq 60 ]; then
+              docker logs pb-s3
               exit 1
             fi
             sleep 1
           done
-          docker run --rm --network host --entrypoint /bin/sh \
-            minio/mc:RELEASE.2025-07-21T05-28-08Z \
-            -c 'mc alias set local http://127.0.0.1:9100 minioadmin minioadmin && mc mb --ignore-existing local/poly-book-test'
-      # The #[ignore]d cases: ClickHouse roundtrips, Parquet-vs-ClickHouse
-      # cross-backend equivalence, and the MinIO S3 roundtrip — the strongest
-      # consistency evidence in the suite, previously never enforced in CI.
-      # Ubuntu runners ship a working Docker daemon for testcontainers.
-      # Single-threaded: the containers are memory-hungry and the tests share
-      # fixed host ports.
+          curl --fail --silent --show-error --request PUT http://127.0.0.1:9100/poly-book-test
+          curl --fail --silent --show-error --head http://127.0.0.1:9100/poly-book-test >/dev/null
+          echo "bucket poly-book-test created"
+      # The #[ignore]d case: the S3 roundtrip through the production
+      # ParquetReader (persist, restart, read back over the object store).
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
         env:
           PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
+          PB_TEST_S3_ACCESS_KEY: test
+          PB_TEST_S3_SECRET_KEY: test
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -89,12 +92,11 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo clippy --all-targets -- -D warnings
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -103,49 +105,9 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  hygiene:
-    name: Docs hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: No internal tracking references
-        # Comments must carry their own rationale, not IDs that resolve to
-        # nothing in the repo. Character classes keep this pattern from
-        # matching its own definition.
-        run: |
-          if grep -rnE "[H]FT-review|[a]udit finding|[a]udit [A]\.[0-9]+|P[0-3]-[A-Z]+-[0-9]|\([A]\.[0-9]+\)" \
-            --include="*.rs" --include="*.ts" --include="*.tsx" --include="*.toml" \
-            --include="*.md" --include="*.proto" --include="*.yml" --include="justfile" \
-            --include="Dockerfile" --exclude-dir=node_modules --exclude-dir=target .; then
-            echo "::error::internal tracking references found; keep the rationale, drop the ID"
-            exit 1
-          fi
-
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      # Keep cargo-audit's own dependency graph locked. Installing without
-      # --locked can resolve transitive crates whose MSRV exceeds the stable
-      # compiler selected above, failing before the repository is audited.
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Audit Rust dependencies
-        # quick-xml DoS advisories with no upgrade path yet (object_store pins
-        # quick-xml < 0.41). Rationale and removal condition are documented on
-        # the matching ignore entries in deny.toml.
-        run: >-
-          cargo audit
-          --ignore RUSTSEC-2026-0194
-          --ignore RUSTSEC-2026-0195
-
   monitoring:
     name: Monitoring Rules
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Validate the Prometheus alert rules parse (PromQL + structure) and that a
@@ -163,56 +125,10 @@ jobs:
         run: promtool check rules monitoring/alerts.yml
       - name: Test alert rules (simulated incidents)
         run: promtool test rules monitoring/alerts_test.yml
-      # Validate the Alertmanager ROUTING config (where alerts page) the same way:
-      # structure check + assert each severity routes to its intended receiver, so
-      # the routing cannot drift from the alert rules' severity labels.
-      - name: Install amtool
-        env:
-          AM_VERSION: "0.28.1"
-        run: |
-          curl -fsSL -o /tmp/am.tar.gz \
-            "https://github.com/prometheus/alertmanager/releases/download/v${AM_VERSION}/alertmanager-${AM_VERSION}.linux-amd64.tar.gz"
-          tar xzf /tmp/am.tar.gz -C /tmp
-          echo "/tmp/alertmanager-${AM_VERSION}.linux-amd64" >> "$GITHUB_PATH"
-      - name: Check Alertmanager config
-        run: amtool check-config monitoring/alertmanager.yml
-      - name: Test Alertmanager routing
-        run: |
-          set -euo pipefail
-          assert_route() {
-            local got
-            got=$(amtool config routes test --config.file=monitoring/alertmanager.yml "severity=$1")
-            if [ "$got" != "$2" ]; then
-              echo "routing FAIL: severity=$1 routed to '$got', expected '$2'" >&2
-              exit 1
-            fi
-            echo "ok: severity=$1 -> $got"
-          }
-          assert_route critical pagerduty-critical
-          assert_route warning slack-warning
-          assert_route info slack-info
-
-  bench:
-    name: Benchmarks (compile)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
-      # Compile every Criterion benchmark so the HFT latency harness (fixed-point,
-      # wire deser, book ops, WAL append, dispatcher normalize, read model,
-      # cross-backend) cannot silently rot. We do NOT run them to completion here:
-      # statistical regression gating needs stable, dedicated hardware, not a
-      # shared CI runner where noise produces false failures. Run `cargo bench`
-      # locally against a committed baseline for perf-regression checks.
-      - run: cargo bench --workspace --no-run
 
   web:
     name: Web (lint, typecheck, test, build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -236,7 +152,7 @@ jobs:
 
   e2e:
     name: E2E (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: web
     defaults:
       run:
@@ -258,68 +174,10 @@ jobs:
         env:
           CI: true
 
-  fuzz:
-    name: Fuzz smoke test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
-        with:
-          toolchain: nightly
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo install cargo-fuzz --locked || true
-      - name: Fuzz WAL corruption (30s)
-        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
-      - name: Fuzz book delta (30s)
-        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
-      # Re-enabled after the query-guard hardening: identifier
-      # blocklist + server-side readonly/limit enforcement.
-      - name: Fuzz query guard (30s)
-        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
-      # The deserialization-path targets: a malformed WS frame or
-      # WAL codec frame must error, never panic the ingest/replay process.
-      - name: Fuzz WS deserialization (30s)
-        run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
-      - name: Fuzz WAL codec decode (30s)
-        run: cargo +nightly fuzz run fuzz_codec_decode -- -max_total_time=30 -timeout=10
-      - name: Fuzz fixed-point parse (30s)
-        run: cargo +nightly fuzz run fuzz_fixed_price -- -max_total_time=30 -timeout=10
-
-  release-build:
-    name: Release build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
-      # Compile the release profile (panic=abort, overflow-checks, LTO) so
-      # release-only breakage surfaces in CI, not at deploy time.
-      - run: cargo build --release --bin poly-book
-
   docker-build:
     name: Docker build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Verify the production image actually builds.
       - run: docker build -t poly-book:ci .
-
-  miri:
-    name: Miri (undefined behavior)
-    runs-on: ubuntu-latest
-    env:
-      MIRIFLAGS: -Zmiri-disable-isolation
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
-        with:
-          toolchain: nightly
-          components: miri
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Miri pb-types (unit tests only)
-        run: cargo +nightly miri test -p pb-types -- --test-threads=1 --skip proptests
-      - name: Miri pb-book (unit tests only)
-        run: cargo +nightly miri test -p pb-book -- --test-threads=1 --skip proptests

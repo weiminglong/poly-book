@@ -20,7 +20,7 @@ It is not meant for:
 - live order submission
 - risk controls
 - execution control
-- research query serving beyond the current narrow API
+- research query serving
 
 ## Runtime Topology
 
@@ -46,14 +46,23 @@ the checkpoint offset, then live-tails the WAL written by a separate `ingest`
 process. The live tail resumes from the exact post-hydration WAL position so
 startup does not re-apply records that were already consumed during hydration.
 
+`serve --tokens A,B` serves a fixed asset set with per-asset checkpoint
+hydration. `serve` with no `--tokens` follows the WAL instead: every asset the
+ingest process writes becomes active, so it pairs with a rotating
+`ingest --auto-rotate` (the `full` compose profile). An asset ages out ten
+minutes after its last record (book, trade, checkpoint, or ingest event); with
+checkpoints enabled a live market is refreshed every checkpoint interval, so
+only a market ingest has dropped ages out. An asset that comes back is
+re-seeded from the next tailed checkpoint rather than waiting for a venue
+snapshot. Follow mode hydrates from the retained WAL only, without checkpoints.
+
 The browser or client talks only to the API layer. It does not reconstruct the
 book from raw feed messages directly.
 
 ## Why It Is Read-Only
 
-The current repository has market-data ingestion, replay, metrics, and
-execution journaling, but it does not yet own the full trading control-plane
-requirements:
+The current repository has market-data ingestion, replay, and metrics, but it
+does not yet own the full trading control-plane requirements:
 
 - authentication and authorization
 - risk checks and kill switches
@@ -68,11 +77,10 @@ the system can support safely.
 
 All surfaces bind to loopback by default (`127.0.0.1`), so the trust boundary is
 the host. Before exposing the API on any non-loopback interface, set
-`api.auth_token` (or `PB__API__AUTH_TOKEN`): when configured, every API,
-WebSocket, and gRPC data route requires `Authorization: Bearer <token>`
-(constant-time compared), while `/health/live` and `/health/ready` stay open for
-orchestrator probes. Startup rejects any non-loopback API or gRPC bind without a
-token. With no token set the workstation stays open on loopback — appropriate
+`api.auth_token` (or `PB__API__AUTH_TOKEN`): when configured, every API and
+WebSocket data route requires `Authorization: Bearer <token>` (constant-time
+compared), while `/health/live` and `/health/ready` stay open for orchestrator
+probes. Startup rejects any non-loopback API bind without a token. With no token set the workstation stays open on loopback — appropriate
 only for a single-operator host. This is bearer-token authentication, not full
 authorization/RBAC, which remains out of scope for the read-only workstation.
 
@@ -88,18 +96,12 @@ unset by default outside Docker. Static assets are served without auth — the
 UI is public code, while every data route it calls still requires the bearer
 token when one is configured.
 
-## Configurable Historical Backend
+## Historical Service
 
-Historical routes (replay, integrity, execution) are served through `pb-service`
-traits with configurable backends:
-
-- `api.historical_backend = "parquet"` (default) — uses `ParquetReader` via
-  `pb-replay`; local files and cloud object stores share the same range-read path
-  and recovered partitions are selected through atomic recovery manifests
-- `api.historical_backend = "clickhouse"` — uses `ClickHouseReader` via `pb-replay`
-
-If ClickHouse is configured but unavailable at startup, the system probes
-connectivity with a 3-second timeout and falls back to Parquet with a warning.
+Historical routes (replay, integrity) are served through
+`pb_service::HistoricalService`, which wraps a `ParquetReader` from
+`pb-replay`; local files and cloud object stores share the same range-read path
+and recovered partitions are selected through atomic recovery manifests.
 
 ## Process Separation
 
@@ -134,7 +136,7 @@ applies, not just feed-driven `serve-api` applies.
 
 The API processes (both `serve-api` and `serve`) derive a live read model in
 memory but do not write new market data to storage. Ingestion persistence is the
-responsibility of the `ingest` or `auto-ingest` processes.
+responsibility of the `ingest` process.
 
 The read model's projector keeps a cached published view for REST reads and
 only rebuilds per-asset snapshot materializations for assets actually touched by
@@ -191,51 +193,10 @@ The current implementation exposes:
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`
-- `GET /api/v1/execution/orders`
 - `GET /health`
-- `GET /api/v1/query/datasets`
-- `POST /api/v1/query/sql`
 - `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
-
-### gRPC Surface
-
-When `grpc.enabled = true`, the `serve` and `serve-api` processes also start a
-gRPC server (default `127.0.0.1:50051`) exposing the same historical query
-services via the `WorkstationService`:
-
-- `Reconstruct` — replay book reconstruction at a target timestamp
-- `IntegritySummary` — integrity check results for an asset time window
-- `ExecutionTimeline` — execution event timeline for an order
-
-The gRPC service delegates to the same `pb-service` traits used by the HTTP
-routes, so backend selection (`parquet` / `clickhouse`) applies equally. It uses
-the same bearer token as HTTP/WS when `api.auth_token` is configured, enforces
-the 24h query-window cap, rejects execution timeline limits above 1000, and
-bounds backend work with a 30s deadline plus a 128-request global in-flight cap.
-
-### Query Workbench
-
-When `api.query_workbench_enabled = true` and the historical backend is
-`clickhouse`, the query workbench endpoints become active:
-
-- `GET /api/v1/query/datasets` — lists available tables and their column schemas
-- `POST /api/v1/query/sql` — executes a read-only SQL query with guard rails
-
-Guard rails:
-- Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
-  `TRUNCATE`) are rejected at the adapter level
-- Quoted identifiers are scanned, so quoted I/O table functions and `system`
-  database references are rejected
-- SQL can reference only the advertised datasets: `book_events`,
-  `trade_events`, `ingest_events`, `book_checkpoints`, `replay_validations`,
-  and `execution_events`
-- `LIMIT` is injected if not present (default `query_max_rows = 10000`)
-- Queries time out after `query_timeout_secs` (default 30s)
-- ClickHouse transport/decode errors strip request URL context before becoming
-  internal API errors, so credential-bearing backend URLs do not enter API logs
-- Both endpoints return 503 when the query workbench is disabled
 
 ### Health Endpoints
 
@@ -264,9 +225,9 @@ The separate SPA talks to these HTTP and WebSocket routes. The currently shipped
 web surfaces are:
 
 - `Live Feed`
+- `Orderbook`
 - `Replay Lab`
 - `Integrity`
-- `Execution Timeline`
 
 Current browser transport behavior:
 
@@ -278,8 +239,9 @@ Current browser transport behavior:
 - virtualized order book table for deep book views
 - render-throttled WebSocket updates (one re-render per animation frame)
 
-The SPA is developed and served separately from `serve-api` today. Packaging the
-Rust API and static frontend assets together remains later work.
+The SPA is developed against the Vite dev server (`web/README.md`) and shipped
+bundled: the Docker image sets `api.static_assets_dir` so `serve-api`/`serve`
+host the built assets (see "Bundled web UI" above).
 
 ## Deferred From This Phase
 

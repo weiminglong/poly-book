@@ -16,14 +16,11 @@ workspace = true
 [dependencies]
 pb-types = { workspace = true }
 pb-book = { workspace = true }
-pb-metrics = { path = "../pb-metrics" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
-clickhouse = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

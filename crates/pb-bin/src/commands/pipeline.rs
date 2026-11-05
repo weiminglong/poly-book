@@ -2,54 +2,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::settings::Settings;
 use anyhow::{bail, Result};
-use config::Config;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
-/// Read an integer config key, defaulting when absent and clamping to a minimum.
-///
-/// Config integers are `i64`; casting a negative value straight to `u32/u64/usize`
-/// wraps to a huge number (e.g. `-1 as u64 == u64::MAX`), which silently disables
-/// lag checks, allocates absurd buffers, or never fires intervals. A value below
-/// `min` (e.g. a `0` flush interval that would busy-loop, or a `0` segment size)
-/// is equally pathological. This clamps to `min` and warns rather than letting a
-/// hostile/typo'd config produce undefined behavior (config-bounds validation).
-pub(crate) fn cfg_int_min(settings: &Config, key: &str, default: i64, min: i64) -> i64 {
-    let v = settings.get_int(key).unwrap_or(default);
-    if v < min {
-        tracing::warn!(
-            key,
-            value = v,
-            min,
-            "config value below minimum; clamping to minimum"
-        );
-        min
-    } else {
-        v
-    }
-}
-
-/// Build a `RateLimiter` from `[feed]` config (shared by REST callers).
-pub fn rest_rate_limiter(settings: &Config) -> pb_feed::RateLimiter {
-    let rate_requests = cfg_int_min(settings, "feed.rate_limit_requests", 1500, 1) as u32;
-    let rate_window = cfg_int_min(settings, "feed.rate_limit_window_secs", 10, 1) as u32;
-    pb_feed::RateLimiter::with_window(rate_requests, rate_window)
-}
-
-/// Build a `RestConfig` from `[feed]` config (shared by REST callers).
-pub fn rest_config_from_settings(settings: &Config) -> pb_feed::RestConfig {
-    pb_feed::RestConfig {
-        clob_base_url: settings
-            .get_string("feed.rest_url")
-            .unwrap_or_else(|_| pb_feed::RestConfig::default().clob_base_url),
-        gamma_base_url: settings
-            .get_string("feed.gamma_url")
-            .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
-    }
-}
 
 /// Current wall-clock time in microseconds since the Unix epoch, for measuring
 /// recv→durable latency. Saturates to 0 before the epoch (never in practice).
@@ -60,14 +18,9 @@ pub fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
-pub async fn start_metrics_server(settings: &Config) -> Result<()> {
-    let metrics_addr: SocketAddr = settings
-        .get_string("metrics.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
-        .parse()?;
-    let metrics_endpoint = settings
-        .get_string("metrics.endpoint")
-        .unwrap_or_else(|_| "/metrics".to_string());
+pub async fn start_metrics_server(settings: &Settings) -> Result<()> {
+    let metrics_addr = settings.metrics.listen_addr;
+    let metrics_endpoint = settings.metrics.endpoint.clone();
 
     let handle = pb_metrics::install_recorder()
         .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {e}"))?;
@@ -93,7 +46,6 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
 
 pub struct SinkHandles {
     pub parquet_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
-    pub clickhouse_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
 }
 
 /// Supervises long-lived background tasks. Each task is tagged with a stable
@@ -186,7 +138,7 @@ impl Supervisor {
 /// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or — when no static keys are set —
 /// the default AWS provider chain (ECS task role / instance profile). It also
 /// honors `AWS_ENDPOINT` (+ `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`)
-/// so an S3-compatible endpoint (MinIO/LocalStack) can be targeted. Plain
+/// so any S3-compatible endpoint can be targeted. Plain
 /// `object_store::parse_url` passes *no* options, so the builder would have no
 /// region/credentials/endpoint and fail against real S3 — hence `parse_url_opts`.
 pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::ObjectStore>, String)> {
@@ -252,19 +204,13 @@ async fn probe_object_store_read(
 }
 
 pub async fn start_storage_sinks(
-    settings: &Config,
+    settings: &Settings,
     enable_parquet: bool,
-    enable_clickhouse: bool,
     supervisor: &mut Supervisor,
 ) -> Result<SinkHandles> {
     let parquet_tx = if enable_parquet {
-        let configured = settings
-            .get_string("storage.parquet_base_path")
-            .unwrap_or_else(|_| "./data".to_string());
-        let (store, base_path) = build_object_store(&configured)?;
-        // min 1s: a 0 interval would make the flush timer fire continuously.
-        let flush_secs =
-            cfg_int_min(settings, "storage.parquet_flush_interval_secs", 300, 1) as u64;
+        let (store, base_path) = build_object_store(&settings.storage.parquet_base_path)?;
+        let flush_secs = settings.storage.parquet_flush_interval_secs;
 
         let (ptx, prx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
         let sink = pb_store::ParquetSink::new(prx, store, base_path)
@@ -279,75 +225,23 @@ pub async fn start_storage_sinks(
         None
     };
 
-    let clickhouse_tx = if enable_clickhouse {
-        let ch_url = settings
-            .get_string("storage.clickhouse_url")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        let ch_db = settings
-            .get_string("storage.clickhouse_database")
-            .unwrap_or_else(|_| "poly_book".to_string());
-
-        let (ctx, crx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
-        let client = clickhouse::Client::default()
-            .with_url(&ch_url)
-            .with_database(&ch_db);
-        let batch_size = cfg_int_min(settings, "storage.clickhouse_batch_size", 10_000, 1) as usize;
-        // min 1s: a 0 interval would make the batch timer fire continuously.
-        let batch_interval_secs =
-            cfg_int_min(settings, "storage.clickhouse_batch_interval_secs", 1, 1) as u64;
-        let sink = pb_store::ClickHouseSink::new(crx, client)
-            .with_batch_config(batch_size, Duration::from_secs(batch_interval_secs));
-        if let Err(e) = sink.ensure_table().await {
-            tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
-        }
-        supervisor.spawn("clickhouse-sink", async move {
-            if let Err(e) = sink.run().await {
-                tracing::error!(error = %e, "clickhouse sink failed");
-            }
-        });
-        Some(ctx)
-    } else {
-        None
-    };
-
-    Ok(SinkHandles {
-        parquet_tx,
-        clickhouse_tx,
-    })
-}
-
-pub fn checkpoint_config_from_settings(
-    settings: &Config,
-) -> super::checkpoint_producer::CheckpointProducerConfig {
-    // min 1s: a 0 interval would make the checkpoint timer fire continuously.
-    let checkpoint_interval_secs =
-        cfg_int_min(settings, "storage.checkpoint_interval_secs", 60, 1) as u64;
-    super::checkpoint_producer::CheckpointProducerConfig {
-        rest_url: settings
-            .get_string("feed.rest_url")
-            .unwrap_or_else(|_| "https://clob.polymarket.com".to_string()),
-        interval: Duration::from_secs(checkpoint_interval_secs),
-        rate_limit_pause: Duration::from_millis(100),
-    }
+    Ok(SinkHandles { parquet_tx })
 }
 
 /// Spawn the checkpoint producer into the supervisor if enabled. Returns `true`
 /// if it was started. Supervising it means an unexpected exit (rather than a
 /// shutdown-token cancellation) is surfaced as a fatal component death.
 pub fn start_checkpoint_producer(
-    settings: &Config,
+    settings: &Settings,
     active_assets_rx: tokio::sync::watch::Receiver<Vec<String>>,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     shutdown: &CancellationToken,
     supervisor: &mut Supervisor,
 ) -> bool {
-    let enabled = settings
-        .get_bool("storage.checkpoints_enabled")
-        .unwrap_or(true);
-    if !enabled {
+    if !settings.storage.checkpoints_enabled {
         return false;
     }
-    let config = checkpoint_config_from_settings(settings);
+    let config = settings.checkpoint_config();
     let token = shutdown.child_token();
     supervisor.spawn("checkpoint-producer", async move {
         super::checkpoint_producer::run(config, active_assets_rx, event_tx, token).await;
@@ -372,33 +266,6 @@ pub fn wal_consumer_position_files(wal_dir: &std::path::Path) -> Vec<std::path::
                 .unwrap_or(false)
         })
         .collect()
-}
-
-pub fn wal_config_from_settings(settings: &Config) -> pb_wal::WalConfig {
-    let base_path = settings
-        .get_string("wal.base_path")
-        .unwrap_or_else(|_| "./data/wal".to_string());
-    // min 1 MB: a 0 segment size would allocate zero-byte segments and wedge the
-    // writer. min 1 segment: 0 would break pruning/retention math.
-    let segment_size_mb = cfg_int_min(settings, "wal.segment_size_mb", 64, 1) as u64;
-    let max_segments = cfg_int_min(settings, "wal.max_segments", 16, 1) as usize;
-    // min 1 byte: a negative value cast to u64 would be u64::MAX and silently
-    // disable the consumer-lag check (the lag could never exceed it).
-    let max_consumer_lag_bytes =
-        cfg_int_min(settings, "wal.max_consumer_lag_bytes", 256 * 1024 * 1024, 1) as u64;
-    let position_commit_interval_ms =
-        cfg_int_min(settings, "wal.position_commit_interval_ms", 1_000, 1) as u64;
-    let flush_interval_ms = cfg_int_min(settings, "wal.flush_interval_ms", 20, 1) as u64;
-    let sync_interval_ms = cfg_int_min(settings, "wal.sync_interval_ms", 200, 1) as u64;
-    pb_wal::WalConfig {
-        base_path: std::path::PathBuf::from(base_path),
-        segment_size: segment_size_mb * 1024 * 1024,
-        max_segments,
-        max_consumer_lag_bytes,
-        position_commit_interval_ms,
-        flush_interval_ms,
-        sync_interval_ms,
-    }
 }
 
 /// Open the WAL writer, optionally as a hot standby that waits to take over.
@@ -442,44 +309,16 @@ pub async fn open_wal_writer_with_standby(
     }
 }
 
-pub fn ws_config_from_settings(settings: &Config) -> pb_feed::WsConfig {
-    pb_feed::WsConfig {
-        ws_url: settings
-            .get_string("feed.ws_url")
-            .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url),
-        ping_interval_secs: cfg_int_min(settings, "feed.ping_interval_secs", 10, 1) as u64,
-        // min 1ms: a 0 base/max reconnect delay would spin a CPU-bound reconnect
-        // loop with no backoff.
-        reconnect_base_delay_ms: cfg_int_min(settings, "feed.reconnect_base_delay_ms", 100, 1)
-            as u64,
-        reconnect_max_delay_ms: cfg_int_min(settings, "feed.reconnect_max_delay_ms", 30000, 1)
-            as u64,
-    }
-}
-
-pub fn api_auth_token_from_settings(settings: &Config) -> Option<String> {
-    settings
-        .get_string("api.auth_token")
-        .ok()
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
-}
-
 fn is_loopback(addr: SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
 /// Enforce the workstation trust boundary before binding externally.
 ///
-/// Loopback remains open for local development. Any non-loopback HTTP/WS or gRPC
-/// bind must carry the shared API bearer token so an accidental `0.0.0.0` in a
-/// container or ECS task does not expose the read/query surfaces unauthenticated.
-pub fn validate_api_auth_boundary(
-    api_addr: SocketAddr,
-    grpc_enabled: bool,
-    grpc_addr: SocketAddr,
-    auth_token: Option<&str>,
-) -> Result<()> {
+/// Loopback remains open for local development. Any non-loopback HTTP/WS bind
+/// must carry the shared API bearer token so an accidental `0.0.0.0` in a
+/// container does not expose the read/query surfaces unauthenticated.
+pub fn validate_api_auth_boundary(api_addr: SocketAddr, auth_token: Option<&str>) -> Result<()> {
     if auth_token.is_some() {
         return Ok(());
     }
@@ -488,182 +327,19 @@ pub fn validate_api_auth_boundary(
             "api.auth_token is required when api.listen_addr binds a non-loopback address ({api_addr})"
         );
     }
-    if grpc_enabled && !is_loopback(grpc_addr) {
-        bail!(
-            "api.auth_token is required when grpc.listen_addr binds a non-loopback address ({grpc_addr})"
-        );
-    }
     Ok(())
 }
 
-pub fn redact_url_for_log(raw: &str) -> String {
-    match url::Url::parse(raw) {
-        Ok(mut parsed) => {
-            if !parsed.username().is_empty() {
-                let _ = parsed.set_username("redacted");
-            }
-            if parsed.password().is_some() {
-                let _ = parsed.set_password(Some("redacted"));
-            }
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            parsed.to_string()
-        }
-        Err(_) => "<invalid-url>".to_string(),
-    }
-}
-
-/// Build service backends from config.
-///
-/// Reads `api.historical_backend` (default: "parquet") to select the backend.
-/// If "clickhouse" is selected but the connection cannot be established, falls
-/// back to Parquet with a warning.
-pub async fn build_services(
-    settings: &Config,
-) -> Result<(
-    pb_service::AnyReplayService,
-    pb_service::AnyIntegrityService,
-    pb_service::AnyExecutionService,
-)> {
-    let backend = settings
-        .get_string("api.historical_backend")
-        .unwrap_or_else(|_| "parquet".to_string());
-    let parquet_base_path = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-
-    match backend.as_str() {
-        "clickhouse" => {
-            let ch_url = settings
-                .get_string("storage.clickhouse_url")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let ch_db = settings
-                .get_string("storage.clickhouse_database")
-                .unwrap_or_else(|_| "poly_book".to_string());
-
-            // Probe ClickHouse connectivity before committing to it.
-            let probe_client = clickhouse::Client::default()
-                .with_url(&ch_url)
-                .with_database(&ch_db);
-            let probe = tokio::time::timeout(
-                Duration::from_secs(3),
-                probe_client.query("SELECT 1").fetch_one::<u8>(),
-            )
-            .await;
-
-            match probe {
-                Ok(Ok(_)) => {
-                    tracing::info!(
-                        url = %redact_url_for_log(&ch_url),
-                        database = %ch_db,
-                        "using ClickHouse historical backend"
-                    );
-                    return Ok((
-                        pb_service::AnyReplayService::ClickHouse(
-                            pb_service::ClickHouseReplayService::new(&ch_url, &ch_db),
-                        ),
-                        pb_service::AnyIntegrityService::ClickHouse(
-                            pb_service::ClickHouseIntegrityService::new(&ch_url, &ch_db),
-                        ),
-                        pb_service::AnyExecutionService::ClickHouse(
-                            pb_service::ClickHouseExecutionService::new(&ch_url, &ch_db),
-                        ),
-                    ));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        error = %e,
-                        url = %redact_url_for_log(&ch_url),
-                        "ClickHouse unavailable, falling back to Parquet"
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        url = %redact_url_for_log(&ch_url),
-                        "ClickHouse probe timed out, falling back to Parquet"
-                    );
-                }
-            }
-        }
-        other if other != "parquet" => {
-            tracing::warn!(
-                backend = %other,
-                "unknown historical_backend, falling back to parquet"
-            );
-        }
-        _ => {}
-    }
-
+/// Build the Parquet-backed historical service from config.
+pub async fn build_historical_service(
+    settings: &Settings,
+) -> Result<pb_service::HistoricalService> {
+    let parquet_base_path = &settings.storage.parquet_base_path;
     tracing::info!(path = %parquet_base_path, "using Parquet historical backend");
-    let (store, base_path) = build_object_store(&parquet_base_path)?;
+    let (store, base_path) = build_object_store(parquet_base_path)?;
     probe_object_store_read(&store, &base_path).await?;
     let reader = pb_replay::ParquetReader::from_store(store, base_path);
-    Ok((
-        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::from_reader(
-            reader.clone(),
-        )),
-        pb_service::AnyIntegrityService::Parquet(pb_service::ParquetIntegrityService::from_reader(
-            reader.clone(),
-        )),
-        pb_service::AnyExecutionService::Parquet(pb_service::ParquetExecutionService::from_reader(
-            reader,
-        )),
-    ))
-}
-
-/// Build the query service from config.
-///
-/// Returns `None` if `api.query_workbench_enabled` is not set to `true`.
-pub async fn build_query_service(
-    settings: &Config,
-    effective_backend_is_clickhouse: bool,
-) -> Option<pb_service::AnyQueryService> {
-    let enabled = settings
-        .get_bool("api.query_workbench_enabled")
-        .unwrap_or(false);
-    if !enabled {
-        tracing::info!("query workbench disabled");
-        return None;
-    }
-
-    if effective_backend_is_clickhouse {
-        let ch_url = settings
-            .get_string("storage.clickhouse_url")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        let ch_db = settings
-            .get_string("storage.clickhouse_database")
-            .unwrap_or_else(|_| "poly_book".to_string());
-        tracing::info!(
-            url = %redact_url_for_log(&ch_url),
-            database = %ch_db,
-            "query workbench enabled (ClickHouse)"
-        );
-        Some(pb_service::AnyQueryService::ClickHouse(
-            pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
-        ))
-    } else {
-        tracing::warn!(
-            "query workbench requires the effective historical backend to be ClickHouse"
-        );
-        None
-    }
-}
-
-/// Read query guard settings from config.
-pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
-    let max_rows = cfg_int_min(settings, "api.query_max_rows", 10_000, 1) as usize;
-    let timeout_secs = cfg_int_min(settings, "api.query_timeout_secs", 30, 1) as u64;
-    (max_rows, timeout_secs)
-}
-
-pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
-    let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
-    let addr: SocketAddr = settings
-        .get_string("grpc.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
-        .parse()
-        .unwrap_or_else(|_| "127.0.0.1:50051".parse().unwrap());
-    (enabled, addr)
+    Ok(pb_service::HistoricalService::from_reader(reader))
 }
 
 pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
@@ -675,73 +351,25 @@ pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
     }
 }
 
-/// Fan out a persisted record to sink channels. Returns `true` if all sends
-/// succeeded, `false` if any channel closed (caller should stop).
+/// Fan out a persisted record to every sink channel. Returns `true` if all
+/// sends succeeded, `false` if any channel closed (the caller should stop).
 pub async fn fanout_event(
     event: pb_types::PersistedRecord,
-    fanout_txs: &[mpsc::Sender<pb_types::PersistedRecord>],
+    sink_txs: &[mpsc::Sender<pb_types::PersistedRecord>],
 ) -> bool {
-    match fanout_txs {
-        [] => true,
-        [a] => {
-            if let Err(e) = a.send(event).await {
-                tracing::warn!("fan-out channel closed: {e}");
-                return false;
-            }
-            true
+    let mut ok = true;
+    for (i, tx) in sink_txs.iter().enumerate() {
+        if let Err(e) = tx.send(event.clone()).await {
+            tracing::warn!(sink = i, "fan-out channel closed: {e}");
+            ok = false;
         }
-        [a, b] => {
-            let ev_a = event.clone();
-            let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
-            if ra.is_err() || rb.is_err() {
-                if let Err(e) = ra {
-                    tracing::warn!("fan-out channel 0 closed: {e}");
-                }
-                if let Err(e) = rb {
-                    tracing::warn!("fan-out channel 1 closed: {e}");
-                }
-                return false;
-            }
-            true
-        }
-        _ => unreachable!("at most 2 sinks"),
     }
+    ok
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn empty_config() -> Config {
-        Config::builder().build().unwrap()
-    }
-
-    fn config_with(key: &str, value: &str) -> Config {
-        Config::builder()
-            .set_override(key, value)
-            .unwrap()
-            .build()
-            .unwrap()
-    }
-
-    // --- Config bounds validation ---
-
-    #[test]
-    fn cfg_int_min_defaults_clamps_and_rejects_negatives() {
-        // Missing key -> default.
-        assert_eq!(cfg_int_min(&empty_config(), "x.y", 64, 1), 64);
-        // Present, above min -> unchanged.
-        assert_eq!(cfg_int_min(&config_with("x.y", "128"), "x.y", 64, 1), 128);
-        // Zero, below min -> clamped to min (would otherwise be a 0 interval /
-        // zero-byte segment).
-        assert_eq!(cfg_int_min(&config_with("x.y", "0"), "x.y", 64, 1), 1);
-        // Negative -> clamped to min, NOT cast to a huge unsigned value.
-        assert_eq!(cfg_int_min(&config_with("x.y", "-1"), "x.y", 64, 1), 1);
-        assert_eq!(
-            cfg_int_min(&config_with("x.y", "-1000"), "x.y", 64, 1) as u64,
-            1
-        );
-    }
 
     // --- Supervisor ---
 
@@ -928,185 +556,57 @@ mod tests {
         assert!(files.is_empty());
     }
 
-    // --- wal_config_from_settings ---
-
-    #[test]
-    fn wal_config_defaults() {
-        let cfg = wal_config_from_settings(&empty_config());
-        assert_eq!(cfg.base_path, std::path::PathBuf::from("./data/wal"));
-        assert_eq!(cfg.segment_size, 64 * 1024 * 1024);
-        assert_eq!(cfg.max_segments, 16);
-        assert_eq!(cfg.max_consumer_lag_bytes, 256 * 1024 * 1024);
-        assert_eq!(cfg.position_commit_interval_ms, 1_000);
-    }
-
-    #[test]
-    fn wal_config_overrides() {
-        let settings = Config::builder()
-            .set_override("wal.base_path", "/tmp/wal")
-            .unwrap()
-            .set_override("wal.segment_size_mb", 32)
-            .unwrap()
-            .set_override("wal.max_segments", 8)
-            .unwrap()
-            .set_override("wal.position_commit_interval_ms", 250)
-            .unwrap()
-            .build()
-            .unwrap();
-        let cfg = wal_config_from_settings(&settings);
-        assert_eq!(cfg.base_path, std::path::PathBuf::from("/tmp/wal"));
-        assert_eq!(cfg.segment_size, 32 * 1024 * 1024);
-        assert_eq!(cfg.max_segments, 8);
-        assert_eq!(cfg.position_commit_interval_ms, 250);
-    }
-
-    // --- ws_config_from_settings ---
-
-    #[test]
-    fn ws_config_defaults() {
-        let cfg = ws_config_from_settings(&empty_config());
-        let default = pb_feed::WsConfig::default();
-        assert_eq!(cfg.ws_url, default.ws_url);
-        assert_eq!(cfg.ping_interval_secs, 10);
-        assert_eq!(cfg.reconnect_base_delay_ms, 100);
-        assert_eq!(cfg.reconnect_max_delay_ms, 30000);
-    }
-
-    #[test]
-    fn ws_config_overrides() {
-        let settings = Config::builder()
-            .set_override("feed.ping_interval_secs", 20)
-            .unwrap()
-            .set_override("feed.reconnect_base_delay_ms", 500)
-            .unwrap()
-            .set_override("feed.reconnect_max_delay_ms", 60000)
-            .unwrap()
-            .build()
-            .unwrap();
-        let cfg = ws_config_from_settings(&settings);
-        assert_eq!(cfg.ping_interval_secs, 20);
-        assert_eq!(cfg.reconnect_base_delay_ms, 500);
-        assert_eq!(cfg.reconnect_max_delay_ms, 60000);
-    }
-
-    // --- query_config_from_settings ---
-
-    #[test]
-    fn query_config_defaults() {
-        let (max_rows, timeout) = query_config_from_settings(&empty_config());
-        assert_eq!(max_rows, 10_000);
-        assert_eq!(timeout, 30);
-    }
-
-    #[test]
-    fn query_config_overrides() {
-        let settings = Config::builder()
-            .set_override("api.query_max_rows", 5000)
-            .unwrap()
-            .set_override("api.query_timeout_secs", 60)
-            .unwrap()
-            .build()
-            .unwrap();
-        let (max_rows, timeout) = query_config_from_settings(&settings);
-        assert_eq!(max_rows, 5000);
-        assert_eq!(timeout, 60);
-    }
-
-    #[tokio::test]
-    async fn query_service_uses_the_effective_backend_after_fallback() {
-        let settings = Config::builder()
-            .set_override("api.query_workbench_enabled", true)
-            .unwrap()
-            .set_override("api.historical_backend", "clickhouse")
-            .unwrap()
-            .build()
-            .unwrap();
-
-        assert!(build_query_service(&settings, false).await.is_none());
-        assert!(matches!(
-            build_query_service(&settings, true).await,
-            Some(pb_service::AnyQueryService::ClickHouse(_))
-        ));
-    }
-
-    // --- grpc_config_from_settings ---
-
-    #[test]
-    fn grpc_config_defaults() {
-        let (enabled, addr) = grpc_config_from_settings(&empty_config());
-        assert!(!enabled);
-        assert_eq!(addr, "127.0.0.1:50051".parse::<SocketAddr>().unwrap());
-    }
-
-    #[test]
-    fn grpc_config_enabled_with_custom_addr() {
-        let settings = Config::builder()
-            .set_override("grpc.enabled", true)
-            .unwrap()
-            .set_override("grpc.listen_addr", "127.0.0.1:9999")
-            .unwrap()
-            .build()
-            .unwrap();
-        let (enabled, addr) = grpc_config_from_settings(&settings);
-        assert!(enabled);
-        assert_eq!(addr, "127.0.0.1:9999".parse::<SocketAddr>().unwrap());
-    }
-
-    #[test]
-    fn api_auth_token_from_settings_trims_empty_values() {
-        assert_eq!(api_auth_token_from_settings(&empty_config()), None);
-        assert_eq!(
-            api_auth_token_from_settings(&config_with("api.auth_token", "  secret  ")),
-            Some("secret".to_string())
-        );
-        assert_eq!(
-            api_auth_token_from_settings(&config_with("api.auth_token", "   ")),
-            None
-        );
-    }
-
     #[test]
     fn validate_api_auth_boundary_requires_token_for_external_binds() {
         let api_loopback = "127.0.0.1:3000".parse::<SocketAddr>().unwrap();
         let api_external = "0.0.0.0:3000".parse::<SocketAddr>().unwrap();
-        let grpc_loopback = "127.0.0.1:50051".parse::<SocketAddr>().unwrap();
-        let grpc_external = "0.0.0.0:50051".parse::<SocketAddr>().unwrap();
 
-        assert!(validate_api_auth_boundary(api_loopback, false, grpc_loopback, None).is_ok());
-        assert!(validate_api_auth_boundary(api_external, false, grpc_loopback, None).is_err());
-        assert!(
-            validate_api_auth_boundary(api_external, false, grpc_loopback, Some("secret")).is_ok()
-        );
-        assert!(validate_api_auth_boundary(api_loopback, true, grpc_external, None).is_err());
+        assert!(validate_api_auth_boundary(api_loopback, None).is_ok());
+        assert!(validate_api_auth_boundary(api_external, None).is_err());
+        assert!(validate_api_auth_boundary(api_external, Some("secret")).is_ok());
     }
 
-    #[test]
-    fn redact_url_for_log_removes_credentials_query_and_fragment() {
-        assert_eq!(
-            redact_url_for_log("http://user:pass@clickhouse:8123/path?password=secret#frag"),
-            "http://redacted:redacted@clickhouse:8123/path"
-        );
-        assert_eq!(
-            redact_url_for_log("http://clickhouse:8123?secret=x"),
-            "http://clickhouse:8123/"
-        );
-        assert_eq!(redact_url_for_log("not a url"), "<invalid-url>");
+    // --- fanout_event ---
+
+    fn sample_record() -> pb_types::PersistedRecord {
+        use pb_types::{
+            DataSource, EventProvenance, IngestEvent, IngestEventKind, PersistedRecord,
+        };
+        PersistedRecord::Ingest(IngestEvent {
+            asset_id: None,
+            kind: IngestEventKind::ReconnectSuccess,
+            provenance: EventProvenance {
+                recv_timestamp_us: 1,
+                exchange_timestamp_us: 0,
+                source: DataSource::System,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: None,
+        })
     }
 
-    // --- checkpoint_config_from_settings ---
-
-    #[test]
-    fn checkpoint_config_defaults() {
-        let cfg = checkpoint_config_from_settings(&empty_config());
-        assert_eq!(cfg.rest_url, "https://clob.polymarket.com");
-        assert_eq!(cfg.interval, Duration::from_secs(60));
-        assert_eq!(cfg.rate_limit_pause, Duration::from_millis(100));
+    #[tokio::test]
+    async fn fanout_event_delivers_to_every_open_channel() {
+        let (tx1, mut rx1) = mpsc::channel(4);
+        let (tx2, mut rx2) = mpsc::channel(4);
+        assert!(fanout_event(sample_record(), &[]).await);
+        assert!(fanout_event(sample_record(), &[tx1, tx2]).await);
+        assert!(rx1.recv().await.is_some());
+        assert!(rx2.recv().await.is_some());
     }
 
-    #[test]
-    fn checkpoint_config_overrides() {
-        let settings = config_with("storage.checkpoint_interval_secs", "120");
-        let cfg = checkpoint_config_from_settings(&settings);
-        assert_eq!(cfg.interval, Duration::from_secs(120));
+    #[tokio::test]
+    async fn fanout_event_fails_closed_when_any_channel_is_closed() {
+        let (open_tx, mut open_rx) = mpsc::channel(4);
+        let (closed_tx, closed_rx) = mpsc::channel(4);
+        drop(closed_rx);
+        assert!(!fanout_event(sample_record(), &[open_tx, closed_tx]).await);
+        // The open channel still received the record.
+        assert!(open_rx.recv().await.is_some());
     }
 }

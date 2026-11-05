@@ -1,8 +1,8 @@
 name: Deploy demo to GitHub Pages
 
 # Publishes the SPA in backend-free demo mode so anyone can see the
-# workstation (simulated live orderbook, replay, integrity, execution, query
-# pages) without cloning or running anything.
+# workstation (simulated live orderbook, replay, and integrity pages) without
+# cloning or running anything.
 on:
   push:
     branches: [main]
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -49,7 +49,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

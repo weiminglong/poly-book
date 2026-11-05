@@ -177,17 +177,6 @@ impl<R: EventReader> ReplayEngine<R> {
             persisted_at_us,
         }))
     }
-
-    pub async fn execution_events(
-        &self,
-        order_id: Option<&str>,
-        start_us: u64,
-        end_us: u64,
-    ) -> Result<Vec<pb_types::ExecutionEvent>, ReplayError> {
-        self.reader
-            .read_execution_events(order_id, start_us, end_us)
-            .await
-    }
 }
 
 fn reconstruct_book(

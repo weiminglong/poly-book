@@ -9,10 +9,8 @@ TypeScript 5.9 (strict), Tailwind CSS v4, and TanStack Query v5.
 |-------|------|---------|
 | `/live-feed` | Live Feed | Ops dashboard — feed health, asset grid, connection status |
 | `/orderbook` | Orderbook | Price ladder + depth chart with WebSocket streaming |
-| `/replay` | Replay | Reconstruct orderbooks at any historical timestamp |
-| `/execution` | Execution | Inspect execution orders with latency waterfall |
+| `/replay` | Replay Lab | Reconstruct orderbooks at any historical timestamp |
 | `/integrity` | Integrity | Data completeness and continuity analysis |
-| `/query` | Query | SQL workbench over split datasets |
 
 ## Project structure
 
@@ -23,9 +21,7 @@ src/
     live-feed/
     orderbook/
     replay/
-    execution/
     integrity/
-    query/
   shared/
     api/         Zod schemas, fetch client, TanStack Query hooks, demo fixtures
     components/  Reusable UI components (Card, Badge, Button, DataTable, etc.)
@@ -40,7 +36,7 @@ src/
 - **React 19** + **Vite 7** — lazy-loaded route bundles, <200KB initial JS gzipped
 - **TypeScript 5.9** — strict mode with `noUnusedLocals`, `noUnusedParameters`
 - **Tailwind CSS v4** — CSS-first `@theme` configuration, dark/light themes, density modes
-- **TanStack Query v5** — all server state, polling, caching, mutations
+- **TanStack Query v5** — all server state, polling, caching
 - **TanStack Table v8** — sortable, paginated data tables
 - **Zod** — runtime API response validation at fetch boundary
 - **Radix UI** — accessible dialog, tooltip, select, popover primitives
@@ -51,7 +47,7 @@ src/
 
 ## Local development
 
-Requires Node 24.13.1+ (see `.nvmrc`).
+Requires Node 22.12+ (see `.nvmrc`; the Dockerfile builds with `node:22`).
 
 ```bash
 # Start the backend

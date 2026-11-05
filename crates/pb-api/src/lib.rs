@@ -9,10 +9,8 @@ pub mod streaming;
 
 pub use dto::{
     ActiveAssetSummary, ApiErrorResponse, AssetRef, AssetResolveResponse, BookUpdateMessage,
-    CompletenessLabel, ContinuityWarning, DatasetInfo, DatasetSchemaResponse, ExecutionEventView,
-    ExecutionTimelineResponse, FeedMode, FeedStatusResponse, IntegritySummaryResponse,
-    LatencySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot, PriceLevelView, QueryColumn,
-    QueryResultResponse, ReplayReconstructionResponse, SessionStatus,
+    CompletenessLabel, ContinuityWarning, FeedMode, FeedStatusResponse, IntegritySummaryResponse,
+    LiveOrderBookSnapshot, PriceLevelView, ReplayReconstructionResponse, SessionStatus,
 };
 pub use error::ApiError;
 pub use live_state::{LiveReadModel, SnapshotLookupError};

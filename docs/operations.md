@@ -1,6 +1,6 @@
 # Operations Guide
 
-This document collects configuration, deployment, and infrastructure details that
+This document collects configuration, deployment, and data layout details that
 are useful for operators but too heavy for the main README.
 
 ## Configuration
@@ -11,10 +11,10 @@ Runtime config is layered in this order:
 2. Environment variables with the `PB__` prefix
 3. CLI flags
 
-At startup the process validates the loaded config against the set of recognized
-keys and logs a `WARN` for any unknown `section.key` (a typo or a removed/renamed
-setting), so a misspelled key — which is otherwise silently ignored and falls
-back to the default — is visible in the logs rather than silently dropped.
+The layered sources are deserialized once into a typed settings struct, so an
+unknown or misspelled key (a typo, or a removed/renamed setting) is a startup
+error that names the field, a negative number is rejected, and a zero interval
+or size is clamped to its minimum with a warning.
 
 ### Preflight (`doctor`)
 
@@ -24,89 +24,29 @@ poly-book doctor --skip-network  # offline/CI variant
 ```
 
 Prints a pass/warn/fail table and exits non-zero on failure, so it can gate a
-deploy (`poly-book doctor && poly-book ingest`). Checks: unknown config keys
-(a hard failure here, unlike the warn-only startup path), Parquet path
+deploy (`poly-book doctor && poly-book ingest`). Checks: Parquet path
 writability, WAL directory state (segments, consumer positions, last-write
 age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
-through the same connector the feed uses, ClickHouse ping (warn-only — it is
-an optional component), and API/metrics/gRPC port availability.
+through the same connector the feed uses, and API/metrics port availability.
 
-Current defaults:
+The authoritative, commented defaults are in [`config/default.toml`](../config/default.toml);
+every key there can be overridden with `PB__<SECTION>__<KEY>`.
 
-```toml
-[feed]
-ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-rest_url = "https://clob.polymarket.com"
-gamma_url = "https://gamma-api.polymarket.com"
-ping_interval_secs = 10
-reconnect_base_delay_ms = 100
-reconnect_max_delay_ms = 30000
-rate_limit_requests = 1500
-rate_limit_window_secs = 10
-
-# parquet_base_path accepts a local path, file:// URL, or s3://bucket/prefix.
-# An s3:// path is wired to a real S3 object store. S3 is configured from the
-# process environment (parsed via
-# object_store::parse_url_opts(url, env::vars())): for s3://, set AWS_REGION and
-# either static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or rely on the default AWS
-# provider chain (ECS task role / instance profile). For an S3-compatible endpoint
-# (MinIO/LocalStack) also set AWS_ENDPOINT, AWS_ALLOW_HTTP=true, and
-# AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false (path-style). End-to-end persistence +
-# restart is covered by tests/integration/s3_minio_roundtrip.rs.
-[storage]
-parquet_base_path = "./data"
-parquet_flush_interval_secs = 300
-parquet_row_group_size = 65536  # reserved; not yet wired (Parquet uses a fixed row-group size)
-checkpoints_enabled = true
-checkpoint_interval_secs = 60
-clickhouse_url = "http://localhost:8123"
-clickhouse_database = "poly_book"
-clickhouse_batch_interval_secs = 1   # honored by the ClickHouse sink
-clickhouse_batch_size = 10000        # honored by the ClickHouse sink
-
-# Services default to loopback. Non-loopback API/gRPC binds require
-# api.auth_token / PB__API__AUTH_TOKEN at startup.
-[metrics]
-listen_addr = "127.0.0.1:9090"
-endpoint = "/metrics"
-
-[api]
-listen_addr = "127.0.0.1:3000"
-default_depth = 20
-max_depth = 200
-stale_after_secs = 15
-historical_backend = "parquet"  # or "clickhouse"
-query_workbench_enabled = false
-query_max_rows = 10000
-query_timeout_secs = 30
-http_request_timeout_secs = 30   # per-request HTTP timeout (504 if exceeded); not the WS stream
-# auth_token = ""                # required for non-loopback API/gRPC binds; all API/WS/gRPC data routes require it (health stays open)
-
-[wal]
-base_path = "./data/wal"
-segment_size_mb = 64
-max_segments = 16             # hard cap on retained segments (incl. active); pruning enforces both this and the lag-byte budget
-max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window (lag-byte budget)
-position_commit_interval_ms = 1000
-flush_interval_ms = 20        # BufWriter flush cadence (tail-reader visibility)
-sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)
-
-[grpc]
-enabled = false
-# Loopback by default; non-loopback requires api.auth_token.
-listen_addr = "127.0.0.1:50051"
-
-[logging]
-level = "info"
-format = "pretty"   # "json" emits structured JSON logs
-```
+`storage.parquet_base_path` accepts a local path, a `file://` URL, or an
+`s3://bucket/prefix`. S3 is configured from the process environment (parsed via
+`object_store::parse_url_opts(url, env::vars())`): set `AWS_REGION` and either
+static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or rely on the default AWS
+provider chain. For an S3-compatible endpoint (an S3 mock or similar) also set
+`AWS_ENDPOINT`, `AWS_ALLOW_HTTP=true`, and
+`AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false` (path-style). End-to-end persistence
+plus restart is covered by `tests/integration/s3_minio_roundtrip.rs`.
 
 Example overrides:
 
 ```bash
 PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data \
 PB__LOGGING__LEVEL=debug \
-cargo run -- auto-ingest
+cargo run -- ingest --auto-rotate
 ```
 
 On feed reconnect success, the dispatcher clears per-asset sequence and stale
@@ -175,7 +115,6 @@ Primary datasets:
 - `ingest_events`
 - `book_checkpoints`
 - `replay_validations`
-- `execution_events`
 
 ### WAL Layout
 
@@ -207,10 +146,10 @@ unrecognized version rather than silently misreading bytes:
 
 | Format | Version constant | Reader gate |
 |---|---|---|
-| WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `2`) | `decode` rejects any other version byte; pre-v2 frames return an error with a "drain and re-create the WAL" hint |
-| Parquet / ClickHouse columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
+| WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `3`) | `decode` rejects any other version byte; v1/v2 frames return an error with a "drain and re-create the WAL" hint |
+| Parquet columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
 
-Frozen golden fixtures (`golden_codec_book_v2_bytes_are_stable` in `pb-wal`, and
+Frozen golden fixtures (`golden_codec_book_v3_bytes_are_stable` in `pb-wal`, and
 the determinism fixture in `tests/integration/book_determinism.rs`) make any
 accidental byte-format change a test failure, so a version bump is always a
 deliberate act.
@@ -222,7 +161,7 @@ deliberate act.
    version bump. A field whose absence changes meaning, a re-typed/removed field,
    or any reordering that breaks the frozen golden bytes **does**.
 2. **Bump exactly one constant** — `CURRENT_VERSION` for WAL frame changes,
-   `PB_SCHEMA_VERSION` for Parquet/ClickHouse column changes — in the same commit
+   `PB_SCHEMA_VERSION` for Parquet column changes — in the same commit
    as the format change.
 3. **Add a cross-version fixture** capturing the *previous* version's bytes and a
    test asserting the new reader either reads them or rejects them with a clear,
@@ -231,15 +170,13 @@ deliberate act.
    store: stop `ingest`, let `serve` consume to the end, then let the new build
    create fresh segments. Old segments are not auto-upgraded — a version mismatch
    is surfaced, not papered over.
-5. **Re-snapshot / migrate Parquet and ClickHouse.** Historical Parquet files keep
+5. **Re-snapshot / migrate Parquet.** Historical Parquet files keep
    their original `pb_schema_version`. Either (a) keep readers able to accept the
    prior version for the retention window, or (b) use a dedicated migration or
    re-export from the durable source of truth for every affected dataset.
    `backfill` only creates book checkpoints, while `reconcile` only republishes
    complete retained-WAL hours for book, trade, and ingest data; neither is a
-   general migration path for all six datasets or arbitrary history. ClickHouse
-   column changes go through a normal `ALTER TABLE` migration before the new
-   writer starts.
+   general migration path for all five datasets or arbitrary history.
 6. **Verify with replay.** Run the golden replay regression and a
    `replay validate` over a migrated window before promoting the deploy.
 
@@ -247,43 +184,28 @@ deliberate act.
 
 GitHub Actions runs the following checks on pushes and pull requests to `main`:
 
-- `cargo check --all-targets` (requires `protobuf-compiler`)
-- `cargo test --workspace --exclude pb-integration-tests` (requires `protobuf-compiler`)
-- `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
+- `cargo check --all-targets`
+- `cargo test --workspace --exclude pb-integration-tests`
+- `cargo clippy --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
-- `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
-- `tfsec` + `tflint` (AWS ruleset) + `terraform fmt`/`validate` — Terraform
-  static security scan, provider-aware lint, and validation of `infra/`
-  (`supply-chain` workflow, `iac-scan` job)
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
-  validation and offline incident unit tests; `amtool check-config` + routing
-  assertions — Alertmanager routing validation (`monitoring` job)
-- `cargo bench --workspace --no-run` — compiles every Criterion benchmark so the
-  latency harness can't rot (`bench` job; statistical regression gating is
-  local-only, since shared runners are too noisy)
-- Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`
-- Fuzz smoke test — all six targets at 30s each on nightly Rust:
-  `fuzz_wal_corruption`, `fuzz_book_delta`, `fuzz_query_guard`, `fuzz_ws_deser`,
-  `fuzz_codec_decode`, `fuzz_fixed_price`
-- `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
+  validation and offline incident unit tests (`monitoring` job)
+- `docker build` of the production image (`docker-build` job)
+- Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`, then
+  Playwright end-to-end tests against the built bundle
 
-Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
-separate weekly schedule and on pushes/PRs.
+Outside the per-PR gate: fuzz smoke tests (all five targets at 30s each on
+nightly Rust) run nightly and on pushes to `main` (`fuzz.yml`), and
+`cargo-deny` (advisories, bans, licenses, sources) runs on PRs and weekly
+(`supply-chain.yml`).
 
 ## Deployment
 
-Merges to `main` trigger the deploy workflow after CI passes.
-
-Deployment flow:
-
-1. Build the Docker image (multi-stage: Node for SPA, Rust for binary)
-2. Push the image to Amazon ECR
-3. Register a new ECS task definition
-4. Update the ECS service
-5. Wait for service stability
-
-The workflow uses GitHub OIDC and an AWS IAM role stored in the
-`AWS_DEPLOY_ROLE_ARN` repository secret.
+There is no cloud deployment in this repository. The published Docker image
+(`release.yml` pushes it to GHCR on tags) plus `docker-compose.yml` are the
+supported ways to run the system off a developer machine; any orchestrator that
+can run that image and mount a volume for `/data` works. Set
+`PB__API__AUTH_TOKEN` before binding the API off loopback.
 
 ## Deployment Packaging
 
@@ -305,72 +227,6 @@ The image's default command is the combined live workstation
 
 A later migration to separate containers (Rust API + Nginx/Caddy for static
 assets) is straightforward when traffic or team structure warrants it.
-
-## Infrastructure
-
-Terraform in `infra/` provisions the AWS resources for the deployment target:
-
-- ECR for image storage
-- ECS Fargate compute — the ingest service keeps an **on-demand base**
-  (`ingest_on_demand_base`) with Spot only for overflow, so a Spot reclaim never
-  drops all capture
-- a read-only **`serve`** API service (`serve.tf`) on the shared WAL
-- **EFS** (`efs.tf`) for the durable write-ahead log, mounted into both ingest
-  and serve (survives task restarts / host loss; pairs with the `--standby`
-  writer failover)
-- optional **single-node ClickHouse** on ECS+EFS (`clickhouse.tf`, opt-in via
-  `enable_clickhouse_service`; prefer managed ClickHouse for production), with
-  Cloud Map private DNS for `serve` discovery and password authentication
-  injected through ECS secrets
-- S3 for Parquet storage (SSE-KMS CMK, versioning, lifecycle, access logging to a
-  hardened SSE-S3 log bucket)
-- VPC (with Flow Logs), subnets, security groups (metrics port in-VPC only; EFS
-  egress scoped to the VPC), IAM (incl. scoped EFS mount perms), ECR (immutable
-  tags, scan-on-push), and CloudWatch resources
-
-Runtime secrets:
-
-- `serve_api_auth_token_secret_arn` — required when `serve_desired_count > 0`
-  because the ECS serve task binds `PB__API__LISTEN_ADDR=0.0.0.0:3000`.
-- `clickhouse_password_secret_arn` — required when `enable_clickhouse_service`
-  is true; injected as `CLICKHOUSE_PASSWORD` for the ClickHouse container.
-- `clickhouse_app_url_secret_arn` — required when `enable_clickhouse_service`
-  is true; injected as `PB__STORAGE__CLICKHOUSE_URL` for app/serve tasks. The
-  secret value should include credentials, for example
-  `http://poly_book:<password>@clickhouse.poly-book.internal:8123`.
-
-IAM is split by runtime role: the live ingest task keeps S3 read/write/list
-without `s3:DeleteObject`, offline `reconcile` has a separate maintenance task
-role with delete permission for Parquet recovery, serve uses a read-only S3 role
-plus EFS consumer-position writes, and the optional ClickHouse task has a
-separate no-S3 task role.
-
-> **Status:** the `serve`/EFS/ClickHouse/on-demand topology
-> passes `terraform validate` + `fmt` **and a `tfsec` static security scan** (CI
-> `iac-scan` job; intentional trade-offs are documented inline with
-> `#tfsec:ignore:<AVD-ID>` + rationale) but has **not** been `terraform apply`ed
-> against a live account. Applying it, plus a Spot-reclaim and a restart/failover
-> drill, is the remaining verification.
-
-Bootstrap:
-
-```bash
-cd infra
-cp terraform.tfvars.example terraform.tfvars
-terraform init
-terraform apply
-```
-
-Then:
-
-1. Set `github_org` in `terraform.tfvars`
-2. Copy the `github_actions_role_arn` output into the GitHub secret
-   `AWS_DEPLOY_ROLE_ARN`
-
-## Cost Control
-
-Set `desired_count = 0` in `infra/terraform.tfvars` and re-apply Terraform to
-stop running tasks while preserving the deployed resources.
 
 ## Local Inspection
 
@@ -401,10 +257,10 @@ pre-seeds every asset's book from its first captured venue snapshot, then
 streams the records into the same read model the live pipeline uses — at
 original cadence (divided by `--speed`), looping forever, with provenance
 timestamps shifted to the wall clock so live surfaces read as current.
-Historical routes (replay, integrity, execution) answer from the capture with
-its original timestamps; the startup banner prints copy-paste examples with
-known-good values. The SQL workbench stays disabled (ClickHouse-only). Any
-directory produced by `ingest`/`auto-ingest` works as `--data-dir`.
+Historical routes (replay, integrity) answer from the capture with its
+original timestamps; the startup banner prints copy-paste examples with
+known-good values. Any directory produced by `ingest` works as
+`--data-dir`.
 
 ### Docker Compose (one command)
 
@@ -412,7 +268,7 @@ directory produced by `ingest`/`auto-ingest` works as `--data-dir`.
 # One-container live workstation: feed + API + web UI at http://localhost:3000
 docker compose --profile minimal up --build      # or: just up
 
-# Production process separation: ingest + serve (shared WAL volume) + ClickHouse
+# Production process separation: ingest + serve (shared WAL volume)
 docker compose --profile full up --build         # or: just up-full
 
 # Full topology plus Prometheus/Alertmanager/Grafana (Grafana at :3001)
@@ -449,11 +305,16 @@ cargo run -- ingest --tokens <TOKEN_ID>
 
 # Terminal 2 — serve process (checkpoint hydration + WAL tail + API)
 cargo run -- serve --tokens <TOKEN_ID>
+
+# Or pair with a rotating ingest: serve follows whatever the WAL carries
+cargo run -- ingest --auto-rotate   # terminal 1
+cargo run -- serve              # terminal 2
 ```
 
 The `serve` process hydrates from the latest `BookCheckpoint`, replays WAL
 records from that offset, then live-tails the WAL. It can be killed and
-restarted without data loss.
+restarted without data loss. Without `--tokens` it follows the WAL: assets
+appear as ingest writes them and drop off ten minutes after their last record.
 
 ### Storage Recovery (`reconcile`)
 
@@ -488,9 +349,9 @@ default 512 MiB maintenance-task class.
 
 Only datasets partitioned exactly by receive time are eligible: `book_events`,
 `trade_events`, and `ingest_events`. `book_checkpoints` uses exchange snapshot
-time, while validation and execution timestamps are independently supplied;
-those partitions are left untouched because the retained WAL endpoints cannot
-prove them complete.
+time, while validation timestamps are independently supplied; those
+partitions are left untouched because the retained WAL endpoints cannot prove
+them complete.
 
 For each eligible `(dataset, asset, hour)`, recovery performs a two-phase cut:
 
@@ -509,15 +370,15 @@ application view is still published but the command exits non-zero; direct
 DuckDB/Polars scans are unsafe until a rerun reports zero cleanup failures.
 After clean promotion and cleanup, the active object is in the normal tree for
 direct inspection. The command is idempotent and does not commit a consumer
-position. ClickHouse is not rebuilt by this command.
-Do not run `backfill`, `execution-append`, or another Parquet-writing task
-against the same prefix concurrently: those commands do not share the WAL lease,
+position.
+Do not run `backfill` or another Parquet-writing task against the same prefix
+concurrently: those commands do not share the WAL lease,
 and a write racing the manifest cut would make the recovered view ambiguous.
 Application reads retry manifest resolution once if cleanup crosses a request.
 Stop ad-hoc DuckDB/Polars scans during the maintenance cut, and do not resume
 them after a non-zero cleanup result, because those tools do not interpret
 recovery manifests.
-In ECS, run this as a maintenance task using the dedicated reconcile task role;
+In a container deployment, run this as a one-off maintenance task;
 the always-on ingest task role intentionally lacks `s3:DeleteObject`.
 
 ### Failover & Recovery (RTO/RPO)
@@ -539,7 +400,7 @@ Recovery objectives by failure mode:
 | `serve` (API) process crash | Restart; re-hydrate from latest checkpoint + WAL tail | 0 (read-only; no data originates here) | seconds — bounded by checkpoint hydration + WAL replay |
 | `ingest` process crash, same host | Restart `ingest`; flock is already released; it resumes appending to the last segment | ≤ `wal.sync_interval_ms` of un-`fdatasync`'d records (default 200 ms) on OS-crash/power-loss; **0** on a clean process kill | seconds — process start + lock acquire |
 | Parquet sink buffer lost (OOM/SIGKILL) | `reconcile` strictly republishes complete hourly partitions from the durable WAL (offline); the earliest retained hour and any trailing partial hour remain untouched | 0 for a fully covered, gap-free WAL hour | minutes — offline rebuild, scales with window |
-| Host loss (WAL on durable/EFS volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
+| Host loss (WAL on a durable shared volume) | Run a hot standby `ingest --standby` against the shared WAL volume; it waits on the lock and **auto-promotes** the moment the primary's lock releases | ≤ last synced records, as above | seconds-to-minutes — standby poll interval + feed connect, once the standby is already running |
 | Host loss (WAL on ephemeral storage) | Parquet on S3 is durable; the in-flight WAL tail is lost | the un-flushed Parquet window not yet mirrored to the WAL volume | minutes |
 
 **Automatic writer promotion** is available: start the standby as
@@ -565,61 +426,6 @@ failover drill — which adds container scheduling + health-check time on top of
 locally-measured durability-layer handoff above. The single-writer flock +
 `--standby` auto-promotion + durable storage + `reconcile` is the supported
 recovery path.
-
-### Historical Backend Selection
-
-Set `api.historical_backend` to choose the query backend for replay, integrity,
-and execution routes:
-
-```bash
-PB__API__HISTORICAL_BACKEND=clickhouse cargo run -- serve-api --auto-rotate
-```
-
-If ClickHouse is configured but unreachable at startup, the system falls back to
-Parquet with a warning.
-
-### gRPC Surface
-
-Enable the gRPC read surface for programmatic access to historical queries:
-
-```bash
-PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
-```
-
-The gRPC server listens on `127.0.0.1:50051` by default and exposes
-`Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs via the
-`WorkstationService`. If `api.auth_token` is configured, callers must send
-`Authorization: Bearer <token>` metadata. Startup rejects non-loopback gRPC
-binds without that token. Expensive gRPC backend work is bounded by a 30s
-deadline and a 128-request global in-flight cap; saturated servers return
-`RESOURCE_EXHAUSTED`, and timed-out work returns `DEADLINE_EXCEEDED`.
-
-### Query Workbench
-
-Enable the query workbench for ad-hoc read-only SQL against ClickHouse:
-
-```bash
-PB__API__QUERY_WORKBENCH_ENABLED=true \
-PB__API__HISTORICAL_BACKEND=clickhouse \
-cargo run -- serve-api --auto-rotate
-```
-
-```bash
-# List available datasets
-curl http://localhost:3000/api/v1/query/datasets
-
-# Execute a query
-curl -X POST http://localhost:3000/api/v1/query/sql \
-  -H 'Content-Type: application/json' \
-  -d '{"sql": "SELECT count() FROM book_events", "max_rows": 100}'
-```
-
-The workbench rejects write SQL, dangerous ClickHouse table functions (including
-quoted identifiers), and table references outside the advertised dataset
-allowlist. It injects `LIMIT` if not present. ClickHouse transport and decode
-errors strip request URL context before they become internal API errors, so
-credential-bearing backend URLs do not enter API logs. Returns 503 when disabled
-(the default).
 
 ### Health Endpoints
 
@@ -657,11 +463,9 @@ config lives in [`monitoring/`](../monitoring/):
 - `monitoring/alerts_test.yml` — `promtool` rule unit tests that simulate
   incidents offline (e.g. WAL append failing, silent/stale feed, crossed book,
   WAL lag) and assert the matching alert fires. The CI `monitoring` job runs
-  `promtool check rules` + `promtool test rules` AND `amtool check-config
-  monitoring/alertmanager.yml` + severity→receiver routing assertions, so both
-  rule rot and routing drift are caught without a live Prometheus/Alertmanager.
-  (Only the live PagerDuty/Slack integration secrets and a running Alertmanager
-  remain environment-specific — the routing logic itself is now verified offline.)
+  `promtool check rules` + `promtool test rules`, so rule rot is caught without
+  a live Prometheus. `monitoring/alertmanager.yml` is the routing config the
+  `observability` compose profile mounts; its receivers are placeholders.
 
 ### Time discipline (NTP/PTP)
 
@@ -681,7 +485,7 @@ the reconstructed book is deterministic regardless of wall-clock skew. The clock
 
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have
-advanced past are pruned automatically by the ingest/auto-ingest process (lag-
+advanced past are pruned automatically by the ingest process (lag-
 byte retention window), so disk usage stays bounded.
 
 ### Port Defaults
@@ -690,34 +494,29 @@ byte retention window), so disk usage stays bounded.
 |---------|-------|
 | API     | 3000  |
 | Metrics | 9090  |
-| gRPC    | 50051 |
 
 ### Current Scope
 
-- read-only HTTP, WebSocket, and gRPC API
+- read-only HTTP and WebSocket API
 - live feed status and active asset visibility
 - live in-memory order book snapshots and per-asset WS streaming
-- configurable Parquet or ClickHouse historical backend
-- replay reconstruction, integrity summaries, execution timeline inspection
+- Parquet-backed replay reconstruction and integrity summaries
 - WAL gap detection, lag tracking, and backpressure-aware pruning
 - health endpoint with hydration and WAL status
-- query workbench for ad-hoc read-only SQL (ClickHouse backend, opt-in)
 
 ### Not Yet Provided
 
 - latency summary endpoints
 
-The existing Docker and ECS deployment remains ingestion-oriented today. The
-workstation API is not yet part of that production deployment flow.
 
 ## Workstation Web App
 
 The SPA currently ships:
 
 - `Live Feed`
+- `Orderbook`
 - `Replay Lab`
 - `Integrity`
-- `Execution Timeline`
 
 ### Running API and Web App Together
 
@@ -780,4 +579,3 @@ VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 ### Deferred from the Current SPA Pass
 
 - Latency (reserved for metrics-backed summaries)
-- Query Workbench SPA view (backend routes are implemented and opt-in)

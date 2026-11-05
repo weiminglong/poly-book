@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 use pb_types::event::{
-    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, ExecutionEvent,
-    MarketDataWindow, ReplayMode, ReplayValidation, Side, TradeEvent,
+    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, MarketDataWindow,
+    ReplayMode, ReplayValidation, Side, TradeEvent,
 };
 use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence, TradeFidelity};
 
@@ -108,7 +108,6 @@ struct MockReader {
     checkpoints: Vec<BookCheckpoint>,
     latest_checkpoint: Option<BookCheckpoint>,
     validations: Vec<ReplayValidation>,
-    execution_events: Vec<ExecutionEvent>,
     market_data_calls: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
@@ -119,7 +118,6 @@ impl MockReader {
             checkpoints: vec![],
             latest_checkpoint: None,
             validations: vec![],
-            execution_events: vec![],
             market_data_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -194,15 +192,6 @@ impl EventReader for MockReader {
         _end_us: u64,
     ) -> Result<Vec<ReplayValidation>, ReplayError> {
         Ok(self.validations.clone())
-    }
-
-    async fn read_execution_events(
-        &self,
-        _order_id: Option<&str>,
-        _start_us: u64,
-        _end_us: u64,
-    ) -> Result<Vec<ExecutionEvent>, ReplayError> {
-        Ok(self.execution_events.clone())
     }
 }
 

@@ -345,12 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn per_asset_broadcast_default_same_as_new() {
-        let b = PerAssetBroadcast::default();
-        assert!(!b.has_subscribers());
-    }
-
-    #[test]
     fn set_active_assets_creates_channels() {
         let b = PerAssetBroadcast::new();
         b.set_active_assets(&["a".to_string(), "b".to_string()]);

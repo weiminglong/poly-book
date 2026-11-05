@@ -3,21 +3,21 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use config::Config;
 use pb_replay::EventReader;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::pipeline;
+use crate::settings::Settings;
 
 /// Offline demo: replay a committed market-data capture as a simulated live
 /// feed behind the full workstation API/UI. No network, no venue dependency —
 /// the recorded `PersistedRecord`s stream into the same read model the live
 /// pipeline uses, at their original cadence, with timestamps shifted to now so
-/// the book reads as current. Historical routes (replay, integrity, query)
+/// the book reads as current. Historical routes (replay, integrity)
 /// answer directly from the capture with its original timestamps.
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     data_dir: String,
     speed: f64,
     enable_metrics: bool,
@@ -108,17 +108,8 @@ pub async fn run(
         .and_then(|r| r.recv_timestamp_us())
         .unwrap_or(capture.end_us);
 
-    let api_listen_addr: SocketAddr = settings
-        .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
-        .parse()?;
-    let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
-    let default_depth =
-        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
-    let stale_after_secs = settings
-        .get_int("api.stale_after_secs")
-        .unwrap_or(15)
-        .max(1) as u64;
+    let api_listen_addr: SocketAddr = settings.api.listen_addr;
+    let default_depth = settings.api.default_depth;
 
     let live = pb_api::LiveReadModel::new(pb_api::FeedMode::FixedTokens);
     let (event_tx, event_rx) = mpsc::channel::<pb_types::PersistedRecord>(2_048);
@@ -196,55 +187,19 @@ pub async fn run(
         }
     });
 
-    // Historical services read the capture directly — always the Parquet
-    // backend at --data-dir, never the configured storage paths, so the demo
-    // cannot accidentally serve (or require) live-pipeline data.
-    let replay_service =
-        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::new(&data_dir));
-    let integrity_service = pb_service::AnyIntegrityService::Parquet(
-        pb_service::ParquetIntegrityService::new(&data_dir),
-    );
-    let execution_service = pb_service::AnyExecutionService::Parquet(
-        pb_service::ParquetExecutionService::new(&data_dir),
-    );
-    // The SQL workbench is ClickHouse-backed and stays disabled in the demo.
-    let query_service = None;
-    let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
-    let auth_token = pipeline::api_auth_token_from_settings(&settings);
-    pipeline::validate_api_auth_boundary(
-        api_listen_addr,
-        false,
-        api_listen_addr,
-        auth_token.as_deref(),
-    )?;
+    // Historical queries read the capture directly at --data-dir, never the
+    // configured storage paths, so the demo cannot accidentally serve (or
+    // require) live-pipeline data.
+    let historical = pb_service::HistoricalService::new(&data_dir);
+    let auth_token = settings.api_auth_token();
+    pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
     let state = pb_api::AppState {
         live,
-        config: pb_api::ApiConfig {
-            parquet_base_path: data_dir.clone(),
-            default_depth,
-            max_depth,
-            stale_after_secs,
-            query_max_rows,
-            query_timeout_secs,
-            http_request_timeout_secs: pipeline::cfg_int_min(
-                &settings,
-                "api.http_request_timeout_secs",
-                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
-                1,
-            ) as u64,
-            auth_token,
-            static_assets_dir: settings
-                .get_string("api.static_assets_dir")
-                .ok()
-                .filter(|d| !d.is_empty()),
-        },
+        config: settings.api_config(data_dir.clone()),
         broadcast: Some(broadcast.clone()),
         slug_registry,
-        replay_service,
-        integrity_service,
-        execution_service,
-        query_service,
+        historical,
         wal_lag_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         needs_resync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };

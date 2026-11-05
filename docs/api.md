@@ -6,13 +6,11 @@ This document describes the current read-only workstation API surface exposed by
 ## Stability
 
 The current API is intentionally narrow. It is meant to support the first
-backend slice of the workstation and may evolve as later phases add integrity,
-execution, query, and frontend capabilities.
+backend slice of the workstation and may evolve as later phases add latency
+and frontend capabilities.
 
-The SPA ships six routes: `Live Feed`, `Orderbook`, `Replay Lab`, `Execution
-Timeline`, `Integrity`, and `Query Workbench`. The Query Workbench is opt-in
-(`api.query_workbench_enabled = true`, requires the ClickHouse backend). Latency
-surfaces remain deferred.
+The SPA ships four routes: `Live Feed`, `Orderbook`, `Replay Lab`, and
+`Integrity`. Latency surfaces remain deferred.
 
 Parquet-backed routes are storage-location agnostic: local files and configured
 cloud object stores use the same reader, and crash-recovery manifests are applied
@@ -20,16 +18,14 @@ below the service layer without changing response shapes.
 
 ## Security / Trust Boundary
 
-HTTP, WebSocket, and gRPC data surfaces support a shared bearer token via
+HTTP and WebSocket data surfaces support a shared bearer token via
 `api.auth_token` / `PB__API__AUTH_TOKEN`. All services default to binding
-loopback (`127.0.0.1`); startup rejects non-loopback API or gRPC binds unless
-that token is configured. Health probes stay open. Never expose the metrics port
-or the SQL workbench to an untrusted network. HTTP request/response routes are
-bounded by a per-request timeout, a global in-flight concurrency cap, and a
-request-body size limit; gRPC backend work has a 30s deadline and a 128-request
-global in-flight cap. 5xx responses return an opaque message and log the detail
-server-side after URL-bearing ClickHouse transport errors have been stripped of
-request URL context.
+loopback (`127.0.0.1`); startup rejects a non-loopback API bind unless that
+token is configured. Health probes stay open. Never expose the metrics port to
+an untrusted network. HTTP request/response routes are bounded by a
+per-request timeout, a global in-flight concurrency cap, and a request-body
+size limit. 5xx responses return an opaque message and log the detail
+server-side.
 
 Health/readiness endpoints: `GET /health` (detailed JSON, always 200),
 `GET /health/live` (liveness), `GET /health/ready` (200 only when ready, else
@@ -43,7 +39,7 @@ If the input matches a registered slug, the server resolves it to the canonical
 token ID before processing. Raw token IDs continue to work unchanged.
 
 Slugs are populated automatically from Gamma API metadata during `discover` and
-`auto-ingest` / `serve-api --auto-rotate`. For BTC 5-minute markets with YES/NO
+`ingest --auto-rotate` / `serve-api --auto-rotate`. For BTC 5-minute markets with YES/NO
 token pairs, slugs use `-yes` / `-no` suffixes (e.g.
 `btc-updown-5m-1741500000-yes`).
 
@@ -117,10 +113,6 @@ Query params:
 - `mode`
   - required
   - one of `recv_time` or `exchange_time`
-- `source`
-  - optional
-  - defaults to `parquet`
-  - only `parquet` is supported today
 - `depth`
   - optional
   - same validation rules as the live snapshot route
@@ -150,7 +142,6 @@ Returned for:
 
 - invalid `depth`
 - invalid replay `mode`
-- unsupported replay `source`
 
 ### `404 Not Found`
 
@@ -193,44 +184,6 @@ Returns:
 - validation match/mismatch counts
 - completeness label: `complete` or `best_effort`
 - continuity events within the window
-
-### `GET /api/v1/execution/orders`
-
-Query params:
-
-- `start_us`
-- `end_us`
-  - `start_us` must be less than `end_us`
-  - the window may not exceed **24 hours**; a larger range returns `400`
-  - the same window cap and result-limit clamp are enforced for the gRPC
-    `ExecutionTimeline` RPC
-- `order_id`
-  - optional; filters to a single order
-- `asset_id`
-  - optional; filters to a single asset
-- `limit`
-  - optional
-  - defaults to `100`
-  - must be between `1` and `1000`
-- `order`
-  - optional; `desc` (default) returns most-recent-first, `asc` returns
-    chronological order; any other value returns `400`
-- `offset`
-  - optional; defaults to `0`
-  - skips that many events from the start of the ordered page, enabling
-    server-side pagination over the whole window (use with `limit` + `total_count`)
-
-Returns:
-
-- a page of execution events in the requested order (`desc` by default)
-- each event includes kind, side, price, size, status, reason, and latency
-  trace fields
-- `total_count`: the full filtered total **before** `limit`/`offset` are applied,
-  so a client knows how many pages exist
-- the same window cap, result-limit clamp, `offset`, and `descending` paging are
-  available on the gRPC `ExecutionTimeline` RPC
-- the gRPC surface rejects `limit > 1000`; `limit = 0` uses the default page size
-  of 100
 
 ### `WS /api/v1/streams/orderbook`
 
@@ -276,56 +229,6 @@ Returns operational status:
 - `hydrated`: true after checkpoint + WAL replay finishes
 - `wal_lag_bytes`: byte distance between WAL reader position and latest data
 - `needs_resync`: true if WAL reader needs re-hydration
-
-### `GET /api/v1/query/datasets`
-
-Returns available dataset schemas when query workbench is enabled.
-
-Returns 503 when `api.query_workbench_enabled` is `false` (the default).
-
-Response:
-
-- `datasets`: array of dataset objects, each with `name`, `description`, and
-  `columns` (array of `{ name, data_type }`)
-
-### `POST /api/v1/query/sql`
-
-Executes a read-only SQL query when query workbench is enabled.
-
-Returns 503 when `api.query_workbench_enabled` is `false`.
-
-Request body (JSON):
-
-- `sql`: the SQL query string (required)
-- `max_rows`: optional row limit override (default from config)
-
-Guard rails:
-
-- Only a single read-only statement is allowed
-- Root statement must be `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, or `EXPLAIN`;
-  quoted identifiers do not count as the statement root
-- Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
-  `TRUNCATE`, `RENAME`, `GRANT`, `REVOKE`, `ATTACH`, `DETACH`) are rejected
-  with 400 after comments and quoted literals are stripped from the guard scan
-- Quoted identifiers remain visible to blocklist checks, so backtick/double
-  quoted `file`, `url`, `s3`, `system`, and similar identifiers are rejected
-- Table references are restricted to the advertised workbench datasets:
-  `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`,
-  `replay_validations`, and `execution_events`
-- Dangling `FROM`, `JOIN`, and `DESCRIBE` table references return 400 before
-  `LIMIT` normalization
-- `LIMIT` is injected if not present
-- The normalized SQL must itself pass the guard and remain stable across
-  repeated normalization
-- Queries time out after `api.query_timeout_secs` (default 30s)
-
-Response:
-
-- `columns`: array of `{ name, data_type }`
-- `rows`: array of row arrays (JSON values)
-- `row_count`: number of rows returned
-- `truncated`: true if row limit was hit
-- `execution_time_ms`: query execution duration
 
 ## Deferred Endpoints
 

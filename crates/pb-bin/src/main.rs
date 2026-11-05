@@ -9,7 +9,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
-mod config_validation;
+mod settings;
 
 #[derive(Parser)]
 #[command(
@@ -22,9 +22,9 @@ struct Cli {
     #[arg(long, default_value = "config/default.toml")]
     config: String,
 
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(long, default_value = "info")]
-    log_level: String,
+    /// Log level (trace, debug, info, warn, error); overrides logging.level
+    #[arg(long)]
+    log_level: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -41,17 +41,18 @@ enum Commands {
         #[arg(long, default_value_t = 500)]
         limit: u64,
     },
-    /// Start live orderbook ingestion
+    /// Start live orderbook ingestion (feed -> WAL -> Parquet) for fixed
+    /// tokens or the rotating BTC 5-minute market
     Ingest {
         /// Comma-separated token IDs to subscribe to
-        #[arg(long)]
+        #[arg(long, conflicts_with = "auto_rotate")]
         tokens: Option<String>,
+        /// Follow the live BTC 5-minute market, rotating every 5 minutes
+        #[arg(long, default_value_t = false)]
+        auto_rotate: bool,
         /// Enable Parquet storage (use --parquet=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
-        /// Enable ClickHouse storage (use --clickhouse=true to enable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
-        clickhouse: bool,
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
@@ -68,33 +69,13 @@ enum Commands {
         /// Target timestamp in microseconds since epoch
         #[arg(long)]
         at: u64,
-        /// Data source: "parquet" or "clickhouse"
-        #[arg(long, default_value = "parquet")]
-        source: String,
         /// Replay ordering mode: "recv_time" or "exchange_time"
-        #[arg(long)]
+        #[arg(long, default_value = "recv_time")]
         mode: String,
         /// Validate against the next checkpoint and persist the validation result
         #[arg(long, default_value_t = false)]
         validate: bool,
     },
-    /// Replay stored execution history independently of market-data replay
-    ExecutionReplay {
-        /// Optional order ID filter
-        #[arg(long)]
-        order_id: Option<String>,
-        /// Start timestamp in microseconds since epoch
-        #[arg(long)]
-        start: u64,
-        /// End timestamp in microseconds since epoch
-        #[arg(long)]
-        end: u64,
-        /// Data source: "parquet" or "clickhouse"
-        #[arg(long, default_value = "parquet")]
-        source: String,
-    },
-    /// Append execution events to storage from flags or JSON input
-    ExecutionAppend(Box<commands::execution_append::ExecutionAppendArgs>),
     /// Backfill historical data via REST API snapshots
     Backfill {
         /// Comma-separated token IDs to backfill
@@ -107,23 +88,11 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         duration_mins: u64,
     },
-    /// Continuously discover and ingest BTC 5-min markets, rotating automatically
-    AutoIngest {
-        /// Enable Parquet storage (use --parquet=false to disable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
-        parquet: bool,
-        /// Enable ClickHouse storage (use --clickhouse=true to enable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
-        clickhouse: bool,
-        /// Enable metrics server (use --metrics=false to disable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
-        metrics: bool,
-    },
     /// Preflight checklist: validate config and probe every external
     /// dependency (feed endpoints, storage paths, ports); exits non-zero on
     /// failure so it can gate deploys
     Doctor {
-        /// Skip feed/ClickHouse reachability probes (offline/CI use)
+        /// Skip feed reachability probes (offline/CI use)
         #[arg(long, default_value_t = false)]
         skip_network: bool,
     },
@@ -143,7 +112,7 @@ enum Commands {
     /// Start the read-only API server with a live feed and replay access
     ServeApi {
         /// Comma-separated token IDs to subscribe to
-        #[arg(long)]
+        #[arg(long, conflicts_with = "auto_rotate")]
         tokens: Option<String>,
         /// Automatically rotate to the live BTC 5-minute market
         #[arg(long, default_value_t = false)]
@@ -154,9 +123,11 @@ enum Commands {
     },
     /// Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS)
     Serve {
-        /// Comma-separated token IDs to serve
+        /// Comma-separated token IDs to serve. Omit to follow whatever the
+        /// ingest process writes to the WAL (e.g. the rotating market that
+        /// `ingest --auto-rotate` tracks).
         #[arg(long)]
-        tokens: String,
+        tokens: Option<String>,
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
@@ -187,44 +158,20 @@ async fn main() -> Result<()> {
     if !config_is_default && !std::path::Path::new(&cli.config).exists() {
         anyhow::bail!("config file not found: {}", cli.config);
     }
-    let settings = config::Config::builder()
-        .add_source(config::File::with_name(&cli.config).required(!config_is_default))
-        .add_source(config::Environment::with_prefix("PB").separator("__"))
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to load config from {}: {e}", cli.config))?;
+    let settings = settings::Settings::load(&cli.config, !config_is_default)?;
 
-    // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level > "info"
-    let log_level = if std::env::var("RUST_LOG").is_ok() {
-        // EnvFilter will read RUST_LOG directly
-        None
-    } else if cli.log_level != "info" {
-        // Explicit CLI override
-        Some(cli.log_level.clone())
+    // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     } else {
-        // Fall back to config file
-        settings.get_string("logging.level").ok()
+        EnvFilter::new(cli.log_level.as_deref().unwrap_or(&settings.logging.level))
     };
-
-    let filter = match log_level {
-        None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        Some(level) => EnvFilter::new(&level),
-    };
-    // Honor `logging.format = "json"` so structured logging is actually possible
-    // (previously the key was dead config).
-    let log_format = settings
-        .get_string("logging.format")
-        .unwrap_or_else(|_| "text".to_string());
     let builder = fmt().with_env_filter(filter);
-    if log_format.eq_ignore_ascii_case("json") {
+    if settings.logging.format.eq_ignore_ascii_case("json") {
         builder.json().init();
     } else {
         builder.init();
     }
-
-    // Surface typo'd / removed config keys now that tracing is up, so a silently
-    // ignored setting is visible instead of leaving the operator's intent lost
-    //.
-    config_validation::warn_unknown_config_keys(&settings);
 
     // Create shared slug registry
     let slug_registry = pb_types::SlugRegistry::new();
@@ -279,16 +226,16 @@ async fn main() -> Result<()> {
         }
         Commands::Ingest {
             tokens,
+            auto_rotate,
             parquet,
-            clickhouse,
             metrics,
             standby,
         } => {
+            let plan = commands::feed::FeedPlan::from_flags(tokens, auto_rotate)?;
             commands::ingest::run(
                 settings,
-                tokens,
+                plan,
                 parquet,
-                clickhouse,
                 metrics,
                 standby,
                 shutdown,
@@ -299,22 +246,10 @@ async fn main() -> Result<()> {
         Commands::Replay {
             token,
             at,
-            source,
             mode,
             validate,
         } => {
-            commands::replay::run(settings, token, at, source, mode, validate).await?;
-        }
-        Commands::ExecutionReplay {
-            order_id,
-            start,
-            end,
-            source,
-        } => {
-            commands::execution_replay::run(settings, order_id, start, end, source).await?;
-        }
-        Commands::ExecutionAppend(args) => {
-            commands::execution_append::run(settings, *args).await?;
+            commands::replay::run(settings, token, at, mode, validate).await?;
         }
         Commands::Backfill {
             tokens,
@@ -326,21 +261,6 @@ async fn main() -> Result<()> {
                 tokens,
                 interval_secs,
                 duration_mins,
-                shutdown,
-                slug_registry,
-            )
-            .await?;
-        }
-        Commands::AutoIngest {
-            parquet,
-            clickhouse,
-            metrics,
-        } => {
-            commands::auto_ingest::run(
-                settings,
-                parquet,
-                clickhouse,
-                metrics,
                 shutdown,
                 slug_registry,
             )
@@ -362,15 +282,8 @@ async fn main() -> Result<()> {
             auto_rotate,
             metrics,
         } => {
-            commands::serve_api::run(
-                settings,
-                tokens,
-                auto_rotate,
-                metrics,
-                shutdown,
-                slug_registry,
-            )
-            .await?;
+            let plan = commands::feed::FeedPlan::from_flags(tokens, auto_rotate)?;
+            commands::serve_api::run(settings, plan, metrics, shutdown, slug_registry).await?;
         }
         Commands::Serve { tokens, metrics } => {
             commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
@@ -484,14 +397,14 @@ mod tests {
         match cli.command {
             Commands::Ingest {
                 tokens,
+                auto_rotate,
                 parquet,
-                clickhouse,
                 metrics,
                 standby,
             } => {
                 assert!(tokens.is_none());
+                assert!(!auto_rotate);
                 assert!(parquet);
-                assert!(!clickhouse);
                 assert!(metrics);
                 assert!(!standby);
             }
@@ -510,20 +423,10 @@ mod tests {
 
     #[test]
     fn parse_ingest_with_tokens() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "ingest",
-            "--tokens",
-            "tok1,tok2",
-            "--clickhouse",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--tokens", "tok1,tok2"]).unwrap();
         match cli.command {
-            Commands::Ingest {
-                tokens, clickhouse, ..
-            } => {
+            Commands::Ingest { tokens, .. } => {
                 assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
-                assert!(clickhouse);
             }
             _ => panic!("expected Ingest"),
         }
@@ -532,27 +435,22 @@ mod tests {
     #[test]
     fn ingest_toggles_can_be_disabled_and_presence_still_enables() {
         // Default-true toggles must be disable-able with `=false`, while a
-        // bare `--clickhouse` still enables via default_missing_value.
+        // bare `--metrics` still enables via default_missing_value.
         let cli = Cli::try_parse_from([
             "poly-book",
             "ingest",
             "--tokens",
             "tok1",
-            "--metrics=false",
+            "--metrics",
             "--parquet=false",
-            "--clickhouse",
         ])
         .unwrap();
         match cli.command {
             Commands::Ingest {
-                metrics,
-                parquet,
-                clickhouse,
-                ..
+                metrics, parquet, ..
             } => {
-                assert!(!metrics, "--metrics=false should disable metrics");
+                assert!(metrics, "bare --metrics should enable metrics");
                 assert!(!parquet, "--parquet=false should disable parquet");
-                assert!(clickhouse, "bare --clickhouse should enable clickhouse");
             }
             _ => panic!("expected Ingest"),
         }
@@ -575,44 +473,15 @@ mod tests {
             Commands::Replay {
                 token,
                 at,
-                source,
                 mode,
                 validate,
             } => {
                 assert_eq!(token, "tok1");
                 assert_eq!(at, 1_000_000);
-                assert_eq!(source, "parquet");
                 assert_eq!(mode, "recv_time");
                 assert!(!validate);
             }
             _ => panic!("expected Replay"),
-        }
-    }
-
-    #[test]
-    fn parse_execution_replay() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "execution-replay",
-            "--start",
-            "100",
-            "--end",
-            "200",
-        ])
-        .unwrap();
-        match cli.command {
-            Commands::ExecutionReplay {
-                order_id,
-                start,
-                end,
-                source,
-            } => {
-                assert!(order_id.is_none());
-                assert_eq!(start, 100);
-                assert_eq!(end, 200);
-                assert_eq!(source, "parquet");
-            }
-            _ => panic!("expected ExecutionReplay"),
         }
     }
 
@@ -642,39 +511,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_auto_ingest() {
-        let cli = Cli::try_parse_from(["poly-book", "auto-ingest"]).unwrap();
+    fn parse_ingest_auto_rotate() {
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--auto-rotate"]).unwrap();
         match cli.command {
-            Commands::AutoIngest {
-                parquet,
-                clickhouse,
-                metrics,
+            Commands::Ingest {
+                tokens,
+                auto_rotate,
+                ..
             } => {
-                assert!(parquet);
-                assert!(!clickhouse);
-                assert!(metrics);
+                assert!(tokens.is_none());
+                assert!(auto_rotate);
             }
-            _ => panic!("expected AutoIngest"),
+            _ => panic!("expected Ingest"),
         }
+        // --tokens and --auto-rotate are mutually exclusive.
+        assert!(
+            Cli::try_parse_from(["poly-book", "ingest", "--tokens", "tok1", "--auto-rotate"])
+                .is_err()
+        );
     }
 
     #[test]
     fn parse_serve_api() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "serve-api",
-            "--tokens",
-            "tok1",
-            "--auto-rotate",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "serve-api", "--auto-rotate"]).unwrap();
         match cli.command {
             Commands::ServeApi {
                 tokens,
                 auto_rotate,
                 ..
             } => {
-                assert_eq!(tokens.as_deref(), Some("tok1"));
+                assert!(tokens.is_none());
                 assert!(auto_rotate);
             }
             _ => panic!("expected ServeApi"),
@@ -686,9 +552,18 @@ mod tests {
         let cli = Cli::try_parse_from(["poly-book", "serve", "--tokens", "tok1,tok2"]).unwrap();
         match cli.command {
             Commands::Serve { tokens, metrics } => {
-                assert_eq!(tokens, "tok1,tok2");
+                assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
                 assert!(metrics);
             }
+            _ => panic!("expected Serve"),
+        }
+    }
+
+    #[test]
+    fn parse_serve_without_tokens_follows_wal() {
+        let cli = Cli::try_parse_from(["poly-book", "serve"]).unwrap();
+        match cli.command {
+            Commands::Serve { tokens, .. } => assert!(tokens.is_none()),
             _ => panic!("expected Serve"),
         }
     }
@@ -715,20 +590,20 @@ mod tests {
 
     #[test]
     fn parse_replay_missing_required_args_fails() {
-        // --token and --at and --mode are required
+        // --token and --at are required; --mode defaults to recv_time
         let result = Cli::try_parse_from(["poly-book", "replay", "--token", "tok1"]);
         assert!(result.is_err());
+        let cli =
+            Cli::try_parse_from(["poly-book", "replay", "--token", "tok1", "--at", "5"]).unwrap();
+        match cli.command {
+            Commands::Replay { mode, .. } => assert_eq!(mode, "recv_time"),
+            _ => panic!("expected Replay"),
+        }
     }
 
     #[test]
     fn parse_backfill_missing_tokens_fails() {
         let result = Cli::try_parse_from(["poly-book", "backfill"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_serve_missing_tokens_fails() {
-        let result = Cli::try_parse_from(["poly-book", "serve"]);
         assert!(result.is_err());
     }
 
@@ -744,13 +619,13 @@ mod tests {
     #[test]
     fn parse_global_log_level_flag() {
         let cli = Cli::try_parse_from(["poly-book", "--log-level", "debug", "discover"]).unwrap();
-        assert_eq!(cli.log_level, "debug");
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
     }
 
     #[test]
     fn parse_global_defaults() {
         let cli = Cli::try_parse_from(["poly-book", "discover"]).unwrap();
         assert_eq!(cli.config, "config/default.toml");
-        assert_eq!(cli.log_level, "info");
+        assert!(cli.log_level.is_none());
     }
 }

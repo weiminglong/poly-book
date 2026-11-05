@@ -3,7 +3,6 @@ import {
   activeAssetsResponseSchema,
   feedStatusResponseSchema,
   liveOrderBookSnapshotSchema,
-  queryResultResponseSchema,
   replayReconstructionResponseSchema,
 } from '../schemas'
 
@@ -96,16 +95,6 @@ describe('Zod schema rejection of malformed input', () => {
       bids: [],
       asks: [],
       continuity_events: [],
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('queryResultResponseSchema rejects missing row_count', () => {
-    const result = queryResultResponseSchema.safeParse({
-      columns: [],
-      rows: [],
-      truncated: false,
-      execution_time_ms: 10,
     })
     expect(result.success).toBe(false)
   })

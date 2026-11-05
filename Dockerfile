@@ -11,11 +11,7 @@ RUN npx vite build
 # Must be >= the workspace MSRV (rust-version = "1.94"); rust:1.93 fails to build.
 FROM rust:1.94-slim AS builder
 
-# pb-grpc's build script needs protoc. TLS is rustls (no OpenSSL), so no
-# libssl-dev/pkg-config are needed to compile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+# TLS is rustls (no OpenSSL), so no system build dependencies are needed.
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

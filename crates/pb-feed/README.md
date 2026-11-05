@@ -26,7 +26,7 @@ Polymarket WS ──▶ WsClient ──▶ Dispatcher ──▶ PersistedRecord 
                                     ▲
 Polymarket REST ──▶ RestClient ─────┘
 
-Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel)
+Channel consumers: pb-store (ParquetSink), pb-api (LiveReadModel)
 ```
 
 - `WsClient` sends `FeedMessage` values (wrapping `WsRawMessage` and
@@ -106,17 +106,22 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   than aborting the remaining valid deltas.
 - Venue cross-check: the dispatcher keeps a per-asset shadow `L2Book` (seeded by
   snapshots, advanced by deltas) purely to compare our reconstructed top-of-book
-  against the venue-stated `best_bid`/`best_ask` on each `price_change` entry. A
-  divergence emits an `IngestEventKind::BookMismatch` event (a queryable data
-  hole) + `pb_book_mismatches_total`, surfacing silently-dropped/corrupt
-  updates. Shadow books are dropped on continuity reset. Frames that match no
-  known message type increment `pb_unknown_messages_dropped_total`.
+  against the venue-stated `best_bid`/`best_ask` carried by `price_change`
+  entries. Those fields describe the book after the whole message is applied,
+  so the check runs once per asset per message, after that asset's last entry.
+  The venue marks an empty side with the price bound for that side (`"0"` for
+  bids, `"1"` for asks); an empty marker only conflicts when we still hold a
+  level. A divergence emits an `IngestEventKind::BookMismatch` event (a
+  queryable data hole) + `pb_book_mismatches_total`, surfacing
+  silently-dropped/corrupt updates. Shadow books are dropped on continuity
+  reset. Frames that match no known message type increment
+  `pb_unknown_messages_dropped_total`.
 - Self-healing: on a detected divergence the dispatcher requests a resnapshot
   (`with_resnapshot_tx`); `run_resnapshot_worker` (debounced per asset) fetches a
   fresh REST book and re-injects it as a synthetic WS `book` message via the
   shared raw channel, so the normal snapshot path rebuilds the book. The
   REST→WS-`book` conversion is round-trip-tested against `WsMessage` so it matches
-  the live wire format. (Wired in `ingest`; `auto-ingest` relies on rotation.)
+  the live wire format. Wired into every `ingest` and `serve-api` subscription.
 - REST responses are read with a 4 MiB body cap enforced before full buffering:
   oversized `Content-Length` is rejected immediately, and chunked/unknown-length
   bodies are counted as they stream. Discovery pages are capped at 1,000 events,
@@ -130,15 +135,4 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
 - **Benchmark** (`cargo bench -p pb-feed`, `benches/dispatcher.rs`) measures the
   normalize hot path end-to-end through the async pipeline — JSON parse +
   normalize + shadow-book apply + venue cross-check + channel handoff — at
-  ~480 ns / ~2.1M `price_change` entries per second. See `docs/latency.md`.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New venue message type | `pb-types` wire types, `Dispatcher` parsing logic |
-| WS reconnect behavior | `docs/operations.md` feed config section |
-| New `PersistedRecord` variant from feed | `pb-store` schema + writer, `pb-replay` reader |
-| Rate limiter config | `config/default.toml` `[feed]` section, `docs/operations.md` |
-| Feed config keys added/removed | `config/default.toml`, `docs/operations.md` |
-| Changes affect ingest topology | `docs/architecture.md`, check the active OpenSpec change |
+  ~480 ns / ~2.1M `price_change` entries per second. See `docs/PERFORMANCE.md`.

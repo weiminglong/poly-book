@@ -70,7 +70,7 @@ impl ParquetSink {
                         // The drain hit its deadline with records still queued: an
                         // incomplete shutdown that abandons data. Surface it as an
                         // error so the supervisor records the failure instead of a
-                        // clean stop (mirrors ClickHouseSink).
+                        // clean stop.
                         // The abandoned records remain durable in the WAL and are
                         // recoverable via `reconcile`.
                         let remaining = self.rx.len();

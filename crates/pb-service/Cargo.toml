@@ -15,25 +15,11 @@ workspace = true
 
 [dependencies]
 pb-types = { workspace = true }
-pb-book = { workspace = true }
 pb-replay = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 pb-store = { workspace = true }
 object_store = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-criterion = { workspace = true }
-clickhouse = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
-
-[[bench]]
-name = "cross_backend"
-harness = false

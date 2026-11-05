@@ -1,13 +1,12 @@
+use crate::settings::Settings;
 use anyhow::{bail, Result};
-use config::Config;
-use pb_store::{ClickHouseRecordWriter, ParquetRecordWriter};
+use pb_store::ParquetRecordWriter;
 use pb_types::{AssetId, PersistedRecord, ReplayMode};
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     token: String,
     at_us: u64,
-    source: String,
     mode: String,
     validate: bool,
 ) -> Result<()> {
@@ -15,7 +14,6 @@ pub async fn run(
     tracing::info!(
         token = %token,
         at_us,
-        source = %source,
         mode = %replay_mode,
         validate,
         "replaying orderbook state"
@@ -23,51 +21,22 @@ pub async fn run(
 
     let asset_id = AssetId::new(token);
 
-    match source.as_str() {
-        "parquet" => {
-            let base_path = settings
-                .get_string("storage.parquet_base_path")
-                .unwrap_or_else(|_| "./data".to_string());
-            let (store, base_path) = super::pipeline::build_object_store(&base_path)?;
-            let reader = pb_replay::ParquetReader::from_store(store, base_path);
-            let engine = pb_replay::ReplayEngine::new(reader);
-            let replay = engine.reconstruct_at(&asset_id, at_us, replay_mode).await?;
-            let validation = if validate {
-                engine
-                    .replay_validation(&asset_id, at_us, replay_mode)
-                    .await?
-            } else {
-                None
-            };
-            if let Some(validation) = validation.as_ref() {
-                persist_validation_parquet(&settings, validation.clone()).await?;
-            }
-            print_book(&replay, validation.as_ref());
-        }
-        "clickhouse" => {
-            let ch_url = settings
-                .get_string("storage.clickhouse_url")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let ch_db = settings
-                .get_string("storage.clickhouse_database")
-                .unwrap_or_else(|_| "poly_book".to_string());
-            let reader = pb_replay::ClickHouseReader::new(&ch_url, &ch_db);
-            let engine = pb_replay::ReplayEngine::new(reader);
-            let replay = engine.reconstruct_at(&asset_id, at_us, replay_mode).await?;
-            let validation = if validate {
-                engine
-                    .replay_validation(&asset_id, at_us, replay_mode)
-                    .await?
-            } else {
-                None
-            };
-            if let Some(validation) = validation.as_ref() {
-                persist_validation_clickhouse(&settings, validation.clone()).await?;
-            }
-            print_book(&replay, validation.as_ref());
-        }
-        other => bail!("unknown source: {other}. Use 'parquet' or 'clickhouse'"),
+    let (store, base_path) =
+        super::pipeline::build_object_store(&settings.storage.parquet_base_path)?;
+    let reader = pb_replay::ParquetReader::from_store(store, base_path);
+    let engine = pb_replay::ReplayEngine::new(reader);
+    let replay = engine.reconstruct_at(&asset_id, at_us, replay_mode).await?;
+    let validation = if validate {
+        engine
+            .replay_validation(&asset_id, at_us, replay_mode)
+            .await?
+    } else {
+        None
+    };
+    if let Some(validation) = validation.as_ref() {
+        persist_validation_parquet(&settings, validation.clone()).await?;
     }
+    print_book(&replay, validation.as_ref());
 
     Ok(())
 }
@@ -81,36 +50,12 @@ fn parse_mode(mode: &str) -> Result<ReplayMode> {
 }
 
 async fn persist_validation_parquet(
-    settings: &Config,
+    settings: &Settings,
     validation: pb_types::ReplayValidation,
 ) -> Result<()> {
-    let configured = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let (store, base_path) = super::pipeline::build_object_store(&configured)?;
+    let (store, base_path) =
+        super::pipeline::build_object_store(&settings.storage.parquet_base_path)?;
     let writer = ParquetRecordWriter::new(store, base_path);
-    writer
-        .write_record(PersistedRecord::Validation(validation))
-        .await?;
-    Ok(())
-}
-
-async fn persist_validation_clickhouse(
-    settings: &Config,
-    validation: pb_types::ReplayValidation,
-) -> Result<()> {
-    let ch_url = settings
-        .get_string("storage.clickhouse_url")
-        .unwrap_or_else(|_| "http://localhost:8123".to_string());
-    let ch_db = settings
-        .get_string("storage.clickhouse_database")
-        .unwrap_or_else(|_| "poly_book".to_string());
-    let writer = ClickHouseRecordWriter::new(
-        clickhouse::Client::default()
-            .with_url(&ch_url)
-            .with_database(&ch_db),
-    );
-    writer.ensure_tables().await?;
     writer
         .write_record(PersistedRecord::Validation(validation))
         .await?;

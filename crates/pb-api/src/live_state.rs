@@ -399,10 +399,23 @@ impl LiveState {
                     outcome.mark_asset_changed(asset_id);
                 }
             }
-            PersistedRecord::Trade(_)
-            | PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => {}
+            PersistedRecord::Checkpoint(checkpoint) => {
+                // A tailed checkpoint seeds an asset that has no materialized
+                // book yet (a market that aged out of the active set and came
+                // back, or one whose venue snapshot was never seen). A book
+                // that is already live is never reset to an older checkpoint.
+                let asset_id = checkpoint.asset_id.to_string();
+                let uninitialized = self
+                    .assets
+                    .get(&asset_id)
+                    .is_none_or(|state| !state.initialized_from_snapshot);
+                if uninitialized {
+                    self.apply_checkpoint(&checkpoint);
+                    outcome.mark_asset_changed(asset_id.clone());
+                    outcome.mark_asset_broadcast(asset_id);
+                }
+            }
+            PersistedRecord::Trade(_) | PersistedRecord::Validation(_) => {}
         }
 
         outcome
@@ -700,44 +713,6 @@ impl LiveReadModel {
         }
     }
 
-    /// Spawn a forwarder task that reads records from `rx` and sends them
-    /// to the projector. Returns the forwarder's join handle.
-    pub fn spawn_consumer(
-        &self,
-        mut rx: mpsc::Receiver<PersistedRecord>,
-        token: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        let cmd_tx = self.cmd_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        // Drain records already buffered in the channel before
-                        // exiting, so a shutdown does not abandon in-flight feed
-                        // updates the producers had already sent (mirrors the storage-sink drain pattern). Bounded by the
-                        // current buffer — no new records arrive after cancellation.
-                        while let Ok(record) = rx.try_recv() {
-                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    record = rx.recv() => {
-                        match record {
-                            Some(record) => {
-                                if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     /// Spawn a forwarder task that reads records from `rx`, sends them to
     /// the projector (which handles broadcast internally), and returns the
     /// forwarder's join handle.
@@ -904,6 +879,25 @@ impl LiveReadModel {
     }
 
     /// Read active asset summaries. Zero contention.
+    /// Every asset with projected state, active or not, paired with the newest
+    /// timestamp its view has seen: the book's last update, or the receive
+    /// time of a snapshot that is still pending materialization (whose book
+    /// timestamp is still 0). `serve` follow mode seeds its active set from
+    /// this after hydration, before the WAL tail has shown any new record.
+    pub fn known_assets(&self) -> Vec<(String, u64)> {
+        let state = self.state_rx.borrow();
+        state
+            .assets
+            .iter()
+            .map(|(asset_id, view)| {
+                let ts = view
+                    .last_update_us
+                    .max(view.last_recv_timestamp_us.unwrap_or(0));
+                (asset_id.clone(), ts)
+            })
+            .collect()
+    }
+
     pub async fn active_assets(&self, stale_after_secs: u64) -> Vec<ActiveAssetSummary> {
         let now_us = now_us();
         let state = self.state_rx.borrow().clone();
@@ -924,15 +918,6 @@ impl LiveReadModel {
                 }
             })
             .collect()
-    }
-
-    /// Check if an asset is active. Zero contention.
-    pub async fn is_asset_active(&self, asset_id: &str) -> bool {
-        let state = self.state_rx.borrow().clone();
-        state
-            .active_assets
-            .iter()
-            .any(|candidate| candidate == asset_id)
     }
 
     /// Read a book snapshot for a specific asset. Zero contention.
@@ -1339,8 +1324,15 @@ mod tests {
         // Rotate to only tok2
         model.set_active_assets(vec!["tok2".to_string()]).await;
 
-        assert!(!model.is_asset_active("tok1").await);
-        assert!(model.is_asset_active("tok2").await);
+        let status = model.feed_status_raw().await;
+        assert_eq!(
+            status
+                .active_assets
+                .iter()
+                .map(|a| a.asset_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tok2"]
+        );
     }
 
     #[tokio::test]
@@ -1381,6 +1373,42 @@ mod tests {
         // no data received, so stale and no book
         assert!(assets[0].stale);
         assert!(!assets[0].has_book);
+    }
+
+    #[tokio::test]
+    async fn tailed_checkpoint_seeds_an_uninitialized_book_only() {
+        use pb_types::event::{BookCheckpoint, PriceLevel};
+
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        model.mark_hydrated().await;
+        let checkpoint = |price: f64, ts: u64| {
+            PersistedRecord::Checkpoint(BookCheckpoint {
+                asset_id: AssetId::new("tok1"),
+                checkpoint_timestamp_us: ts,
+                bids: vec![PriceLevel {
+                    price: pb_types::FixedPrice::from_f64(price).unwrap(),
+                    size: pb_types::FixedSize::from_f64(10.0).unwrap(),
+                }],
+                asks: vec![PriceLevel {
+                    price: pb_types::FixedPrice::from_f64(0.60).unwrap(),
+                    size: pb_types::FixedSize::from_f64(20.0).unwrap(),
+                }],
+                provenance: provenance(ts, ts, 0),
+                wal_offset: None,
+            })
+        };
+
+        // No snapshot has been seen: the checkpoint seeds the book.
+        assert!(model.snapshot("tok1", 5, 999_999).await.is_err());
+        model.apply_record(checkpoint(0.50, 500)).await;
+        let snap = model.snapshot("tok1", 5, 999_999).await.unwrap();
+        assert_eq!(snap.best_bid.unwrap().price.raw(), 5000);
+
+        // The book is live now: a later checkpoint must not reset it.
+        model.apply_record(checkpoint(0.40, 600)).await;
+        let snap = model.snapshot("tok1", 5, 999_999).await.unwrap();
+        assert_eq!(snap.best_bid.unwrap().price.raw(), 5000);
     }
 
     #[tokio::test]

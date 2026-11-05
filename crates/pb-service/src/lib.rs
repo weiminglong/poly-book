@@ -1,30 +1,22 @@
 //! Transport-neutral domain service layer for the poly-book workstation.
 //!
-//! Defines service traits that decouple business logic from HTTP transport.
-//! Concrete implementations live alongside the traits; the `pb-api` crate
-//! uses these as thin adapters (parse HTTP → call service → format response).
+//! [`HistoricalService`] answers replay and integrity queries over the Parquet
+//! store; the `pb-api` crate uses it as a thin adapter (parse HTTP → call
+//! service → format response). Domain result types live here so the API
+//! layer can map them to DTOs without depending on storage internals.
 
-pub mod clickhouse;
 mod error;
-pub mod parquet;
-pub mod query;
+mod historical;
 
-pub use clickhouse::{
-    ClickHouseExecutionService, ClickHouseIntegrityService, ClickHouseReplayService,
-};
 pub use error::ServiceError;
-pub use parquet::{ParquetExecutionService, ParquetIntegrityService, ParquetReplayService};
-pub use query::{
-    guard_sql, AnyQueryService, ClickHouseQueryService, DatasetSchema, QueryColumnInfo, QueryGuard,
-    QueryResult, QueryService,
-};
+pub use historical::HistoricalService;
 
 use pb_replay::ReplayError;
-use pb_types::event::{ExecutionEvent, IngestEventKind, ReplayMode};
+use pb_types::event::{IngestEventKind, ReplayMode};
 use pb_types::{AssetId, FixedPrice, FixedSize, IngestEvent, MarketDataWindow, ReplayValidation};
 
 // ---------------------------------------------------------------------------
-// Shared helpers used by both Parquet and ClickHouse backends
+// Shared helpers
 // ---------------------------------------------------------------------------
 
 pub(crate) fn map_replay_error(error: ReplayError) -> ServiceError {
@@ -81,8 +73,6 @@ pub(crate) fn build_replay_result(
 }
 
 /// Build an `IntegritySummary` from a market data window and validations.
-///
-/// Used by the Parquet backend, which already materializes the full window.
 pub(crate) fn build_integrity_summary(
     asset_id: &AssetId,
     start_us: u64,
@@ -90,33 +80,10 @@ pub(crate) fn build_integrity_summary(
     window: MarketDataWindow,
     validations: Vec<ReplayValidation>,
 ) -> IntegritySummary {
-    assemble_integrity_summary(
-        asset_id,
-        start_us,
-        end_us,
-        window.book_events.len(),
-        &window.ingest_events,
-        validations.len(),
-        validations.iter().filter(|v| v.matched).count(),
-    )
-}
-
-/// Assemble an `IntegritySummary` from already-computed primitive counts plus the
-/// (bounded) ingest events needed for per-kind tallies and `continuity_events`.
-///
-/// This is the shared core used by both backends. The ClickHouse path computes
-/// `book_event_count`/validation counts server-side with `count()`/`countIf()`
-/// and only materializes the small ingest-event list, so it never
-/// transfers full book/trade rows just to count them.
-pub(crate) fn assemble_integrity_summary(
-    asset_id: &AssetId,
-    start_us: u64,
-    end_us: u64,
-    book_event_count: usize,
-    ingest_events: &[IngestEvent],
-    validation_count: usize,
-    validation_match_count: usize,
-) -> IntegritySummary {
+    let book_event_count = window.book_events.len();
+    let ingest_events = &window.ingest_events;
+    let validation_count = validations.len();
+    let validation_match_count = validations.iter().filter(|v| v.matched).count();
     let ingest_event_count = ingest_events.len();
 
     let mut reconnect_count = 0usize;
@@ -155,9 +122,7 @@ pub(crate) fn assemble_integrity_summary(
         start_us,
         end_us,
         book_event_count,
-        trade_event_count: 0,
         ingest_event_count,
-        checkpoint_count: 0,
         reconnect_count,
         gap_count,
         stale_snapshot_skip_count,
@@ -168,127 +133,9 @@ pub(crate) fn assemble_integrity_summary(
     }
 }
 
-/// Build an `ExecutionTimeline` from raw events with optional asset filter and limit.
-pub(crate) fn build_execution_timeline(
-    mut events: Vec<ExecutionEvent>,
-    asset_id: Option<&AssetId>,
-    limit: usize,
-    offset: usize,
-    descending: bool,
-) -> ExecutionTimeline {
-    if let Some(filter_id) = asset_id {
-        events.retain(|e| {
-            e.asset_id
-                .as_ref()
-                .map(|id| id == filter_id)
-                .unwrap_or(false)
-        });
-    }
-
-    let total_count = events.len();
-    // Events arrive sorted ascending by the execution total-order tie-break
-    // (event_timestamp_us, order_id, event_kind). To page from the most recent
-    // event (what an execution inspector usually wants) reverse first, then apply
-    // offset/limit. With `descending` + `offset = 0` this yields the most recent
-    // `limit` events; increasing `offset` pages backwards in time. Ascending
-    // order pages forward from the window start. `total_count` always reports the
-    // true filtered total so callers know more exist beyond the page.
-    if descending {
-        events.reverse();
-    }
-    let events: Vec<ExecutionEvent> = events.into_iter().skip(offset).take(limit).collect();
-
-    ExecutionTimeline {
-        events,
-        total_count,
-    }
-}
-
 // ---------------------------------------------------------------------------
-// BookService — live book queries
+// Domain result types
 // ---------------------------------------------------------------------------
-
-/// Live book read operations backed by the watch-based read model.
-pub trait BookService: Send + Sync {
-    /// Get feed connection status and active asset list.
-    fn feed_status(
-        &self,
-    ) -> impl std::future::Future<Output = Result<FeedStatus, ServiceError>> + Send;
-
-    /// Get active asset summaries with staleness info.
-    fn active_assets(
-        &self,
-        stale_after_secs: u64,
-    ) -> impl std::future::Future<Output = Result<Vec<AssetSummary>, ServiceError>> + Send;
-
-    /// Check if an asset is currently active.
-    fn is_asset_active(
-        &self,
-        asset_id: &str,
-    ) -> impl std::future::Future<Output = Result<bool, ServiceError>> + Send;
-
-    /// Get a point-in-time snapshot of an asset's order book.
-    fn snapshot(
-        &self,
-        asset_id: &str,
-        depth: usize,
-        stale_after_secs: u64,
-    ) -> impl std::future::Future<Output = Result<BookSnapshot, ServiceError>> + Send;
-}
-
-/// Feed connection status.
-#[derive(Debug, Clone)]
-pub struct FeedStatus {
-    pub mode: String,
-    pub session_status: String,
-    pub current_session_id: Option<String>,
-    pub active_asset_count: usize,
-    pub active_asset_ids: Vec<String>,
-    pub last_rotation_us: Option<u64>,
-}
-
-/// Summary of an active asset.
-#[derive(Debug, Clone)]
-pub struct AssetSummary {
-    pub asset_id: String,
-    pub last_recv_timestamp_us: Option<u64>,
-    pub last_exchange_timestamp_us: Option<u64>,
-    pub stale: bool,
-    pub has_book: bool,
-}
-
-/// Order book snapshot for a single asset.
-#[derive(Debug, Clone)]
-pub struct BookSnapshot {
-    pub asset_id: String,
-    pub sequence: u64,
-    pub last_update_us: u64,
-    pub best_bid: Option<(FixedPrice, FixedSize)>,
-    pub best_ask: Option<(FixedPrice, FixedSize)>,
-    pub mid_price: Option<f64>,
-    pub spread: Option<f64>,
-    pub bid_depth: usize,
-    pub ask_depth: usize,
-    pub bids: Vec<(FixedPrice, FixedSize)>,
-    pub asks: Vec<(FixedPrice, FixedSize)>,
-    pub stale: bool,
-}
-
-// ---------------------------------------------------------------------------
-// ReplayService — historical book reconstruction
-// ---------------------------------------------------------------------------
-
-/// Historical order book reconstruction from stored events.
-pub trait ReplayService: Send + Sync {
-    /// Reconstruct the order book at a specific timestamp.
-    fn reconstruct(
-        &self,
-        asset_id: &AssetId,
-        at_us: u64,
-        mode: ReplayMode,
-        depth: Option<usize>,
-    ) -> impl std::future::Future<Output = Result<ReplayResult, ServiceError>> + Send;
-}
 
 /// Result of a historical reconstruction.
 #[derive(Debug, Clone)]
@@ -309,21 +156,6 @@ pub struct ReplayResult {
     pub continuity_events: Vec<ContinuityEvent>,
 }
 
-// ---------------------------------------------------------------------------
-// IntegrityService — data integrity queries
-// ---------------------------------------------------------------------------
-
-/// Data integrity and completeness assessment.
-pub trait IntegrityService: Send + Sync {
-    /// Summarize data integrity for an asset over a time range.
-    fn summary(
-        &self,
-        asset_id: &AssetId,
-        start_us: u64,
-        end_us: u64,
-    ) -> impl std::future::Future<Output = Result<IntegritySummary, ServiceError>> + Send;
-}
-
 /// Data integrity summary for an asset over a time range.
 #[derive(Debug, Clone)]
 pub struct IntegritySummary {
@@ -331,9 +163,7 @@ pub struct IntegritySummary {
     pub start_us: u64,
     pub end_us: u64,
     pub book_event_count: usize,
-    pub trade_event_count: usize,
     pub ingest_event_count: usize,
-    pub checkpoint_count: usize,
     pub reconnect_count: usize,
     pub gap_count: usize,
     pub stale_snapshot_skip_count: usize,
@@ -348,7 +178,6 @@ pub struct IntegritySummary {
 pub enum CompletenessLevel {
     Full,
     Partial,
-    Sparse,
     Empty,
 }
 
@@ -362,48 +191,12 @@ pub struct ContinuityEvent {
 }
 
 // ---------------------------------------------------------------------------
-// ExecutionService — execution timeline queries
-// ---------------------------------------------------------------------------
-
-/// Execution event timeline queries.
-pub trait ExecutionService: Send + Sync {
-    /// Query execution events over a time range with optional filters.
-    ///
-    /// `offset` skips that many events from the start of the ordered page and
-    /// `descending` selects most-recent-first ordering, together providing
-    /// server-side pagination over the full window.
-    #[allow(clippy::too_many_arguments)]
-    fn timeline(
-        &self,
-        asset_id: Option<&AssetId>,
-        order_id: Option<&str>,
-        start_us: u64,
-        end_us: u64,
-        limit: usize,
-        offset: usize,
-        descending: bool,
-    ) -> impl std::future::Future<Output = Result<ExecutionTimeline, ServiceError>> + Send;
-}
-
-/// Execution timeline query result.
-#[derive(Debug, Clone)]
-pub struct ExecutionTimeline {
-    pub events: Vec<ExecutionEvent>,
-    pub total_count: usize,
-}
-
-// ---------------------------------------------------------------------------
-// Shared request validation (enforced for ALL callers — HTTP and gRPC)
+// Shared request validation
 // ---------------------------------------------------------------------------
 
 /// Maximum queryable time window. Bounds work (and `hour_paths` iteration) so a
-/// hostile `end_us` cannot drive billions of iterations / OOM the process. This
-/// lives in the service layer rather than the HTTP handler so gRPC inherits it
-/// too.
+/// hostile `end_us` cannot drive billions of iterations / OOM the process.
 pub const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
-
-/// Maximum number of execution events returned in a single timeline query.
-pub const MAX_EXECUTION_LIMIT: usize = 10_000;
 
 /// Validate a `[start_us, end_us)` query window.
 pub fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ServiceError> {
@@ -419,97 +212,6 @@ pub fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ServiceErr
         )));
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Backend dispatch enums (enum-based polymorphism for non-dyn traits)
-// ---------------------------------------------------------------------------
-
-/// Dispatch enum for replay service backends.
-#[derive(Clone)]
-pub enum AnyReplayService {
-    Parquet(ParquetReplayService),
-    ClickHouse(ClickHouseReplayService),
-}
-
-impl ReplayService for AnyReplayService {
-    async fn reconstruct(
-        &self,
-        asset_id: &AssetId,
-        at_us: u64,
-        mode: ReplayMode,
-        depth: Option<usize>,
-    ) -> Result<ReplayResult, ServiceError> {
-        match self {
-            Self::Parquet(s) => s.reconstruct(asset_id, at_us, mode, depth).await,
-            Self::ClickHouse(s) => s.reconstruct(asset_id, at_us, mode, depth).await,
-        }
-    }
-}
-
-/// Dispatch enum for integrity service backends.
-#[derive(Clone)]
-pub enum AnyIntegrityService {
-    Parquet(ParquetIntegrityService),
-    ClickHouse(ClickHouseIntegrityService),
-}
-
-impl IntegrityService for AnyIntegrityService {
-    async fn summary(
-        &self,
-        asset_id: &AssetId,
-        start_us: u64,
-        end_us: u64,
-    ) -> Result<IntegritySummary, ServiceError> {
-        validate_time_window(start_us, end_us)?;
-        match self {
-            Self::Parquet(s) => s.summary(asset_id, start_us, end_us).await,
-            Self::ClickHouse(s) => s.summary(asset_id, start_us, end_us).await,
-        }
-    }
-}
-
-/// Dispatch enum for execution service backends.
-#[derive(Clone)]
-pub enum AnyExecutionService {
-    Parquet(ParquetExecutionService),
-    ClickHouse(ClickHouseExecutionService),
-}
-
-impl ExecutionService for AnyExecutionService {
-    async fn timeline(
-        &self,
-        asset_id: Option<&AssetId>,
-        order_id: Option<&str>,
-        start_us: u64,
-        end_us: u64,
-        limit: usize,
-        offset: usize,
-        descending: bool,
-    ) -> Result<ExecutionTimeline, ServiceError> {
-        validate_time_window(start_us, end_us)?;
-        // Clamp the caller-supplied limit so a gRPC client cannot request an
-        // unbounded result set. 0 is treated as "use the max".
-        let limit = if limit == 0 {
-            MAX_EXECUTION_LIMIT
-        } else {
-            limit.min(MAX_EXECUTION_LIMIT)
-        };
-        match self {
-            Self::Parquet(s) => {
-                s.timeline(
-                    asset_id, order_id, start_us, end_us, limit, offset, descending,
-                )
-                .await
-            }
-            Self::ClickHouse(s) => {
-                s.timeline(
-                    asset_id, order_id, start_us, end_us, limit, offset, descending,
-                )
-                .await
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -553,15 +255,6 @@ mod tests {
     #[test]
     fn map_replay_error_io_becomes_internal() {
         let err = ReplayError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
-        let mapped = map_replay_error(err);
-        assert!(matches!(mapped, ServiceError::Internal(_)));
-    }
-
-    #[test]
-    fn map_replay_error_json_becomes_internal() {
-        let json_err: serde_json::Error =
-            serde_json::from_str::<serde_json::Value>("{{bad}}").unwrap_err();
-        let err = ReplayError::Json(json_err);
         let mapped = map_replay_error(err);
         assert!(matches!(mapped, ServiceError::Internal(_)));
     }
@@ -766,171 +459,7 @@ mod tests {
     // build_execution_timeline
     // -----------------------------------------------------------------------
 
-    fn make_execution_events(
-        count: usize,
-        asset_id: Option<&str>,
-    ) -> Vec<pb_types::ExecutionEvent> {
-        use pb_types::event::{ExecutionEventKind, LatencyTrace, Side};
-        (0..count)
-            .map(|i| pb_types::ExecutionEvent {
-                event_timestamp_us: 1000 + i as u64,
-                asset_id: asset_id.map(AssetId::new),
-                order_id: format!("order-{i}"),
-                client_order_id: None,
-                venue_order_id: None,
-                kind: ExecutionEventKind::SubmitIntent,
-                side: Some(Side::Bid),
-                price: None,
-                size: None,
-                status: None,
-                reason: None,
-                latency: LatencyTrace::default(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn build_execution_timeline_empty() {
-        let timeline = build_execution_timeline(vec![], None, 10, 0, false);
-        assert_eq!(timeline.total_count, 0);
-        assert!(timeline.events.is_empty());
-    }
-
-    #[test]
-    fn build_execution_timeline_no_filter() {
-        let events = make_execution_events(5, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100, 0, false);
-        assert_eq!(timeline.total_count, 5);
-        assert_eq!(timeline.events.len(), 5);
-    }
-
-    #[test]
-    fn build_execution_timeline_with_asset_filter() {
-        let mut events = make_execution_events(3, Some("tok1"));
-        events.extend(make_execution_events(2, Some("tok2")));
-        let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
-        assert_eq!(timeline.total_count, 3);
-        assert!(timeline
-            .events
-            .iter()
-            .all(|e| e.asset_id.as_ref().unwrap().as_str() == "tok1"));
-    }
-
-    #[test]
-    fn build_execution_timeline_filter_removes_none_asset() {
-        let mut events = make_execution_events(2, Some("tok1"));
-        events.push(pb_types::ExecutionEvent {
-            event_timestamp_us: 9999,
-            asset_id: None,
-            order_id: "orphan".to_string(),
-            client_order_id: None,
-            venue_order_id: None,
-            kind: pb_types::event::ExecutionEventKind::SubmitIntent,
-            side: None,
-            price: None,
-            size: None,
-            status: None,
-            reason: None,
-            latency: pb_types::event::LatencyTrace::default(),
-        });
-        let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 100, 0, false);
-        assert_eq!(timeline.total_count, 2);
-    }
-
-    #[test]
-    fn build_execution_timeline_respects_limit() {
-        let events = make_execution_events(10, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 3, 0, false);
-        assert_eq!(timeline.total_count, 10);
-        assert_eq!(timeline.events.len(), 3);
-    }
-
-    #[test]
-    fn build_execution_timeline_limit_larger_than_events() {
-        let events = make_execution_events(2, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 100, 0, false);
-        assert_eq!(timeline.total_count, 2);
-        assert_eq!(timeline.events.len(), 2);
-    }
-
-    #[test]
-    fn build_execution_timeline_filter_then_limit() {
-        let mut events = make_execution_events(5, Some("tok1"));
-        events.extend(make_execution_events(5, Some("tok2")));
-        let filter_id = AssetId::new("tok1");
-        let timeline = build_execution_timeline(events, Some(&filter_id), 2, 0, false);
-        assert_eq!(timeline.total_count, 5);
-        assert_eq!(timeline.events.len(), 2);
-    }
-
-    #[test]
-    fn build_execution_timeline_descending_returns_most_recent_first() {
-        // make_execution_events stamps event_timestamp_us = 1000 + i, so
-        // ascending order is 1000..1010. Descending with offset 0 must return the
-        // newest events first.
-        let events = make_execution_events(10, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 3, 0, true);
-        assert_eq!(timeline.total_count, 10);
-        let ts: Vec<u64> = timeline
-            .events
-            .iter()
-            .map(|e| e.event_timestamp_us)
-            .collect();
-        assert_eq!(ts, vec![1009, 1008, 1007]);
-    }
-
-    #[test]
-    fn build_execution_timeline_offset_pages_forward() {
-        let events = make_execution_events(10, Some("tok1"));
-        // Ascending, skip the first 4, take 3 → timestamps 1004,1005,1006.
-        let timeline = build_execution_timeline(events, None, 3, 4, false);
-        assert_eq!(timeline.total_count, 10);
-        let ts: Vec<u64> = timeline
-            .events
-            .iter()
-            .map(|e| e.event_timestamp_us)
-            .collect();
-        assert_eq!(ts, vec![1004, 1005, 1006]);
-    }
-
-    #[test]
-    fn build_execution_timeline_offset_beyond_total_is_empty() {
-        let events = make_execution_events(5, Some("tok1"));
-        let timeline = build_execution_timeline(events, None, 10, 100, false);
-        assert_eq!(timeline.total_count, 5);
-        assert!(timeline.events.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // ServiceError Display
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn service_error_display_variants() {
-        let nf = ServiceError::NotFound("x".into());
-        assert!(nf.to_string().contains("x"));
-
-        let ip = ServiceError::InvalidParams("bad".into());
-        assert!(ip.to_string().contains("bad"));
-
-        let un = ServiceError::Unavailable("down".into());
-        assert!(un.to_string().contains("down"));
-
-        let int = ServiceError::Internal("oops".into());
-        assert!(int.to_string().contains("oops"));
-    }
-
     // -----------------------------------------------------------------------
     // CompletenessLevel
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn completeness_level_debug_and_eq() {
-        assert_eq!(CompletenessLevel::Full, CompletenessLevel::Full);
-        assert_ne!(CompletenessLevel::Full, CompletenessLevel::Partial);
-        assert_ne!(CompletenessLevel::Partial, CompletenessLevel::Sparse);
-        assert_ne!(CompletenessLevel::Sparse, CompletenessLevel::Empty);
-    }
 }

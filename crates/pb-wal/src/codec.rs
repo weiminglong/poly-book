@@ -15,12 +15,13 @@ use crate::WalError;
 
 /// Current serialization version.
 ///
-/// v2 added `EventProvenance.ingest_ordinal`. bincode is not
-/// self-describing, so a v1 payload (6 provenance fields) cannot be safely
-/// decoded into the v2 struct (7 fields) — the trailing read would consume
-/// unrelated bytes. We therefore reject v1 explicitly rather than risk silent
-/// corruption; operators must drain the WAL before upgrading across this bump.
-const CURRENT_VERSION: u8 = 2;
+/// v2 added `EventProvenance.ingest_ordinal`. v3 stores `FixedPrice` and
+/// `FixedSize` as their raw scaled integers (4 and 8 bytes) instead of
+/// length-prefixed decimal strings. bincode is not self-describing, so an
+/// older payload cannot be safely decoded into the current struct layout; we
+/// reject older versions explicitly rather than risk silent corruption, and
+/// operators must drain the WAL before upgrading across a bump.
+pub const CURRENT_VERSION: u8 = 3;
 
 /// Encode a `PersistedRecord` into a versioned byte buffer.
 ///
@@ -42,11 +43,12 @@ pub fn decode(data: &[u8]) -> Result<PersistedRecord, WalError> {
     }
     let version = data[0];
     match version {
-        2 => bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string())),
-        1 => Err(WalError::Codec(
-            "record written by an older binary (codec v1); drain the WAL before upgrading"
-                .to_string(),
-        )),
+        CURRENT_VERSION => {
+            bincode::deserialize(&data[1..]).map_err(|e| WalError::Codec(e.to_string()))
+        }
+        1 | 2 => Err(WalError::Codec(format!(
+            "record written by an older binary (codec v{version}); drain the WAL before upgrading"
+        ))),
         other => Err(WalError::Codec(format!(
             "unsupported record version: {other}"
         ))),
@@ -87,14 +89,14 @@ mod tests {
     }
 
     #[test]
-    fn golden_codec_book_v2_bytes_are_stable() {
+    fn golden_codec_book_v3_bytes_are_stable() {
         let encoded = encode(&golden_book_record()).unwrap();
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
-        // Frozen v2 on-disk layout. If a persisted-type field is reordered/added,
+        // Frozen v3 on-disk layout. If a persisted-type field is reordered/added,
         // this fails — forcing a deliberate codec version bump + migration rather
         // than a silent format change.
-        const GOLDEN_V2_HEX: &str = "02000000000400000000000000746f6b3101000000000000000600000000000000302e353030300a000000000000003130302e30303030303000401e18240a0600c0fd0e18240a0600000000000105000000000000006576742d3100012a00000000000000010700000000000000";
-        assert_eq!(hex, GOLDEN_V2_HEX, "WAL codec v2 layout changed");
+        const GOLDEN_V3_HEX: &str = "03000000000400000000000000746f6b3101000000000000008813000000e1f5050000000000401e18240a0600c0fd0e18240a0600000000000105000000000000006576742d3100012a00000000000000010700000000000000";
+        assert_eq!(hex, GOLDEN_V3_HEX, "WAL codec v3 layout changed");
     }
 
     fn test_book_record() -> PersistedRecord {
@@ -177,14 +179,22 @@ mod tests {
     }
 
     #[test]
-    fn decode_v1_payload_is_rejected_with_drain_hint() {
-        // A v1-tagged payload must be rejected (not silently misparsed into the
-        // v2 struct that gained ingest_ordinal) so operators drain before upgrade.
-        let mut encoded = encode(&test_book_record()).unwrap();
-        encoded[0] = 1;
-        match decode(&encoded).unwrap_err() {
-            WalError::Codec(msg) => assert!(msg.contains("drain"), "unexpected msg: {msg}"),
-            other => panic!("expected Codec error, got: {other:?}"),
+    fn older_codec_versions_are_rejected_with_drain_hint() {
+        // A v1/v2-tagged payload must be rejected (not silently misparsed into
+        // the current layout) so operators drain the WAL before upgrading.
+        for version in [1u8, 2] {
+            let mut encoded = encode(&test_book_record()).unwrap();
+            encoded[0] = version;
+            match decode(&encoded).unwrap_err() {
+                WalError::Codec(msg) => {
+                    assert!(msg.contains("drain"), "unexpected msg: {msg}");
+                    assert!(
+                        msg.contains(&format!("v{version}")),
+                        "unexpected msg: {msg}"
+                    );
+                }
+                other => panic!("expected Codec error, got: {other:?}"),
+            }
         }
     }
 
@@ -250,31 +260,6 @@ mod tests {
         })
     }
 
-    fn test_execution_record() -> PersistedRecord {
-        use pb_types::event::{ExecutionEventKind, LatencyTrace};
-        PersistedRecord::Execution(pb_types::event::ExecutionEvent {
-            event_timestamp_us: 6_000_000,
-            asset_id: Some(AssetId::new("tok1")),
-            order_id: "order-1".to_string(),
-            client_order_id: Some("client-1".to_string()),
-            venue_order_id: Some("venue-1".to_string()),
-            kind: ExecutionEventKind::Fill,
-            side: Some(Side::Bid),
-            price: Some(FixedPrice::new(5000).unwrap()),
-            size: Some(FixedSize::from_f64(10.0).unwrap()),
-            status: Some("filled".to_string()),
-            reason: None,
-            latency: LatencyTrace {
-                market_data_recv_us: Some(100),
-                normalization_done_us: Some(200),
-                strategy_decision_us: Some(300),
-                order_submit_us: Some(400),
-                exchange_ack_us: Some(500),
-                exchange_fill_us: Some(600),
-            },
-        })
-    }
-
     #[test]
     fn encode_decode_roundtrip_trade() {
         let record = test_trade_record();
@@ -294,14 +279,6 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_validation() {
         let record = test_validation_record();
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(format!("{decoded:?}"), format!("{record:?}"));
-    }
-
-    #[test]
-    fn encode_decode_roundtrip_execution() {
-        let record = test_execution_record();
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(format!("{decoded:?}"), format!("{record:?}"));
@@ -350,7 +327,6 @@ mod tests {
             test_trade_record(),
             test_checkpoint_record(),
             test_validation_record(),
-            test_execution_record(),
         ];
         for record in records {
             let encoded = encode(&record).unwrap();

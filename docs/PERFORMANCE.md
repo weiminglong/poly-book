@@ -5,7 +5,7 @@ Measured Criterion results for the hot-path operations, regenerated with
 file). Numbers are medians of Criterion's sampled iterations on the machine
 below — single-machine, wall-clock measurements for order-of-magnitude
 reasoning, not a controlled lab benchmark. CI compiles every benchmark on
-each PR (`bench` job) but does not gate on timings: shared runners are too
+each PR (as targets of `cargo check --all-targets` in the `check` job) but does not gate on timings: shared runners are too
 noisy for statistical regression detection, so regression checks are run
 locally against this file.
 
@@ -51,7 +51,6 @@ iteration; the per-item column divides by the batch size.
 | `L2Book__mid_price` | 1 ns | 1 ns | 0 ns |
 | `LiveReadModel__active_assets` | 102 ns | 102 ns | 1 ns |
 | `LiveReadModel__feed_status_raw` | 60 ns | 60 ns | 0 ns |
-| `LiveReadModel__is_asset_active` | 23 ns | 23 ns | 0 ns |
 | `LiveReadModel__snapshot (50 levels, depth=20)` | 154 ns | 155 ns | 1 ns |
 | `analytics/check_integrity` | 3 ns | 3 ns | 0 ns |
 | `analytics/top_5_asks` | 26 ns | 26 ns | 0 ns |
@@ -89,5 +88,4 @@ iteration; the per-item column divides by the batch size.
 | `wire_deser/last_trade_price` | 259 ns | 262 ns | 5 ns |
 | `wire_deser/price_change_delta` | 504 ns | 509 ns | 11 ns |
 
-The ClickHouse-backed cross-backend comparison bench requires a running
-ClickHouse and is not part of this run.
+All Criterion benchmarks in the workspace are included in this run.

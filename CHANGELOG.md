@@ -8,7 +8,103 @@ is practical to do so.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The dispatcher's venue cross-check raised a `BookMismatch` on nearly every
+  delta of a market with an empty ask side (the venue reports that side as
+  `best_ask = "1"`, which was treated as a real level) and on every
+  intermediate state of a multi-entry `price_change` message. It now treats
+  `"0"`/`"1"` as side-specific empty markers and compares once per asset per
+  message. The committed demo capture's `ingest_events` were rewritten without
+  the 16,998 spurious events (56 genuine one-tick disagreements remain); its
+  venue data is unchanged.
+- `serve` no longer requires `--tokens`. Without it, it follows whatever the
+  ingest process writes to the WAL, so the `full` compose profile (rotating
+  `ingest --auto-rotate` + `serve`) starts and tracks the live market instead of
+  failing with a usage error.
+
+### Changed
+
+- WAL codec v3: `FixedPrice` and `FixedSize` are stored as their raw scaled
+  integers (4 and 8 bytes) instead of length-prefixed decimal strings, which
+  shrinks a book delta frame by about a sixth and removes a decimal parse from
+  every replayed record. The serde impls now branch on
+  `is_human_readable()`, so JSON responses still carry exact decimal strings.
+  v2 frames are rejected with a drain-the-WAL hint like v1. The decimal
+  formatter is plain `write!` now, which removed the last four `unsafe` blocks
+  in the workspace; `unsafe_code = "forbid"` has no exceptions, and the miri
+  CI job that existed to check those blocks is gone.
+- `ingest` and `auto-ingest` are one command: `ingest --tokens A,B` or
+  `ingest --auto-rotate`. The WAL drain loop and the five-minute rotation loop
+  each existed twice (the second rotation copy, in `serve-api`, cancelled the
+  outgoing market immediately and so dropped its final seconds from the live
+  view). One shared feed runtime now drives both `ingest` and `serve-api`,
+  with the REST resnapshot self-heal wired into every subscription.
+- Configuration is one typed `Settings` struct deserialized once from
+  `config/default.toml` plus `PB__` overrides. An unknown or misspelled key is
+  now a startup error naming the field instead of a warning (the separate
+  key-allowlist module and `doctor`'s copy of that check are gone), negative
+  values are rejected, and out-of-range values are clamped in one place. The
+  dead `storage.parquet_row_group_size` key is removed. `--log-level info` on
+  the command line now wins over `logging.level` in the file, as any explicit
+  flag should.
+- CI inputs that drift are pinned: jobs run on `ubuntu-24.04` instead of the
+  floating `ubuntu-latest` (which moved to 26.04 and has no browser build for
+  the pinned Playwright release), and the S3 round-trip job uses the
+  Apache-2.0 `adobe/s3mock` server (MinIO's public images were withdrawn from
+  Docker Hub and quay.io, and LocalStack now exits without a paid license).
+- Dependencies refreshed to clear every open RustSec advisory: arrow/parquet
+  58 → 59 (parquet 59 drops the `thrift` crate), rustls 0.23.46, h2 0.4.20,
+  tokio 1.54, zstd 0.13.4, and the webpki root bundles. The `cargo-deny`
+  check is green again for the first time since September.
+- CI trimmed from 15 jobs to 9, dropping the two longest (`bench` at about 13
+  minutes and `fuzz` at about 12) from the per-PR gate: the
+  `bench` compile-only job (redundant with `cargo check --all-targets`),
+  `release-build` (subsumed by `docker-build`), `hygiene`, `audit`
+  (duplicated `cargo-deny`), the CodeQL workflow (it scanned only YAML and
+  TypeScript), and the Alertmanager routing assertions are gone. The fuzz smoke
+  runs moved to `fuzz.yml`, nightly and on pushes to `main`.
+
+### Removed
+
+- About 800 lines of tests that only restated `#[derive]`s and `match` arms
+  (serde round-trips of derived impls, `Display` of enum names, `Default` is
+  zero, HTTP status code tables), along with the dead code some of them
+  existed for: the `status_to_static` label table, two unused metrics-server
+  entry points, a bench-only duplicate of the read-model consumer, the
+  never-constructed `CompletenessLevel::Sparse`, and two integrity-summary
+  fields that were always zero. Property tests, golden fixtures, and the
+  behavioral tests are untouched.
+- ClickHouse as a second storage backend and query engine: the sink, record
+  writer, reader, DDL, `storage.clickhouse_*` and `api.historical_backend`
+  config keys, the `--clickhouse` ingest flags, the `--source` replay flag,
+  the Docker-backed round-trip and cross-backend tests, and the compose
+  service. Parquet was already the default and the only backend `demo`,
+  `serve` hydration, and the checkpoint path used; every reader change had to
+  be made twice. Ad-hoc SQL over the Parquet tree is available with DuckDB
+  (`just parquet-*`).
+- Execution journaling: the `ExecutionEvent`/`LatencyTrace` types, the
+  `execution_events` dataset, `execution-append`/`execution-replay`, the
+  `GET /api/v1/execution/orders` route, and the SPA's Execution page. Nothing
+  in the system produced execution events except a human typing them in.
+- The SQL query workbench (`/api/v1/query/*`, `api.query_*` keys, the
+  `fuzz_query_guard` target, the SPA's Query page). It required ClickHouse.
+- The pb-service trait and enum-dispatch layer (`BookService`, `ReplayService`,
+  `IntegrityService`, `ExecutionService`, `QueryService`, `Any*Service`).
+  `BookService` had no implementor and the others had exactly one backend
+  left. One struct, `HistoricalService`, now answers replay and integrity
+  queries.
+- `infra/` (Terraform that was never applied), the `deploy.yml` workflow (never
+  succeeded, and it re-ran the full CI on every push to `main`), the
+  `iac-scan` job, the `openspec/` archive (its decisions live in `docs/adr/`),
+  `AGENTS.md` (a diverging copy of `CLAUDE.md`), `docs/latency.md`
+  (superseded by the measured `docs/PERFORMANCE.md`), the verbatim config
+  re-dump in `docs/operations.md`, and the per-crate "Docs to Update After
+  Changes" tables. Each fact now has one documented home.
+- The gRPC surface (`pb-grpc`, the `[grpc]` config section, the tonic/prost
+  dependencies, and the `protoc` build requirement). It mirrored the HTTP
+  routes, was disabled by default, and had no consumer. A fresh clone now
+  builds with only a Rust toolchain.
 
 ## [0.1.0] - 2026-07-06
 

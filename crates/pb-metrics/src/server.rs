@@ -1,6 +1,5 @@
 use axum::{routing::get, Router};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::error::MetricsError;
@@ -70,26 +69,6 @@ fn build_router(handle: PrometheusHandle, endpoint: &str) -> Router {
     )
 }
 
-/// Serve the metrics endpoint. Call `install_recorder()` first.
-pub async fn serve_metrics(
-    handle: PrometheusHandle,
-    addr: SocketAddr,
-    endpoint: &str,
-) -> Result<(), MetricsError> {
-    tracing::info!(%addr, endpoint, "starting metrics server");
-
-    let app = build_router(handle, endpoint);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| MetricsError::ServerStart(e.to_string()))?;
-
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| MetricsError::ServerStart(e.to_string()))?;
-
-    Ok(())
-}
-
 /// Serve metrics on a pre-bound listener.
 /// Use this when you want to bind the listener yourself (e.g., to catch bind errors early).
 pub async fn serve_metrics_on_listener(
@@ -104,15 +83,6 @@ pub async fn serve_metrics_on_listener(
         .map_err(|e| MetricsError::ServerStart(e.to_string()))?;
 
     Ok(())
-}
-
-/// Start the Prometheus metrics HTTP server (legacy convenience function).
-///
-/// Installs the Prometheus recorder globally and serves metrics at the given
-/// address and endpoint path.
-pub async fn start_metrics_server(addr: SocketAddr, endpoint: &str) -> Result<(), MetricsError> {
-    let handle = install_recorder()?;
-    serve_metrics(handle, addr, endpoint).await
 }
 
 #[cfg(test)]

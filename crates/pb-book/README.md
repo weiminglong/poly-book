@@ -47,7 +47,7 @@ pb-book (L2Book)
 - `check_sequence` enforces monotonic sequence numbers and detects gaps.
 - `proptest` suites verify ordering, spread, snapshot idempotency, and crossed-book
   detection.
-- 69 tests covering empty book, single level, snapshot duplicates, delta sequences,
+- Tests cover the empty book, single level, snapshot duplicates, delta sequences,
   and proptest invariants.
 
 ## Benchmarks
@@ -57,12 +57,3 @@ workloads; `benches/array_book.rs` keeps the ADR-0002 comparison honest by
 running an epoch-stamped dense-array book (the bounded-tick-grid alternative)
 against `L2Book` on identical workloads. Measured results and the retention
 rationale live in `docs/adr/0002-btreemap-orderbook.md`.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New `L2Book` method added | `pb-api` `dto.rs` if exposed to clients, `docs/api.md` if it creates a new route |
-| Book integrity semantics changed | `docs/serve-api.md`, integrity capability spec |
-| Snapshot/delta format changed | `pb-store` schema, `pb-replay` reconstruction logic |
-| Changes affect the API surface | Check the active OpenSpec change under `openspec/changes/` |

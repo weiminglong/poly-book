@@ -9,11 +9,8 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
-| `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
-| `replay` | Reconstruct historical orderbook state at a specific timestamp. |
-| `execution-replay` | Replay stored execution history independently of market-data replay. |
-| `execution-append` | Append execution events to storage from flags or JSON input. |
+| `ingest` | Start live orderbook ingestion (feed → WAL → Parquet) for `--tokens` or, with `--auto-rotate`, the rotating BTC 5-minute market. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
+| `replay` | Reconstruct historical orderbook state at a specific timestamp (`--mode` defaults to `recv_time`). |
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
 | `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
@@ -25,9 +22,15 @@ to the appropriate subsystem.
 config/default.toml  →  env vars (PB__ prefix)  →  CLI flags
 ```
 
-Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`.
+Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`.
+The layered sources are deserialized once into `settings::Settings`, a typed
+struct whose field defaults match `config/default.toml` (a test asserts this).
+An unknown or misspelled key fails startup with the field name; negative
+numbers are rejected by the unsigned field types; zero intervals and sizes
+are clamped to their minimum with a warning. Commands read typed fields, never
+string keys.
 
-Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
+Example: `PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data`
 
 ## Design Notes
 
@@ -37,7 +40,7 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   library crates use `thiserror`.
 - Graceful shutdown via `CancellationToken` propagated to all subsystems.
   Both SIGINT and SIGTERM are handled for container/production environments.
-- `serve` and `serve-api` reject non-loopback HTTP/WS or gRPC binds unless
+- `serve` and `serve-api` reject a non-loopback HTTP/WS bind unless
   `api.auth_token` / `PB__API__AUTH_TOKEN` is configured. Loopback remains open
   for local workstation use.
 - In separated `serve` mode, startup hydrates from checkpoints + WAL, then
@@ -47,21 +50,18 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   commit cadence is tunable via `wal.position_commit_interval_ms`.
 - WAL writer is owned directly on the single-threaded event loop (no
   `Arc<Mutex<_>>` overhead).
-- `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic
-  shared between `ingest` and `auto_ingest`.
-- ClickHouse URLs are redacted before logging so userinfo, passwords, query
-  parameters, and fragments are not emitted during backend probes or query
-  workbench startup.
-- Forwarder tasks use idiomatic `while let` receive loops instead of
-  `tokio::select!` patterns.
-- **Task supervision**: long-lived background tasks (feed, dispatcher, storage
-  sinks, fan-out forwarders, WAL drain, checkpoint producer) are registered with
-  a `pipeline::Supervisor` (a tagged `JoinSet`). If any exits unexpectedly —
-  returns, errors, or panics — before a coordinated shutdown, `ingest`/
-  `auto-ingest` cancel the shutdown token and return a non-zero error rather than
-  continuing with a dead component or exiting 0. In `auto_ingest` the rotating
-  per-market feed generations are deliberately *not* supervised this way (their
-  cycling is the expected steady state and is managed via `Generation`).
+- `feed.rs` holds the one live-feed runtime (`run_feed`): a `FeedPlan` is either
+  a fixed token set or auto-rotate, and `ingest` and `serve-api` both drive it,
+  so rotation timing (subscribe 10 s before the bucket, keep the outgoing
+  market until its boundary) and the REST resnapshot self-heal are identical in
+  both.
+- **Task supervision**: long-lived background tasks (storage sink, WAL drain,
+  checkpoint producer) are registered with a `pipeline::Supervisor` (a tagged
+  `JoinSet`). If any exits unexpectedly — returns, errors, or panics — before a
+  coordinated shutdown, `ingest` cancels the shutdown token and returns a
+  non-zero error rather than continuing with a dead component or exiting 0. The
+  rotating per-market feed generations are deliberately *not* supervised this
+  way (their cycling is the expected steady state).
 - **WAL→storage reconciliation**: with all Parquet-writing tasks stopped,
   `reconcile` acquires the exclusive WAL lease,
   starts at the earliest retained segment, and aborts on CRC, segment, or decode
@@ -70,13 +70,3 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   before cleaning old objects. Running while ingest is active is refused;
   standalone append/backfill writers are an operator-enforced stop condition;
   re-running is idempotent.
-
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New subcommand added | `README.md` workflows section, `docs/operations.md` |
-| Config key added or removed | `config/default.toml`, `docs/operations.md` |
-| CLI flag changed | `README.md` workflows section |
-| Startup or shutdown behavior changed | `docs/operations.md` |
-| New subcommand affects workstation scope | Update the active OpenSpec change under `openspec/changes/` |

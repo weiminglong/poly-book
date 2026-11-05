@@ -22,7 +22,6 @@ Describe the bug clearly and briefly.
 - OS:
 - Rust version:
 - Docker available:
-- Storage mode: `parquet`, `clickhouse`, or both
 
 ## Logs or Output
 

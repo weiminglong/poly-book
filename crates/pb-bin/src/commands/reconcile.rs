@@ -1,5 +1,5 @@
+use crate::settings::Settings;
 use anyhow::Result;
-use config::Config;
 
 use super::pipeline;
 
@@ -40,14 +40,11 @@ fn is_receive_time_partitioned(record: &pb_types::PersistedRecord) -> bool {
 /// gaps, CRC errors, and decode failures fail closed. Each recovered object is
 /// verified before a manifest atomically publishes it, so re-running is
 /// idempotent and a crash never exposes a delete-before-write window.
-pub async fn run(settings: Config) -> Result<()> {
-    let wal_config = pipeline::wal_config_from_settings(&settings);
+pub async fn run(settings: Settings) -> Result<()> {
+    let wal_config = settings.wal_config();
     let _maintenance_guard = pb_wal::WalMaintenanceGuard::acquire(&wal_config)
         .map_err(|e| anyhow::anyhow!("reconcile requires an offline WAL: {e}"))?;
-    let parquet_base = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let (store, base_path) = pipeline::build_object_store(&parquet_base)?;
+    let (store, base_path) = pipeline::build_object_store(&settings.storage.parquet_base_path)?;
     let writer = pb_store::ParquetRecordWriter::new(store, base_path);
 
     // Ignore any stale maintenance cursor and inspect the entire retained WAL.

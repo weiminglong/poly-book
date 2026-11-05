@@ -5,18 +5,11 @@ import type {
   completenessLabelSchema,
   continuityWarningSchema,
   dataSourceModeSchema,
-  datasetInfoSchema,
-  datasetSchemaResponseSchema,
-  executionEventViewSchema,
-  executionTimelineResponseSchema,
   feedModeSchema,
   feedStatusResponseSchema,
   integritySummaryResponseSchema,
-  latencyTraceViewSchema,
   liveOrderBookSnapshotSchema,
   priceLevelViewSchema,
-  queryColumnSchema,
-  queryResultResponseSchema,
   replayModeSchema,
   replayReconstructionResponseSchema,
   sessionStatusSchema,
@@ -36,14 +29,7 @@ export type FeedStatusResponse = z.infer<typeof feedStatusResponseSchema>
 export type ActiveAssetSummary = z.infer<typeof activeAssetSummarySchema>
 export type LiveOrderBookSnapshot = z.infer<typeof liveOrderBookSnapshotSchema>
 export type ReplayReconstructionResponse = z.infer<typeof replayReconstructionResponseSchema>
-export type LatencyTraceView = z.infer<typeof latencyTraceViewSchema>
-export type ExecutionEventView = z.infer<typeof executionEventViewSchema>
-export type ExecutionTimelineResponse = z.infer<typeof executionTimelineResponseSchema>
 export type IntegritySummaryResponse = z.infer<typeof integritySummaryResponseSchema>
-export type QueryColumn = z.infer<typeof queryColumnSchema>
-export type QueryResultResponse = z.infer<typeof queryResultResponseSchema>
-export type DatasetInfo = z.infer<typeof datasetInfoSchema>
-export type DatasetSchemaResponse = z.infer<typeof datasetSchemaResponseSchema>
 export type BookUpdateMessage = z.infer<typeof bookUpdateMessageSchema>
 
 // Client-only types (not from API)
@@ -67,22 +53,10 @@ export interface IntegrityRequest {
   endUs: number
 }
 
-export interface ExecutionRequest {
-  orderId?: string
-  assetId?: string
-  startUs: number
-  endUs: number
-  limit?: number
-  /** Pagination offset into the ordered result set. */
-  offset?: number
-  /** Result ordering: 'desc' (most recent first, default) or 'asc'. */
-  order?: 'asc' | 'desc'
-}
-
 export interface RequestOptions {
   signal?: AbortSignal
   /** Per-request timeout override in ms. Defaults to a short timeout suitable
-   *  for snappy reads; analytic endpoints (e.g. the SQL workbench) pass a longer
+   *  for snappy reads; historical endpoints (replay, integrity) pass a longer
    *  value so legitimate queries are not aborted prematurely. */
   timeoutMs?: number
 }

@@ -1,11 +1,8 @@
 import type {
   ActiveAssetSummary,
-  DatasetSchemaResponse,
-  ExecutionTimelineResponse,
   FeedStatusResponse,
   IntegritySummaryResponse,
   LiveOrderBookSnapshot,
-  QueryResultResponse,
   ReplayFormValues,
   ReplayMode,
   ReplayReconstructionResponse,
@@ -230,121 +227,6 @@ export const demoIntegritySummary: IntegritySummaryResponse = {
       details: 'Expected sequence 12043, observed 12046.',
     },
   ],
-}
-
-export const demoExecutionTimeline: ExecutionTimelineResponse = {
-  events: [
-    {
-      event_timestamp_us: DEMO_TIMESTAMP_US - 180_000_000,
-      asset_id: 'btc-5m-yes',
-      order_id: 'demo-order-1',
-      client_order_id: 'client-001',
-      venue_order_id: null,
-      kind: 'submit_intent',
-      side: 'Bid',
-      price: '0.5300',
-      size: '50.000000',
-      status: null,
-      reason: null,
-      latency: {
-        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
-        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
-        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
-        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
-        exchange_ack_us: null,
-        exchange_fill_us: null,
-      },
-    },
-    {
-      event_timestamp_us: DEMO_TIMESTAMP_US - 179_800_000,
-      asset_id: 'btc-5m-yes',
-      order_id: 'demo-order-1',
-      client_order_id: 'client-001',
-      venue_order_id: 'venue-abc-123',
-      kind: 'exchange_ack',
-      side: 'Bid',
-      price: '0.5300',
-      size: '50.000000',
-      status: 'accepted',
-      reason: null,
-      latency: {
-        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
-        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
-        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
-        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
-        exchange_ack_us: DEMO_TIMESTAMP_US - 179_800_000,
-        exchange_fill_us: null,
-      },
-    },
-    {
-      event_timestamp_us: DEMO_TIMESTAMP_US - 178_000_000,
-      asset_id: 'btc-5m-yes',
-      order_id: 'demo-order-1',
-      client_order_id: 'client-001',
-      venue_order_id: 'venue-abc-123',
-      kind: 'fill',
-      side: 'Bid',
-      price: '0.5300',
-      size: '50.000000',
-      status: 'filled',
-      reason: null,
-      latency: {
-        market_data_recv_us: DEMO_TIMESTAMP_US - 180_010_000,
-        normalization_done_us: DEMO_TIMESTAMP_US - 180_009_500,
-        strategy_decision_us: DEMO_TIMESTAMP_US - 180_005_000,
-        order_submit_us: DEMO_TIMESTAMP_US - 180_000_000,
-        exchange_ack_us: DEMO_TIMESTAMP_US - 179_800_000,
-        exchange_fill_us: DEMO_TIMESTAMP_US - 178_000_000,
-      },
-    },
-  ],
-  total_count: 3,
-}
-
-export const demoDatasets: DatasetSchemaResponse = {
-  datasets: [
-    {
-      name: 'book_events',
-      description: 'L2 orderbook delta and snapshot events',
-      columns: [
-        { name: 'recv_timestamp_us', data_type: 'Int64' },
-        { name: 'exchange_timestamp_us', data_type: 'Int64' },
-        { name: 'asset_id', data_type: 'String' },
-        { name: 'sequence', data_type: 'UInt64' },
-        { name: 'event_type', data_type: 'String' },
-        { name: 'price', data_type: 'String' },
-        { name: 'size', data_type: 'String' },
-        { name: 'side', data_type: 'String' },
-      ],
-    },
-    {
-      name: 'trade_events',
-      description: 'Matched trade events from the exchange',
-      columns: [
-        { name: 'recv_timestamp_us', data_type: 'Int64' },
-        { name: 'exchange_timestamp_us', data_type: 'Int64' },
-        { name: 'asset_id', data_type: 'String' },
-        { name: 'trade_id', data_type: 'String' },
-        { name: 'price', data_type: 'String' },
-        { name: 'size', data_type: 'String' },
-        { name: 'side', data_type: 'String' },
-      ],
-    },
-  ],
-}
-
-export const demoQueryResult: QueryResultResponse = {
-  columns: [
-    { name: 'asset_id', data_type: 'String' },
-    { name: 'count', data_type: 'UInt64' },
-  ],
-  rows: [
-    ['btc-5m-yes', 24817],
-    ['btc-5m-no', 23456],
-  ],
-  row_count: 2,
-  truncated: false,
-  execution_time_ms: 42,
 }
 
 export function getDemoSnapshot(assetId: string, depth: number): LiveOrderBookSnapshot {

@@ -1,8 +1,8 @@
 # pb-replay
 
 Historical replay and orderbook reconstruction engine. Reads stored events from
-Parquet or ClickHouse, rebuilds the L2 order book at any microsecond timestamp,
-and supports periodic REST snapshot backfill for checkpoint seeding.
+Parquet, rebuilds the L2 order book at any microsecond timestamp, and supports
+periodic REST snapshot backfill for checkpoint seeding.
 
 ## Key Types
 
@@ -10,19 +10,18 @@ and supports periodic REST snapshot backfill for checkpoint seeding.
 |------|-------------|
 | `ReplayEngine` | Reconstructs `L2Book` at a target timestamp by reading checkpoints and applying events forward. |
 | `ReplayResult` | Output of reconstruction: the rebuilt `L2Book`, replay mode, whether a checkpoint was used, and continuity (ingest) events encountered. |
-| `EventReader` | Trait abstracting storage backends for reading events by time range and asset. |
+| `EventReader` | Trait abstracting event storage for reading events by time range and asset. |
 | `ParquetReader` | `EventReader` implementation for local/S3 Parquet objects through `object_store`. |
-| `ClickHouseReader` | `EventReader` implementation for ClickHouse tables. |
 | `BackfillConfig` | Configuration for periodic REST snapshot fetching. |
 | `ReplayError` | Error type for replay operations. |
 
 ## Data Flow
 
 ```text
-Parquet files / ClickHouse tables
+Parquet files
         │
         ▼
-  EventReader (ParquetReader or ClickHouseReader)
+  EventReader (ParquetReader)
         │
         ▼
   ReplayEngine::reconstruct_at(asset_id, target_us)
@@ -31,7 +30,7 @@ Parquet files / ClickHouse tables
   ReplayResult { book, mode, used_checkpoint, continuity_events }
         │
         ▼
-  pb-api (replay/reconstruct, integrity/summary, execution/orders)
+  pb-service (HistoricalService) ──▶ pb-api (replay/reconstruct, integrity/summary)
 ```
 
 Also: `run_backfill` periodically fetches REST snapshots and writes them as
@@ -51,8 +50,7 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   and requires a fresh post-reset snapshot before applying later deltas.
 - The `EventReader` trait has methods for reading each dataset type:
   `read_market_data`, `read_checkpoints`, `read_latest_checkpoint`,
-  `read_latest_checkpoints`,
-  `read_validations`, `read_execution_events`.
+  `read_latest_checkpoints`, `read_validations`.
 - `ParquetReader::from_store` uses Parquet object-store range reads, so the
   deployed S3 path is read through the same credentials and endpoint wiring as
   the writer; it never treats `s3://` as a local filesystem path.
@@ -67,24 +65,8 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   not rescan the full inventory per asset or probe empty hours back to epoch.
 - Manifest paths are parsed without re-encoding their object keys, and logical
   asset filters handle `object_store`'s additional percent escaping.
-- Both readers support time-range filtering and asset filtering at the storage
-  layer to minimize I/O. ClickHouseReader pushes `WHERE asset_id` into the query
-  for server-side filtering and adds `ORDER BY` clauses on all queries.
-- ClickHouseReader uses `tokio::try_join!` to run independent queries concurrently
-  (e.g., checkpoints + market data) instead of sequential awaits.
-- For integrity summaries, `ClickHouseReader::read_integrity_aggregates` pushes the
-  heavy counts to the server (`count()` on `book_events`, `count()`/`countIf(matched)`
-  on `replay_validations`) and `read_ingest_events` fetches only the bounded ingest
-  list. This avoids streaming every book/trade row back just to call `.len()` on
-  it; the two aggregate queries run concurrently via `try_join!`. The
-  returned `IntegrityAggregates` carries `book_event_count`/`validation_count`/
-  `validation_match_count`.
-- Potentially large ClickHouse reads (`read_market_data`, `read_ingest_events`,
-  `read_execution_events`) go through `bounded_client()`, which sets
-  `max_result_rows = MAX_READ_ROWS` (5M) + `result_overflow_mode = 'throw'`, so a
-  pathological window ERRORS loudly instead of materializing millions of rows and
-  OOM-ing the serve process. Verified against a live server
-  (TOO_MANY_ROWS_OR_BYTES on overflow).
+- The reader supports time-range filtering and asset filtering at the storage
+  layer to minimize I/O.
 - Uses `std::mem::take` instead of `clone` for ingest events to avoid unnecessary
   heap allocation during reconstruction.
 - Date formatting uses `Datelike`/`Timelike` trait methods instead of `strftime`
@@ -116,18 +98,8 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
   timestamp. Without this, recv-vs-exchange skew could skip or double-apply deltas
   straddling the boundary.
 
-## Docs to Update After Changes
-
-| What changed | Update |
-|---|---|
-| New `EventReader` method | Both `ParquetReader` and `ClickHouseReader` must implement it |
-| Reconstruction logic changed | `docs/serve-api.md` replay semantics section |
-| New storage backend reader | `docs/operations.md`, `pb-api` if the reader is used in routes |
-| Backfill config shape changed | `config/default.toml`, `docs/operations.md` |
-| Replay semantics affect API responses | `docs/api.md`, check the active OpenSpec change under `openspec/changes/` |
-
 ## Tests
 
-51 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
+Tests cover `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
 `ParquetReader` integration, end-to-end write-then-reconstruct round-trips, and
 backfill REST response parsing.

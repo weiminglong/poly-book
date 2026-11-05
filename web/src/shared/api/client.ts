@@ -62,57 +62,6 @@ export async function fetchAndValidate<T>(
   }
 }
 
-export async function postAndValidate<T>(
-  schema: ZodSchema<T>,
-  url: string,
-  body: unknown,
-  options?: RequestOptions,
-): Promise<T> {
-  const timeoutController = new AbortController()
-  let timedOut = false
-  const timeoutId = window.setTimeout(() => {
-    timedOut = true
-    timeoutController.abort()
-  }, options?.timeoutMs ?? REQUEST_TIMEOUT_MS)
-
-  const abortHandler = () => timeoutController.abort()
-  options?.signal?.addEventListener('abort', abortHandler, { once: true })
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: timeoutController.signal,
-    })
-
-    if (!response.ok) {
-      let message = `Request failed with status ${response.status}`
-      try {
-        const json = await response.json()
-        if (typeof json?.error === 'string') {
-          message = json.error
-        }
-      } catch (err) {
-        // Keep the diagnostic trail instead of silently swallowing it.
-        console.warn('Failed to parse API error response body:', err)
-      }
-      throw new Error(message)
-    }
-
-    const json: unknown = await response.json()
-    return schema.parse(json)
-  } catch (error) {
-    if (timedOut) {
-      throw new Error(`Request timed out after ${options?.timeoutMs ?? REQUEST_TIMEOUT_MS}ms`)
-    }
-    throw error
-  } finally {
-    window.clearTimeout(timeoutId)
-    options?.signal?.removeEventListener('abort', abortHandler)
-  }
-}
-
 export function isAbortError(error: unknown): boolean {
   return error instanceof DOMException
     ? error.name === 'AbortError'

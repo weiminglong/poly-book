@@ -34,8 +34,5 @@ have a security impact should go through the normal issue tracker.
 ## Unsafe-code policy
 
 `unsafe` is forbidden across the workspace (`[workspace.lints.rust]
-unsafe_code = "forbid"`). The single exception is `pb-types`, which overrides
-to `deny` for four `#[allow]`-scoped `from_utf8_unchecked` sites in its
-fixed-point serializers — each carries a SAFETY comment (the writer emits only
-ASCII digits and `.`) and the crate runs under miri in CI. Ten of eleven
-crates are provably `unsafe`-free at compile time.
+unsafe_code = "forbid"`) with no per-crate exceptions, so every crate is
+provably `unsafe`-free at compile time.

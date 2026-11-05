@@ -1,4 +1,4 @@
-//! End-to-end persistence test against an S3-compatible object store (MinIO).
+//! End-to-end persistence test against an S3-compatible object store.
 //!
 //! This proves the S3 object-store wiring works against a real S3
 //! API, not just that an `AmazonS3` type is constructed: an `s3://` base path is
@@ -9,12 +9,12 @@
 //! `ParquetReader` reads the original records through object-store range reads.
 //! It also asserts no local `s3:`-named directory is created.
 //!
-//! Run with a MinIO/LocalStack endpoint:
+//! Run with any S3-compatible endpoint (CI uses adobe/s3mock):
 //!   PB_TEST_S3_ENDPOINT=http://127.0.0.1:9100 \
 //!   cargo test -p pb-integration-tests --test s3_minio_roundtrip -- --ignored
 //!
 //! Optional overrides: PB_TEST_S3_BUCKET (default poly-book-test),
-//! PB_TEST_S3_ACCESS_KEY / PB_TEST_S3_SECRET_KEY (default minioadmin).
+//! PB_TEST_S3_ACCESS_KEY / PB_TEST_S3_SECRET_KEY (default `test`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,10 +99,8 @@ async fn s3_base_path_persists_parquet_and_survives_restart() {
         .expect("PB_TEST_S3_ENDPOINT is required for this explicitly ignored S3 integration test");
     let bucket =
         std::env::var("PB_TEST_S3_BUCKET").unwrap_or_else(|_| "poly-book-test".to_string());
-    let access =
-        std::env::var("PB_TEST_S3_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
-    let secret =
-        std::env::var("PB_TEST_S3_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string());
+    let access = std::env::var("PB_TEST_S3_ACCESS_KEY").unwrap_or_else(|_| "test".to_string());
+    let secret = std::env::var("PB_TEST_S3_SECRET_KEY").unwrap_or_else(|_| "test".to_string());
 
     // Configure the AWS provider via env so parse_url_opts(url, env::vars())
     // wires endpoint + credentials + path-style addressing into the builder.
@@ -112,7 +110,7 @@ async fn s3_base_path_persists_parquet_and_survives_restart() {
     std::env::set_var("AWS_SECRET_ACCESS_KEY", &secret);
     std::env::set_var("AWS_REGION", "us-east-1");
     std::env::set_var("AWS_ALLOW_HTTP", "true");
-    // MinIO/LocalStack need path-style requests, not virtual-hosted buckets.
+    // S3 emulators need path-style requests, not virtual-hosted buckets.
     std::env::set_var("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "false");
 
     // A unique prefix per run keeps reruns independent within the shared bucket.
