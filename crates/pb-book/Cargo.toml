@@ -16,7 +16,6 @@ workspace = true
 [dependencies]
 pb-types = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

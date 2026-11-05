@@ -14,18 +14,15 @@ pb-book = { path = "../../crates/pb-book" }
 pb-feed = { path = "../../crates/pb-feed" }
 pb-store = { path = "../../crates/pb-store" }
 pb-replay = { path = "../../crates/pb-replay" }
-pb-metrics = { path = "../../crates/pb-metrics" }
 pb-api = { path = "../../crates/pb-api" }
 pb-wal = { path = "../../crates/pb-wal" }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 serde_json = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }
 futures-util = { workspace = true }
-chrono = { workspace = true }
 tempfile = "3"
 
 [[test]]

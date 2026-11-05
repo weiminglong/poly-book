@@ -399,9 +399,23 @@ impl LiveState {
                     outcome.mark_asset_changed(asset_id);
                 }
             }
-            PersistedRecord::Trade(_)
-            | PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_) => {}
+            PersistedRecord::Checkpoint(checkpoint) => {
+                // A tailed checkpoint seeds an asset that has no materialized
+                // book yet (a market that aged out of the active set and came
+                // back, or one whose venue snapshot was never seen). A book
+                // that is already live is never reset to an older checkpoint.
+                let asset_id = checkpoint.asset_id.to_string();
+                let uninitialized = self
+                    .assets
+                    .get(&asset_id)
+                    .is_none_or(|state| !state.initialized_from_snapshot);
+                if uninitialized {
+                    self.apply_checkpoint(&checkpoint);
+                    outcome.mark_asset_changed(asset_id.clone());
+                    outcome.mark_asset_broadcast(asset_id);
+                }
+            }
+            PersistedRecord::Trade(_) | PersistedRecord::Validation(_) => {}
         }
 
         outcome
@@ -1359,6 +1373,42 @@ mod tests {
         // no data received, so stale and no book
         assert!(assets[0].stale);
         assert!(!assets[0].has_book);
+    }
+
+    #[tokio::test]
+    async fn tailed_checkpoint_seeds_an_uninitialized_book_only() {
+        use pb_types::event::{BookCheckpoint, PriceLevel};
+
+        let model = LiveReadModel::new(FeedMode::FixedTokens);
+        model.set_active_assets(vec!["tok1".to_string()]).await;
+        model.mark_hydrated().await;
+        let checkpoint = |price: f64, ts: u64| {
+            PersistedRecord::Checkpoint(BookCheckpoint {
+                asset_id: AssetId::new("tok1"),
+                checkpoint_timestamp_us: ts,
+                bids: vec![PriceLevel {
+                    price: pb_types::FixedPrice::from_f64(price).unwrap(),
+                    size: pb_types::FixedSize::from_f64(10.0).unwrap(),
+                }],
+                asks: vec![PriceLevel {
+                    price: pb_types::FixedPrice::from_f64(0.60).unwrap(),
+                    size: pb_types::FixedSize::from_f64(20.0).unwrap(),
+                }],
+                provenance: provenance(ts, ts, 0),
+                wal_offset: None,
+            })
+        };
+
+        // No snapshot has been seen: the checkpoint seeds the book.
+        assert!(model.snapshot("tok1", 5, 999_999).await.is_err());
+        model.apply_record(checkpoint(0.50, 500)).await;
+        let snap = model.snapshot("tok1", 5, 999_999).await.unwrap();
+        assert_eq!(snap.best_bid.unwrap().price.raw(), 5000);
+
+        // The book is live now: a later checkpoint must not reset it.
+        model.apply_record(checkpoint(0.40, 600)).await;
+        let snap = model.snapshot("tok1", 5, 999_999).await.unwrap();
+        assert_eq!(snap.best_bid.unwrap().price.raw(), 5000);
     }
 
     #[tokio::test]

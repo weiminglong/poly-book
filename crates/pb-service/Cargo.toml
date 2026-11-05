@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 pb-types = { workspace = true }
-pb-book = { workspace = true }
 pb-replay = { workspace = true }
 thiserror = { workspace = true }
 

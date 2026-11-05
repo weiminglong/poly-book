@@ -20,7 +20,6 @@ workspace = true
 [dependencies]
 pb-types = { workspace = true }
 pb-api = { workspace = true }
-pb-book = { workspace = true }
 pb-feed = { workspace = true }
 pb-store = { workspace = true }
 pb-replay = { workspace = true }

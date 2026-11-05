@@ -2242,7 +2242,6 @@ dependencies = [
  "mimalloc",
  "object_store",
  "pb-api",
- "pb-book",
  "pb-feed",
  "pb-metrics",
  "pb-replay",
@@ -2270,7 +2269,6 @@ dependencies = [
  "pb-types",
  "proptest",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -2302,14 +2300,12 @@ name = "pb-integration-tests"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "chrono",
  "futures-util",
  "object_store",
  "parquet",
  "pb-api",
  "pb-book",
  "pb-feed",
- "pb-metrics",
  "pb-replay",
  "pb-store",
  "pb-types",
@@ -2317,7 +2313,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-util",
  "url",
 ]
 
@@ -2344,7 +2339,6 @@ dependencies = [
  "object_store",
  "parquet",
  "pb-book",
- "pb-metrics",
  "pb-store",
  "pb-types",
  "reqwest 0.13.4",
@@ -2361,7 +2355,6 @@ name = "pb-service"
 version = "0.1.0"
 dependencies = [
  "object_store",
- "pb-book",
  "pb-replay",
  "pb-store",
  "pb-types",

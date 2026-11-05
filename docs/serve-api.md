@@ -48,9 +48,13 @@ startup does not re-apply records that were already consumed during hydration.
 
 `serve --tokens A,B` serves a fixed asset set with per-asset checkpoint
 hydration. `serve` with no `--tokens` follows the WAL instead: every asset the
-ingest process writes becomes active and ages out ten minutes after its last
-record, so it pairs with a rotating `ingest --auto-rotate` (the `full` compose profile).
-Follow mode hydrates from the retained WAL only, without checkpoints.
+ingest process writes becomes active, so it pairs with a rotating
+`ingest --auto-rotate` (the `full` compose profile). An asset ages out ten
+minutes after its last record (book, trade, checkpoint, or ingest event); with
+checkpoints enabled a live market is refreshed every checkpoint interval, so
+only a market ingest has dropped ages out. An asset that comes back is
+re-seeded from the next tailed checkpoint rather than waiting for a venue
+snapshot. Follow mode hydrates from the retained WAL only, without checkpoints.
 
 The browser or client talks only to the API layer. It does not reconstruct the
 book from raw feed messages directly.
