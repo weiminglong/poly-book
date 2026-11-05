@@ -47,7 +47,7 @@ pb-book (L2Book)
 - `check_sequence` enforces monotonic sequence numbers and detects gaps.
 - `proptest` suites verify ordering, spread, snapshot idempotency, and crossed-book
   detection.
-- 69 tests covering empty book, single level, snapshot duplicates, delta sequences,
+- Tests cover the empty book, single level, snapshot duplicates, delta sequences,
   and proptest invariants.
 
 ## Benchmarks

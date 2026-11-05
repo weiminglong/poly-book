@@ -527,6 +527,13 @@ mod tests {
         assert!(book.best_ask().is_none());
         assert!(book.mid_price().is_none());
         assert!(book.spread().is_none());
+        assert!(book.weighted_mid_price().is_none());
+        assert_eq!(book.total_bid_size().raw(), 0);
+        assert_eq!(book.total_ask_size().raw(), 0);
+        assert_eq!((book.bid_depth(), book.ask_depth()), (0, 0));
+        assert!(book.top_bids(10).is_empty() && book.top_asks(10).is_empty());
+        assert!(book.check_integrity().is_ok());
+        assert_eq!(book.sequence.raw(), 0);
     }
 
     #[test]
@@ -608,52 +615,6 @@ mod tests {
     }
 
     // --- Empty book exhaustive tests ---
-
-    #[test]
-    fn empty_book_total_sizes_zero() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert_eq!(book.total_bid_size().raw(), 0);
-        assert_eq!(book.total_ask_size().raw(), 0);
-    }
-
-    #[test]
-    fn empty_book_weighted_mid_none() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert!(book.weighted_mid_price().is_none());
-    }
-
-    #[test]
-    fn empty_book_depths_zero() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert_eq!(book.bid_depth(), 0);
-        assert_eq!(book.ask_depth(), 0);
-    }
-
-    #[test]
-    fn empty_book_top_n_returns_empty() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert!(book.top_bids(10).is_empty());
-        assert!(book.top_asks(10).is_empty());
-    }
-
-    #[test]
-    fn empty_book_sorted_returns_empty() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert!(book.bids_sorted().is_empty());
-        assert!(book.asks_sorted().is_empty());
-    }
-
-    #[test]
-    fn empty_book_check_integrity_ok() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert!(book.check_integrity().is_ok());
-    }
-
-    #[test]
-    fn empty_book_default_sequence() {
-        let book = L2Book::new(AssetId::new("empty"));
-        assert_eq!(book.sequence.raw(), 0);
-    }
 
     // --- Single level tests ---
 
@@ -1192,44 +1153,6 @@ mod tests {
     }
 
     // --- BookError Display ---
-
-    #[test]
-    fn book_error_display_messages() {
-        let err = BookError::SequenceGap {
-            asset_id: "tok".to_string(),
-            expected: 5,
-            got: 10,
-            gap_size: 5,
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("tok"));
-        assert!(msg.contains("5"));
-        assert!(msg.contains("10"));
-
-        let err = BookError::CrossedBook {
-            asset_id: "tok".to_string(),
-            best_bid: "0.6000".to_string(),
-            best_ask: "0.4000".to_string(),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("crossed"));
-        assert!(msg.contains("0.6000"));
-
-        let err = BookError::InvalidPrice {
-            asset_id: "tok".to_string(),
-            price: "bad".to_string(),
-            side: "Bid".to_string(),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("invalid price"));
-
-        let err = BookError::UnknownSide {
-            asset_id: "tok".to_string(),
-            raw: "SELL".to_string(),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("unknown side"));
-    }
 
     // --- Clone ---
 

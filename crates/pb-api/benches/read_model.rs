@@ -41,7 +41,12 @@ fn bench_snapshot_read(c: &mut Criterion) {
 
         let (tx, rx) = mpsc::channel(2048);
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let handle = live.spawn_consumer(rx, shutdown.child_token());
+        let handle = live.spawn_consumer_with_broadcast(
+            rx,
+            pb_api::PerAssetBroadcast::new(),
+            20,
+            shutdown.child_token(),
+        );
 
         let mut seq = 0u64;
         for i in 0..50 {
@@ -107,14 +112,6 @@ fn bench_snapshot_read(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 black_box(live.active_assets(15).await);
-            });
-        });
-    });
-
-    c.bench_function("LiveReadModel::is_asset_active", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                black_box(live.is_asset_active(asset_id).await);
             });
         });
     });

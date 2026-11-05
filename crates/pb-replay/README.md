@@ -100,6 +100,6 @@ Also: `run_backfill` periodically fetches REST snapshots and writes them as
 
 ## Tests
 
-51 tests covering `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
+Tests cover `ReplayEngine` mock-based reconstruction, `hour_paths` generation,
 `ParquetReader` integration, end-to-end write-then-reconstruct round-trips, and
 backfill REST response parsing.

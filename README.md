@@ -37,7 +37,7 @@ Measured hot-path medians (Apple M3, full context and 49-benchmark table in
    CRC-over-length framing, torn-tail truncation on recovery, single-writer
    `flock` that doubles as failover, independent tailing consumers.
 3. **[TESTING.md](TESTING.md)** — the failure-mode → defense matrix: per-crate
-   unit and integration tests, 35 property suites, 5 fuzz targets, offline
+   unit and integration tests, property-test suites, 5 fuzz targets, offline
    alert-rule incident tests, and an honest list of what is not yet
    covered.
 4. **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — measured, machine-stamped

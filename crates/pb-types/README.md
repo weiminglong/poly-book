@@ -83,5 +83,5 @@ pb-types ◄── pb-feed    (wire deserialization)
   dataset/hour tree, while interrupted runs may temporarily keep the staged
   object active.
 - `proptest` suites verify fixed-point roundtrip, ordering, and serde consistency.
-- 173 tests covering boundary conditions, serde round-trips, proptest invariants,
+- Tests cover boundary conditions, exact decimal parsing, proptest invariants,
   and all persisted record types.

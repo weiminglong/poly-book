@@ -56,6 +56,14 @@ is practical to do so.
 
 ### Removed
 
+- About 1,500 lines of tests that only restated `#[derive]`s and `match` arms
+  (serde round-trips of derived impls, `Display` of enum names, `Default` is
+  zero, HTTP status code tables), along with the dead code some of them
+  existed for: the `status_to_static` label table, two unused metrics-server
+  entry points, a bench-only duplicate of the read-model consumer, the
+  never-constructed `CompletenessLevel::Sparse`, and two integrity-summary
+  fields that were always zero. Property tests, golden fixtures, and the
+  behavioral tests are untouched.
 - ClickHouse as a second storage backend and query engine: the sink, record
   writer, reader, DDL, `storage.clickhouse_*` and `api.historical_backend`
   config keys, the `--clickhouse` ingest flags, the `--source` replay flag,

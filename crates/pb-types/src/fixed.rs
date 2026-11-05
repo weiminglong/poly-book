@@ -377,25 +377,6 @@ mod tests {
     // --- FixedPrice boundary / arithmetic tests ---
 
     #[test]
-    fn fixed_price_zero_constant() {
-        assert_eq!(FixedPrice::ZERO.raw(), 0);
-        assert!(FixedPrice::ZERO.is_zero());
-        assert_eq!(FixedPrice::ZERO.as_f64(), 0.0);
-    }
-
-    #[test]
-    fn fixed_price_one_constant() {
-        assert_eq!(FixedPrice::ONE.raw(), 10_000);
-        assert!(!FixedPrice::ONE.is_zero());
-        assert!((FixedPrice::ONE.as_f64() - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn fixed_price_scale_constant() {
-        assert_eq!(FixedPrice::SCALE, 10_000);
-    }
-
-    #[test]
     fn fixed_price_new_at_exact_max() {
         let p = FixedPrice::new(10_000).unwrap();
         assert_eq!(p.raw(), 10_000);
@@ -439,22 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn fixed_price_display_zero() {
-        assert_eq!(format!("{}", FixedPrice::ZERO), "0.0000");
-    }
-
-    #[test]
-    fn fixed_price_display_one() {
-        assert_eq!(format!("{}", FixedPrice::ONE), "1.0000");
-    }
-
-    #[test]
-    fn fixed_price_display_small_fraction() {
-        let p = FixedPrice::new(1).unwrap(); // 0.0001
-        assert_eq!(format!("{p}"), "0.0001");
-    }
-
-    #[test]
     fn fixed_price_display_leading_zeros() {
         let p = FixedPrice::new(10).unwrap(); // 0.0010
         assert_eq!(format!("{p}"), "0.0010");
@@ -472,33 +437,6 @@ mod tests {
     #[test]
     fn fixed_price_try_from_out_of_range() {
         assert!(FixedPrice::try_from("2.0").is_err());
-    }
-
-    #[test]
-    fn fixed_price_serde_roundtrip_zero() {
-        let p = FixedPrice::ZERO;
-        let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, "\"0.0000\"");
-        let p2: FixedPrice = serde_json::from_str(&json).unwrap();
-        assert_eq!(p, p2);
-    }
-
-    #[test]
-    fn fixed_price_serde_roundtrip_one() {
-        let p = FixedPrice::ONE;
-        let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, "\"1.0000\"");
-        let p2: FixedPrice = serde_json::from_str(&json).unwrap();
-        assert_eq!(p, p2);
-    }
-
-    #[test]
-    fn fixed_price_serde_roundtrip_min_fraction() {
-        let p = FixedPrice::new(1).unwrap();
-        let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, "\"0.0001\"");
-        let p2: FixedPrice = serde_json::from_str(&json).unwrap();
-        assert_eq!(p, p2);
     }
 
     #[test]
@@ -524,40 +462,7 @@ mod tests {
         assert_eq!(mid, FixedPrice::new(5000).unwrap());
     }
 
-    #[test]
-    fn fixed_price_hash_equality() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(FixedPrice::new(5000).unwrap());
-        assert!(set.contains(&FixedPrice::new(5000).unwrap()));
-        assert!(!set.contains(&FixedPrice::new(5001).unwrap()));
-    }
-
-    #[test]
-    fn fixed_price_default_is_zero() {
-        assert_eq!(FixedPrice::default(), FixedPrice::ZERO);
-    }
-
-    #[test]
-    fn fixed_price_copy_semantics() {
-        let p = FixedPrice::new(5000).unwrap();
-        let p2 = p; // Copy
-        assert_eq!(p, p2); // original still usable
-    }
-
     // --- FixedSize boundary / arithmetic tests ---
-
-    #[test]
-    fn fixed_size_zero_constant() {
-        assert_eq!(FixedSize::ZERO.raw(), 0);
-        assert!(FixedSize::ZERO.is_zero());
-        assert_eq!(FixedSize::ZERO.as_f64(), 0.0);
-    }
-
-    #[test]
-    fn fixed_size_scale_constant() {
-        assert_eq!(FixedSize::SCALE, 1_000_000);
-    }
 
     #[test]
     fn fixed_size_new_at_u64_max() {
@@ -577,23 +482,6 @@ mod tests {
         // Smallest representable size: 0.000001 → raw 1
         let s = FixedSize::from_f64(0.000001).unwrap();
         assert_eq!(s.raw(), 1);
-    }
-
-    #[test]
-    fn fixed_size_display_zero() {
-        assert_eq!(format!("{}", FixedSize::ZERO), "0.000000");
-    }
-
-    #[test]
-    fn fixed_size_display_one() {
-        let s = FixedSize::new(1_000_000);
-        assert_eq!(format!("{s}"), "1.000000");
-    }
-
-    #[test]
-    fn fixed_size_display_smallest_fraction() {
-        let s = FixedSize::new(1);
-        assert_eq!(format!("{s}"), "0.000001");
     }
 
     #[test]
@@ -664,23 +552,6 @@ mod tests {
     }
 
     #[test]
-    fn fixed_size_serde_roundtrip_zero() {
-        let s = FixedSize::ZERO;
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, "\"0.000000\"");
-        let s2: FixedSize = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, s2);
-    }
-
-    #[test]
-    fn fixed_size_serde_roundtrip_large() {
-        let s = FixedSize::new(999_999_999_999);
-        let json = serde_json::to_string(&s).unwrap();
-        let s2: FixedSize = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, s2);
-    }
-
-    #[test]
     fn fixed_size_serde_deserialize_rejects_invalid() {
         let result: Result<FixedSize, _> = serde_json::from_str("\"abc\"");
         assert!(result.is_err());
@@ -699,20 +570,6 @@ mod tests {
         let big = FixedSize::new(u64::MAX);
         assert!(zero < small);
         assert!(small < big);
-    }
-
-    #[test]
-    fn fixed_size_default_is_zero() {
-        assert_eq!(FixedSize::default(), FixedSize::ZERO);
-    }
-
-    #[test]
-    fn fixed_size_hash_equality() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(FixedSize::new(42));
-        assert!(set.contains(&FixedSize::new(42)));
-        assert!(!set.contains(&FixedSize::new(43)));
     }
 }
 

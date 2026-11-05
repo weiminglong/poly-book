@@ -44,14 +44,14 @@ Test attributes (`#[test]` + `#[tokio::test]`) per crate at this revision:
 
 | Crate | Tests | Crate | Tests |
 |-------|------:|-------|------:|
-| pb-types | 161 | pb-replay | 51 |
-| pb-api | 73 | pb-store | 38 |
+| pb-types | 114 | pb-replay | 51 |
+| pb-api | 70 | pb-store | 38 |
 | pb-wal | 81 | pb-service | 19 |
-| pb-book | 74 | pb-metrics | 14 |
-| pb-bin | 58 | `tests/integration` | 14 |
+| pb-book | 66 | pb-metrics | 8 |
+| pb-bin | 50 | `tests/integration` | 14 |
 | pb-feed | 69 | | |
 
-Total: 652 test attributes. These counts include `#[ignore]`d tests: one in
+Total: 580 test attributes. These counts include `#[ignore]`d tests: one in
 pb-wal (a failover timing drill, run via `just failover-drill`) and one in the
 integration package (see below).
 

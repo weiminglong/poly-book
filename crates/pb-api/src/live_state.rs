@@ -699,44 +699,6 @@ impl LiveReadModel {
         }
     }
 
-    /// Spawn a forwarder task that reads records from `rx` and sends them
-    /// to the projector. Returns the forwarder's join handle.
-    pub fn spawn_consumer(
-        &self,
-        mut rx: mpsc::Receiver<PersistedRecord>,
-        token: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        let cmd_tx = self.cmd_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        // Drain records already buffered in the channel before
-                        // exiting, so a shutdown does not abandon in-flight feed
-                        // updates the producers had already sent (mirrors the storage-sink drain pattern). Bounded by the
-                        // current buffer — no new records arrive after cancellation.
-                        while let Ok(record) = rx.try_recv() {
-                            if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                    record = rx.recv() => {
-                        match record {
-                            Some(record) => {
-                                if cmd_tx.send(ProjectorCommand::Record(record)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     /// Spawn a forwarder task that reads records from `rx`, sends them to
     /// the projector (which handles broadcast internally), and returns the
     /// forwarder's join handle.
@@ -935,15 +897,6 @@ impl LiveReadModel {
                 }
             })
             .collect()
-    }
-
-    /// Check if an asset is active. Zero contention.
-    pub async fn is_asset_active(&self, asset_id: &str) -> bool {
-        let state = self.state_rx.borrow().clone();
-        state
-            .active_assets
-            .iter()
-            .any(|candidate| candidate == asset_id)
     }
 
     /// Read a book snapshot for a specific asset. Zero contention.
@@ -1350,8 +1303,15 @@ mod tests {
         // Rotate to only tok2
         model.set_active_assets(vec!["tok2".to_string()]).await;
 
-        assert!(!model.is_asset_active("tok1").await);
-        assert!(model.is_asset_active("tok2").await);
+        let status = model.feed_status_raw().await;
+        assert_eq!(
+            status
+                .active_assets
+                .iter()
+                .map(|a| a.asset_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tok2"]
+        );
     }
 
     #[tokio::test]

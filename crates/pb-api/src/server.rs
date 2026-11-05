@@ -1817,43 +1817,4 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-
-    // -----------------------------------------------------------------------
-    // ServiceError -> ApiError mapping
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn service_error_to_api_error_mapping() {
-        use crate::error::ApiError;
-
-        let nf: ApiError = pb_service::ServiceError::NotFound("x".into()).into();
-        assert!(matches!(nf, ApiError::NotFound(_)));
-
-        let ip: ApiError = pb_service::ServiceError::InvalidParams("x".into()).into();
-        assert!(matches!(ip, ApiError::BadRequest(_)));
-
-        let un: ApiError = pb_service::ServiceError::Unavailable("x".into()).into();
-        assert!(matches!(un, ApiError::ServiceUnavailable(_)));
-
-        let int: ApiError = pb_service::ServiceError::Internal("x".into()).into();
-        assert!(matches!(int, ApiError::Internal(_)));
-    }
-
-    #[test]
-    fn api_error_status_codes() {
-        use crate::error::ApiError;
-        use axum::response::IntoResponse;
-
-        let resp = ApiError::BadRequest("x".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        let resp = ApiError::NotFound("x".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        let resp = ApiError::ServiceUnavailable("x".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let resp = ApiError::Internal("x".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
 }

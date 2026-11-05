@@ -122,9 +122,7 @@ pub(crate) fn build_integrity_summary(
         start_us,
         end_us,
         book_event_count,
-        trade_event_count: 0,
         ingest_event_count,
-        checkpoint_count: 0,
         reconnect_count,
         gap_count,
         stale_snapshot_skip_count,
@@ -165,9 +163,7 @@ pub struct IntegritySummary {
     pub start_us: u64,
     pub end_us: u64,
     pub book_event_count: usize,
-    pub trade_event_count: usize,
     pub ingest_event_count: usize,
-    pub checkpoint_count: usize,
     pub reconnect_count: usize,
     pub gap_count: usize,
     pub stale_snapshot_skip_count: usize,
@@ -182,7 +178,6 @@ pub struct IntegritySummary {
 pub enum CompletenessLevel {
     Full,
     Partial,
-    Sparse,
     Empty,
 }
 
