@@ -43,10 +43,11 @@ The `codec` module adds a version byte prefix before bincode serialization:
 └──────────────┴───────────────────────┘
 ```
 
-Currently version 2 (`codec::CURRENT_VERSION`). Unknown versions produce a
-`WalError::Codec` error; version 1 (which predates the provenance ingest
-ordinal) is explicitly rejected with a drain-the-WAL hint, because positional
-bincode would silently misparse the changed field count.
+Currently version 3 (`codec::CURRENT_VERSION`): prices and sizes are raw
+scaled integers (v2 stored them as decimal strings; v1 predates the provenance
+ingest ordinal). Unknown versions produce a `WalError::Codec` error; v1 and v2
+are explicitly rejected with a drain-the-WAL hint, because positional bincode
+would silently misparse the changed layout.
 
 ## Data Flow
 

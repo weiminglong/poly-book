@@ -37,8 +37,8 @@ Measured hot-path medians (Apple M3, full context and 49-benchmark table in
    CRC-over-length framing, torn-tail truncation on recovery, single-writer
    `flock` that doubles as failover, independent tailing consumers.
 3. **[TESTING.md](TESTING.md)** — the failure-mode → defense matrix: per-crate
-   unit and integration tests, 35 property suites, 5 fuzz targets, miri,
-   offline alert-rule incident tests, and an honest list of what is not yet
+   unit and integration tests, 35 property suites, 5 fuzz targets, offline
+   alert-rule incident tests, and an honest list of what is not yet
    covered.
 4. **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — measured, machine-stamped
    numbers for every pipeline stage.
@@ -394,8 +394,8 @@ Near-term work that would make strong public contributions:
 
 This project is built AI-assisted under human design direction and review.
 Correctness does not rest on review alone: every change passes hard
-verification gates — the full test suite (fuzzing, property tests, miri,
-golden byte fixtures, offline alert-rule incident simulations; see
+verification gates — the full test suite (fuzzing, property tests, golden
+byte fixtures, offline alert-rule incident simulations; see
 [TESTING.md](TESTING.md)), adversarial review passes hunting for bugs rather
 than confirming intent, and live end-to-end verification against the real
 venue before merge. Design decisions and their rejected alternatives are

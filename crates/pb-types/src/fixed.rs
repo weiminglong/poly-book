@@ -54,37 +54,6 @@ fn parse_scaled_decimal(s: &str, decimals: u32) -> Option<u128> {
     int_val.checked_mul(scale)?.checked_add(frac_val)
 }
 
-/// Write `integer_part.fraction_part` into `buf` with exactly `decimals` fraction digits.
-/// Returns the number of bytes written. Avoids heap allocation entirely.
-fn write_fixed_decimal(buf: &mut [u8], integer: u64, fraction: u64, decimals: u32) -> usize {
-    let divisor = 10u64.pow(decimals);
-    debug_assert!(fraction < divisor);
-
-    // Write integer part
-    let mut pos = 0;
-    let mut int_str = itoa::Buffer::new();
-    let int_bytes = int_str.format(integer).as_bytes();
-    buf[pos..pos + int_bytes.len()].copy_from_slice(int_bytes);
-    pos += int_bytes.len();
-
-    // Decimal point
-    buf[pos] = b'.';
-    pos += 1;
-
-    // Write fraction with leading zeros
-    let mut frac_str = itoa::Buffer::new();
-    let frac_bytes = frac_str.format(fraction).as_bytes();
-    let leading_zeros = decimals as usize - frac_bytes.len();
-    for b in &mut buf[pos..pos + leading_zeros] {
-        *b = b'0';
-    }
-    pos += leading_zeros;
-    buf[pos..pos + frac_bytes.len()].copy_from_slice(frac_bytes);
-    pos += frac_bytes.len();
-
-    pos
-}
-
 /// Fixed-point price representation: value * 10,000.
 /// Polymarket prices are 0.00–1.00, so range is 0–10,000.
 /// 4 bytes, `Copy`, trivial `Ord`.
@@ -135,24 +104,12 @@ impl FixedPrice {
     pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
-
-    /// Write the decimal representation into `buf` without allocation.
-    /// Returns the number of bytes written. Buffer must be at least 16 bytes.
-    fn write_to_buf(self, buf: &mut [u8; 16]) -> usize {
-        let integer = (self.0 / PRICE_SCALE) as u64;
-        let fraction = (self.0 % PRICE_SCALE) as u64;
-        write_fixed_decimal(buf, integer, fraction, 4)
-    }
 }
 
 impl fmt::Display for FixedPrice {
+    /// Exactly four fraction digits, e.g. `0.5000`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buf = [0u8; 16];
-        let len = self.write_to_buf(&mut buf);
-        // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
-        #[allow(unsafe_code)]
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        f.write_str(s)
+        write!(f, "{}.{:04}", self.0 / PRICE_SCALE, self.0 % PRICE_SCALE)
     }
 }
 
@@ -172,20 +129,28 @@ impl TryFrom<&str> for FixedPrice {
     }
 }
 
+/// Human-readable formats (JSON) carry the exact decimal string, so API clients
+/// never see binary floating point. Binary formats (bincode in the WAL) carry
+/// the raw scaled integer: 4 bytes instead of a length-prefixed string, and no
+/// parse on the replay path.
 impl Serialize for FixedPrice {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut buf = [0u8; 16];
-        let len = self.write_to_buf(&mut buf);
-        // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
-        #[allow(unsafe_code)]
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        serializer.serialize_str(s)
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            serializer.serialize_u32(self.0)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for FixedPrice {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_str(FixedPriceVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(FixedPriceVisitor)
+        } else {
+            let raw = u32::deserialize(deserializer)?;
+            FixedPrice::new(raw).map_err(serde::de::Error::custom)
+        }
     }
 }
 
@@ -248,24 +213,12 @@ impl FixedSize {
     pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
-
-    /// Write the decimal representation into `buf` without allocation.
-    /// Returns the number of bytes written. Buffer must be at least 32 bytes.
-    fn write_to_buf(self, buf: &mut [u8; 32]) -> usize {
-        let integer = self.0 / SIZE_SCALE;
-        let fraction = self.0 % SIZE_SCALE;
-        write_fixed_decimal(buf, integer, fraction, 6)
-    }
 }
 
 impl fmt::Display for FixedSize {
+    /// Exactly six fraction digits, e.g. `10.500000`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buf = [0u8; 32];
-        let len = self.write_to_buf(&mut buf);
-        // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
-        #[allow(unsafe_code)]
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        f.write_str(s)
+        write!(f, "{}.{:06}", self.0 / SIZE_SCALE, self.0 % SIZE_SCALE)
     }
 }
 
@@ -284,20 +237,25 @@ impl TryFrom<&str> for FixedSize {
     }
 }
 
+/// See [`FixedPrice`]'s `Serialize` impl: decimal string for human-readable
+/// formats, raw `u64` for binary ones.
 impl Serialize for FixedSize {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut buf = [0u8; 32];
-        let len = self.write_to_buf(&mut buf);
-        // SAFETY: write_fixed_decimal only writes ASCII digits and '.'
-        #[allow(unsafe_code)]
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        serializer.serialize_str(s)
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            serializer.serialize_u64(self.0)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for FixedSize {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_str(FixedSizeVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(FixedSizeVisitor)
+        } else {
+            u64::deserialize(deserializer).map(FixedSize)
+        }
     }
 }
 
@@ -894,5 +852,21 @@ mod proptests {
             let p2 = FixedPrice::from_f64(f).unwrap();
             prop_assert_eq!(p1, p2);
         }
+    }
+
+    #[test]
+    fn binary_formats_carry_raw_integers_and_json_carries_decimals() {
+        let p = FixedPrice::new(5000).unwrap();
+        let s = FixedSize::new(10_500_000);
+        // bincode is not human-readable: 4 + 8 bytes, no strings.
+        let bin = bincode::serialize(&(p, s)).unwrap();
+        assert_eq!(bin.len(), 12);
+        let (p2, s2): (FixedPrice, FixedSize) = bincode::deserialize(&bin).unwrap();
+        assert_eq!((p, s), (p2, s2));
+        // An out-of-range raw price is rejected on the binary path too.
+        assert!(bincode::deserialize::<FixedPrice>(&10_001u32.to_le_bytes()).is_err());
+        // JSON keeps the exact decimal strings.
+        assert_eq!(serde_json::to_string(&p).unwrap(), "\"0.5000\"");
+        assert_eq!(serde_json::to_string(&s).unwrap(), "\"10.500000\"");
     }
 }

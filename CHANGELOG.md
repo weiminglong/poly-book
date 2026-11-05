@@ -24,6 +24,15 @@ is practical to do so.
 
 ### Changed
 
+- WAL codec v3: `FixedPrice` and `FixedSize` are stored as their raw scaled
+  integers (4 and 8 bytes) instead of length-prefixed decimal strings, which
+  shrinks a book delta frame by about a sixth and removes a decimal parse from
+  every replayed record. The serde impls now branch on
+  `is_human_readable()`, so JSON responses still carry exact decimal strings.
+  v2 frames are rejected with a drain-the-WAL hint like v1. The decimal
+  formatter is plain `write!` now, which removed the last four `unsafe` blocks
+  in the workspace; `unsafe_code = "forbid"` has no exceptions, and the miri
+  CI job that existed to check those blocks is gone.
 - `ingest` and `auto-ingest` are one command: `ingest --tokens A,B` or
   `ingest --auto-rotate`. The WAL drain loop and the five-minute rotation loop
   each existed twice (the second rotation copy, in `serve-api`, cancelled the

@@ -25,7 +25,7 @@ Optional tools:
 ## Test Matrix
 
 [TESTING.md](TESTING.md) maps each failure mode to the layer that catches it
-(unit/property tests, fuzzing, golden fixtures, Miri, monitoring rule tests)
+(unit/property tests, fuzzing, golden fixtures, monitoring rule tests)
 and lists what is deliberately not covered. For day-to-day work, use the
 smallest command that validates your change:
 

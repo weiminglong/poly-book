@@ -128,7 +128,6 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `docker-build` — builds the production image (release profile, bundled SPA)
 - `web` — `biome check` + `tsc -b` + `vitest run` + `vite build`
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
-- `miri` — undefined behavior checks on pb-types, pb-book
 
 Additional workflows: `fuzz.yml` (30s smoke runs of all five fuzz targets, nightly and on pushes to `main`), `supply-chain.yml` (cargo-deny: advisories, bans, licenses, sources; on PRs and weekly), `release.yml` (tags), `pages.yml` (hosted demo).
 

@@ -19,11 +19,11 @@ commands so they can be re-checked instead of trusted.
 | 2 | Order-book invariant violations (mis-sorted levels, wrong size accounting) | 17 proptest properties on `L2Book` | `fuzz_book_delta` (arbitrary snapshots + deltas, ordering asserted after every step), 74 unit tests in pb-book | yes (`test`, `fuzz`) |
 | 3 | Malformed venue input crashing ingest | `fuzz_ws_deser` (arbitrary bytes into the wire parser: must error, never panic) | 69 unit tests in pb-feed (dispatcher normalization, reconnect paths) | yes (`fuzz`, `test`) |
 | 4 | WAL corruption on disk (bit flips, torn writes, zero-filled tails) | `fuzz_wal_corruption` (write, corrupt bytes, assert reader never panics and returns only CRC-valid records) | pb-wal unit tests for truncated-tail recovery, CRC/length corruption, prune safety (81 test attributes) + 2 proptest properties | yes (`fuzz`, `test`) |
-| 5 | Silent WAL byte-format drift between builds | Golden-bytes fixture `golden_codec_book_v2_bytes_are_stable` (pb-wal): any codec change that alters encoded bytes fails the build | `fuzz_codec_decode` (arbitrary bytes into `codec::decode`: error, never panic); version byte rejected on mismatch | yes (`test`, `fuzz`) |
+| 5 | Silent WAL byte-format drift between builds | Golden-bytes fixture `golden_codec_book_v3_bytes_are_stable` (pb-wal): any codec change that alters encoded bytes fails the build | `fuzz_codec_decode` (arbitrary bytes into `codec::decode`: error, never panic); version byte rejected on mismatch | yes (`test`, `fuzz`) |
 | 6 | Non-deterministic replay (same events, different book) | Determinism fixture `tests/integration/book_determinism.rs` (3 tests) | Golden replay regression `golden_replay_produces_expected_book` (pb-replay), 51 pb-replay test attributes | yes (`test`) |
 | 7 | Parquet written locally or to S3 reading back differently | Parquet round-trip integration tests (`tests/integration/parquet_roundtrip.rs`); S3/MinIO write + production-reader round-trip (`s3_minio_roundtrip.rs`) | Manifest-switch and partial-hour refusal tests for `reconcile`; `pb_schema_version` rejection on mismatch | yes (`test`; `integration-docker` runs the `#[ignore]`d S3 case) |
 | 8 | Crash/restart data loss across the ingest/serve boundary | 2 checkpoint + WAL hydration integration tests (`checkpoint_wal_hydration.rs`) | pb-wal reopen-recovery and position-file tests; standby-writer flock takeover test | yes (`test`) |
-| 9 | Undefined behavior / memory unsafety | Miri on pb-types and pb-book unit tests | Workspace is overwhelmingly safe Rust; `clippy -D warnings` | yes (`miri`) |
+| 9 | Undefined behavior / memory unsafety | `unsafe_code = "forbid"` on every crate (compile-time) | `clippy -D warnings` | yes (`clippy`) |
 | 10 | Latency-harness rot and perf regressions | `cargo check --all-targets` compiles all 8 Criterion benchmarks every CI run | Statistical regression gating against a committed baseline — local only (shared runners are too noisy) | compile: yes (`check`); gating: **no** |
 | 11 | Alert rules that no longer fire, or page the wrong channel | `promtool test rules`: 11 simulated-incident scenarios with fire/no-fire assertions against the 15 rules in `monitoring/alerts.yml` | `promtool check rules` | yes (`monitoring`) |
 | 12 | Vulnerable dependencies, license violations | `cargo-deny` (advisories/bans/licenses/sources) on every push/PR and weekly | — | yes (`supply-chain.yml`) |
@@ -99,8 +99,8 @@ cargo +nightly fuzz run fuzz_codec_decode    # WAL codec decode of arbitrary byt
 Two frozen fixtures turn accidental format drift into a test failure, so a
 version bump is always a deliberate act:
 
-- `golden_codec_book_v2_bytes_are_stable` (`crates/pb-wal/src/codec.rs`) pins
-  the exact encoded bytes of a WAL frame at codec version 2
+- `golden_codec_book_v3_bytes_are_stable` (`crates/pb-wal/src/codec.rs`) pins
+  the exact encoded bytes of a WAL frame at codec version 3
   (`pb_wal::codec::CURRENT_VERSION`).
 - `golden_replay_produces_expected_book` (`crates/pb-replay/src/tests.rs`) pins
   the reconstructed book for a fixed record set.
@@ -110,17 +110,6 @@ unknown version bytes, and the Parquet reader rejects files whose
 `pb_schema_version` metadata differs from `pb_store::schema::PB_SCHEMA_VERSION`
 (currently `"2"`). The migration procedure is in
 [docs/operations.md](docs/operations.md).
-
-### Miri
-
-```bash
-cargo +nightly miri test -p pb-types -- --test-threads=1 --skip proptests
-cargo +nightly miri test -p pb-book  -- --test-threads=1 --skip proptests
-```
-
-CI runs the unit tests of the two foundation crates under Miri to catch
-undefined behavior. Proptest suites are skipped under Miri (interpreter
-overhead), and Miri does not cover the tokio-heavy crates.
 
 ### Monitoring rule tests
 
@@ -200,7 +189,6 @@ Being explicit about what is *not* covered:
   those faults into a running topology.
 - **Performance regressions are not gated in CI** — the harness is
   compile-checked only; measurement is a local, manual step.
-- **Miri covers only pb-types and pb-book**, and skips their proptest suites.
 
 ## Verifying the numbers
 

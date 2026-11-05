@@ -148,10 +148,10 @@ unrecognized version rather than silently misreading bytes:
 
 | Format | Version constant | Reader gate |
 |---|---|---|
-| WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `2`) | `decode` rejects any other version byte; pre-v2 frames return an error with a "drain and re-create the WAL" hint |
+| WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `3`) | `decode` rejects any other version byte; v1/v2 frames return an error with a "drain and re-create the WAL" hint |
 | Parquet columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
 
-Frozen golden fixtures (`golden_codec_book_v2_bytes_are_stable` in `pb-wal`, and
+Frozen golden fixtures (`golden_codec_book_v3_bytes_are_stable` in `pb-wal`, and
 the determinism fixture in `tests/integration/book_determinism.rs`) make any
 accidental byte-format change a test failure, so a version bump is always a
 deliberate act.
@@ -195,7 +195,6 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `docker build` of the production image (`docker-build` job)
 - Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`, then
   Playwright end-to-end tests against the built bundle
-- `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
 
 Outside the per-PR gate: fuzz smoke tests (all five targets at 30s each on
 nightly Rust) run nightly and on pushes to `main` (`fuzz.yml`), and

@@ -2399,8 +2399,8 @@ dependencies = [
 name = "pb-types"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "criterion",
- "itoa",
  "proptest",
  "serde",
  "serde_json",

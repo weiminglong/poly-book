@@ -48,9 +48,10 @@ pb-types ◄── pb-feed    (wire deserialization)
 
 ## Design Notes
 
-- **Zero-alloc serde**: `FixedPrice` and `FixedSize` serialize via `itoa` +
-  stack buffers and deserialize via a custom `Visitor`, avoiding heap allocation
-  on the hot path. Dependency: `itoa = "1"`.
+- **Format-aware serde**: `FixedPrice` and `FixedSize` serialize as exact
+  decimal strings in human-readable formats (JSON API responses) and as their
+  raw scaled integers in binary formats (the bincode WAL codec), so the WAL
+  stores 4 and 8 bytes per value and replay never re-parses a string.
 - **Exact decimal parsing**: `TryFrom<&str>` (used by serde and the WAL codec)
   parses with integer arithmetic, not `f64`, so it is exact across the full
   `u64` size range — no precision loss above 2^53 and no silent saturation.
