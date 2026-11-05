@@ -57,8 +57,12 @@ jobs:
             --publish 9100:9090 \
             --env initialBuckets=poly-book-test \
             adobe/s3mock:5.2.3
+          # Ready once the server answers at all; the test itself reports any
+          # real S3 error with context, so do not pre-judge the status code.
           for attempt in $(seq 1 60); do
-            if curl --fail --silent --output /dev/null http://127.0.0.1:9100/poly-book-test; then
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:9100/poly-book-test || true)
+            if [ "$code" != "000" ]; then
+              echo "s3mock answered /poly-book-test with HTTP $code"
               break
             fi
             if [ "$attempt" -eq 60 ]; then
