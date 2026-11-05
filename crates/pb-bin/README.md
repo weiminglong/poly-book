@@ -23,6 +23,12 @@ config/default.toml  →  env vars (PB__ prefix)  →  CLI flags
 ```
 
 Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`.
+The layered sources are deserialized once into `settings::Settings`, a typed
+struct whose field defaults match `config/default.toml` (a test asserts this).
+An unknown or misspelled key fails startup with the field name; negative
+numbers are rejected by the unsigned field types; zero intervals and sizes
+are clamped to their minimum with a warning. Commands read typed fields, never
+string keys.
 
 Example: `PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data`
 

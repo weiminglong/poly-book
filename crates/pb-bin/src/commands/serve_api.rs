@@ -1,16 +1,16 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use config::Config;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::feed::{run_feed, FeedPlan};
 use super::market_discovery::now_us;
 use super::pipeline;
+use crate::settings::Settings;
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     plan: FeedPlan,
     enable_metrics: bool,
     shutdown: CancellationToken,
@@ -20,22 +20,9 @@ pub async fn run(
         pipeline::start_metrics_server(&settings).await?;
     }
 
-    let api_listen_addr: SocketAddr = settings
-        .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
-        .parse()?;
-    let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
-    // Clamp default_depth to max_depth: a default above the max would request more
-    // levels than any query is allowed to return (a config invariant).
-    let default_depth =
-        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
-    let stale_after_secs = settings
-        .get_int("api.stale_after_secs")
-        .unwrap_or(15)
-        .max(1) as u64;
-    let parquet_base_path = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
+    let api_listen_addr: SocketAddr = settings.api.listen_addr;
+    let default_depth = settings.api.default_depth;
+    let parquet_base_path = settings.storage.parquet_base_path.clone();
 
     let feed_mode = match plan {
         FeedPlan::Fixed(_) => pb_api::FeedMode::FixedTokens,
@@ -90,29 +77,12 @@ pub async fn run(
     };
 
     let historical = pipeline::build_historical_service(&settings).await?;
-    let auth_token = pipeline::api_auth_token_from_settings(&settings);
+    let auth_token = settings.api_auth_token();
     pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
     let state = pb_api::AppState {
         live,
-        config: pb_api::ApiConfig {
-            parquet_base_path,
-            default_depth,
-            max_depth,
-            stale_after_secs,
-            http_request_timeout_secs: pipeline::cfg_int_min(
-                &settings,
-                "api.http_request_timeout_secs",
-                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
-                1,
-            ) as u64,
-            auth_token,
-            // Optional bundled-SPA hosting (empty/unset = API only).
-            static_assets_dir: settings
-                .get_string("api.static_assets_dir")
-                .ok()
-                .filter(|d| !d.is_empty()),
-        },
+        config: settings.api_config(parquet_base_path),
         broadcast: Some(broadcast.clone()),
         slug_registry,
         historical,

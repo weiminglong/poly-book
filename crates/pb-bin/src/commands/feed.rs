@@ -9,7 +9,6 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use config::Config;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -17,6 +16,7 @@ use super::market_discovery::{
     current_unix_secs, discover_with_retry, populate_registry, DiscoverOutcome,
 };
 use super::pipeline;
+use crate::settings::Settings;
 
 /// Which markets a live process subscribes to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl Generation {
     /// Spawn the WebSocket client, dispatcher, and resnapshot worker for one
     /// set of tokens. Records flow into `event_tx`.
     fn spawn(
-        settings: &Config,
+        settings: &Settings,
         token_ids: Vec<String>,
         event_tx: mpsc::Sender<pb_types::PersistedRecord>,
         parent: &CancellationToken,
@@ -84,8 +84,8 @@ impl Generation {
         // dropped requests are harmless.
         let (resnapshot_tx, resnapshot_rx) = mpsc::channel::<std::sync::Arc<str>>(64);
 
-        let ws_client = pb_feed::WsClient::new(token_ids, raw_tx.clone())?
-            .with_config(pipeline::ws_config_from_settings(settings));
+        let ws_client =
+            pb_feed::WsClient::new(token_ids, raw_tx.clone())?.with_config(settings.ws_config());
         let ws_token = token.child_token();
         let ws_handle = tokio::spawn(async move {
             if let Err(e) = ws_client.run_with_token(ws_token).await {
@@ -104,8 +104,7 @@ impl Generation {
 
         // Self-healing: on a detected book divergence, fetch a fresh REST
         // snapshot and re-inject it through the dispatcher's normal snapshot path.
-        let rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(settings))?
-            .with_config(pipeline::rest_config_from_settings(settings));
+        let rest = settings.rest_client()?;
         let resnapshot_token = token.child_token();
         let resnapshot_handle = tokio::spawn(async move {
             pb_feed::run_resnapshot_worker(rest, raw_tx, resnapshot_rx, resnapshot_token).await;
@@ -131,7 +130,7 @@ impl Generation {
 /// bucket starts and keeps the outgoing market alive until its bucket boundary,
 /// so neither the first nor the last seconds of a market are dropped.
 pub async fn run_feed(
-    settings: &Config,
+    settings: &Settings,
     plan: FeedPlan,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     shutdown: CancellationToken,
@@ -156,14 +155,13 @@ pub async fn run_feed(
 }
 
 async fn run_rotation(
-    settings: &Config,
+    settings: &Settings,
     event_tx: mpsc::Sender<pb_types::PersistedRecord>,
     shutdown: &CancellationToken,
     slug_registry: pb_types::SlugRegistry,
     on_active: &mut OnActive,
 ) -> Result<()> {
-    let rest = pb_feed::RestClient::new(pipeline::rest_rate_limiter(settings))?
-        .with_config(pipeline::rest_config_from_settings(settings));
+    let rest = settings.rest_client()?;
 
     let mut front: Option<Generation> = None;
     let mut active_bucket: Option<u64> = None;

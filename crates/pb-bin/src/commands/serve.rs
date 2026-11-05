@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use config::Config;
 use pb_types::PersistedRecord;
 use tokio_util::sync::CancellationToken;
 
 use super::pipeline;
+use crate::settings::Settings;
 
 /// In follow mode an asset stays active for this long after its last record.
 /// A BTC 5-minute market stops producing records once it resolves, so a window
@@ -25,7 +25,7 @@ const FOLLOW_IDLE_US: u64 = 10 * 60 * 1_000_000;
 /// active and ages out `FOLLOW_IDLE_US` after its last record, so `serve` can
 /// pair with a rotating `auto-ingest`.
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     tokens: Option<String>,
     enable_metrics: bool,
     shutdown: CancellationToken,
@@ -49,23 +49,10 @@ pub async fn run(
         pipeline::start_metrics_server(&settings).await?;
     }
 
-    let api_listen_addr: SocketAddr = settings
-        .get_string("api.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
-        .parse()?;
-    let max_depth = settings.get_int("api.max_depth").unwrap_or(200).max(1) as usize;
-    // Clamp default_depth to max_depth: a default above the max would request more
-    // levels than any query is allowed to return (a config invariant).
-    let default_depth =
-        (settings.get_int("api.default_depth").unwrap_or(20).max(1) as usize).min(max_depth);
-    let stale_after_secs = settings
-        .get_int("api.stale_after_secs")
-        .unwrap_or(15)
-        .max(1) as u64;
-    let parquet_base_path = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let wal_config = pipeline::wal_config_from_settings(&settings);
+    let api_listen_addr: SocketAddr = settings.api.listen_addr;
+    let default_depth = settings.api.default_depth;
+    let parquet_base_path = settings.storage.parquet_base_path.clone();
+    let wal_config = settings.wal_config();
 
     // Build live read model.
     let mode = if follow {
@@ -125,29 +112,12 @@ pub async fn run(
 
     // Build and start HTTP/WS server.
     let historical = pipeline::build_historical_service(&settings).await?;
-    let auth_token = pipeline::api_auth_token_from_settings(&settings);
+    let auth_token = settings.api_auth_token();
     pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
     let state = pb_api::AppState {
         live,
-        config: pb_api::ApiConfig {
-            parquet_base_path,
-            default_depth,
-            max_depth,
-            stale_after_secs,
-            http_request_timeout_secs: pipeline::cfg_int_min(
-                &settings,
-                "api.http_request_timeout_secs",
-                pb_api::DEFAULT_HTTP_REQUEST_TIMEOUT_SECS as i64,
-                1,
-            ) as u64,
-            auth_token,
-            // Optional bundled-SPA hosting (empty/unset = API only).
-            static_assets_dir: settings
-                .get_string("api.static_assets_dir")
-                .ok()
-                .filter(|d| !d.is_empty()),
-        },
+        config: settings.api_config(parquet_base_path),
         broadcast: Some(broadcast),
         slug_registry,
         historical,

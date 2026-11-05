@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::settings::Settings;
 use anyhow::Result;
-use config::Config;
 use pb_types::SlugRegistry;
 
 use super::market_discovery::{extract_discovery, populate_registry};
@@ -49,29 +49,14 @@ fn print_events(events: &[pb_types::wire::GammaEvent], registry: &SlugRegistry) 
 }
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     filter: Option<String>,
     limit: u64,
     slug_registry: SlugRegistry,
 ) -> Result<()> {
     tracing::info!(limit, "Discovering active BTC 5-minute markets...");
 
-    let rate_requests = settings.get_int("feed.rate_limit_requests").unwrap_or(1500) as u32;
-    let rate_window = settings
-        .get_int("feed.rate_limit_window_secs")
-        .unwrap_or(10) as u32;
-    let rate_limiter = pb_feed::RateLimiter::with_window(rate_requests, rate_window);
-
-    let rest_config = pb_feed::RestConfig {
-        clob_base_url: settings
-            .get_string("feed.rest_url")
-            .unwrap_or_else(|_| pb_feed::RestConfig::default().clob_base_url),
-        gamma_base_url: settings
-            .get_string("feed.gamma_url")
-            .unwrap_or_else(|_| pb_feed::RestConfig::default().gamma_base_url),
-    };
-
-    let rest = pb_feed::RestClient::new(rate_limiter)?.with_config(rest_config);
+    let rest = settings.rest_client()?;
     let keyword = filter.as_deref().unwrap_or("btc").to_lowercase();
 
     // For BTC queries, first try to find the live 5-minute market by slug

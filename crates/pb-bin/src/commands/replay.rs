@@ -1,10 +1,10 @@
+use crate::settings::Settings;
 use anyhow::{bail, Result};
-use config::Config;
 use pb_store::ParquetRecordWriter;
 use pb_types::{AssetId, PersistedRecord, ReplayMode};
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     token: String,
     at_us: u64,
     mode: String,
@@ -21,10 +21,8 @@ pub async fn run(
 
     let asset_id = AssetId::new(token);
 
-    let base_path = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let (store, base_path) = super::pipeline::build_object_store(&base_path)?;
+    let (store, base_path) =
+        super::pipeline::build_object_store(&settings.storage.parquet_base_path)?;
     let reader = pb_replay::ParquetReader::from_store(store, base_path);
     let engine = pb_replay::ReplayEngine::new(reader);
     let replay = engine.reconstruct_at(&asset_id, at_us, replay_mode).await?;
@@ -52,13 +50,11 @@ fn parse_mode(mode: &str) -> Result<ReplayMode> {
 }
 
 async fn persist_validation_parquet(
-    settings: &Config,
+    settings: &Settings,
     validation: pb_types::ReplayValidation,
 ) -> Result<()> {
-    let configured = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let (store, base_path) = super::pipeline::build_object_store(&configured)?;
+    let (store, base_path) =
+        super::pipeline::build_object_store(&settings.storage.parquet_base_path)?;
     let writer = ParquetRecordWriter::new(store, base_path);
     writer
         .write_record(PersistedRecord::Validation(validation))

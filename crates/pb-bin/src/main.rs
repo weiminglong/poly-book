@@ -9,7 +9,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
-mod config_validation;
+mod settings;
 
 #[derive(Parser)]
 #[command(
@@ -22,9 +22,9 @@ struct Cli {
     #[arg(long, default_value = "config/default.toml")]
     config: String,
 
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(long, default_value = "info")]
-    log_level: String,
+    /// Log level (trace, debug, info, warn, error); overrides logging.level
+    #[arg(long)]
+    log_level: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -158,44 +158,20 @@ async fn main() -> Result<()> {
     if !config_is_default && !std::path::Path::new(&cli.config).exists() {
         anyhow::bail!("config file not found: {}", cli.config);
     }
-    let settings = config::Config::builder()
-        .add_source(config::File::with_name(&cli.config).required(!config_is_default))
-        .add_source(config::Environment::with_prefix("PB").separator("__"))
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to load config from {}: {e}", cli.config))?;
+    let settings = settings::Settings::load(&cli.config, !config_is_default)?;
 
-    // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level > "info"
-    let log_level = if std::env::var("RUST_LOG").is_ok() {
-        // EnvFilter will read RUST_LOG directly
-        None
-    } else if cli.log_level != "info" {
-        // Explicit CLI override
-        Some(cli.log_level.clone())
+    // Initialize tracing: RUST_LOG env > --log-level CLI > config logging.level
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     } else {
-        // Fall back to config file
-        settings.get_string("logging.level").ok()
+        EnvFilter::new(cli.log_level.as_deref().unwrap_or(&settings.logging.level))
     };
-
-    let filter = match log_level {
-        None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        Some(level) => EnvFilter::new(&level),
-    };
-    // Honor `logging.format = "json"` so structured logging is actually possible
-    // (previously the key was dead config).
-    let log_format = settings
-        .get_string("logging.format")
-        .unwrap_or_else(|_| "text".to_string());
     let builder = fmt().with_env_filter(filter);
-    if log_format.eq_ignore_ascii_case("json") {
+    if settings.logging.format.eq_ignore_ascii_case("json") {
         builder.json().init();
     } else {
         builder.init();
     }
-
-    // Surface typo'd / removed config keys now that tracing is up, so a silently
-    // ignored setting is visible instead of leaving the operator's intent lost
-    //.
-    config_validation::warn_unknown_config_keys(&settings);
 
     // Create shared slug registry
     let slug_registry = pb_types::SlugRegistry::new();
@@ -643,13 +619,13 @@ mod tests {
     #[test]
     fn parse_global_log_level_flag() {
         let cli = Cli::try_parse_from(["poly-book", "--log-level", "debug", "discover"]).unwrap();
-        assert_eq!(cli.log_level, "debug");
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
     }
 
     #[test]
     fn parse_global_defaults() {
         let cli = Cli::try_parse_from(["poly-book", "discover"]).unwrap();
         assert_eq!(cli.config, "config/default.toml");
-        assert_eq!(cli.log_level, "info");
+        assert!(cli.log_level.is_none());
     }
 }

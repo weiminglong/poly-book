@@ -11,10 +11,10 @@ Runtime config is layered in this order:
 2. Environment variables with the `PB__` prefix
 3. CLI flags
 
-At startup the process validates the loaded config against the set of recognized
-keys and logs a `WARN` for any unknown `section.key` (a typo or a removed/renamed
-setting), so a misspelled key — which is otherwise silently ignored and falls
-back to the default — is visible in the logs rather than silently dropped.
+The layered sources are deserialized once into a typed settings struct, so an
+unknown or misspelled key (a typo, or a removed/renamed setting) is a startup
+error that names the field, a negative number is rejected, and a zero interval
+or size is clamped to its minimum with a warning.
 
 ### Preflight (`doctor`)
 
@@ -24,8 +24,7 @@ poly-book doctor --skip-network  # offline/CI variant
 ```
 
 Prints a pass/warn/fail table and exits non-zero on failure, so it can gate a
-deploy (`poly-book doctor && poly-book ingest`). Checks: unknown config keys
-(a hard failure here, unlike the warn-only startup path), Parquet path
+deploy (`poly-book doctor && poly-book ingest`). Checks: Parquet path
 writability, WAL directory state (segments, consumer positions, last-write
 age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
 through the same connector the feed uses, and API/metrics port availability.

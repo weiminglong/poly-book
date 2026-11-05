@@ -188,7 +188,11 @@ impl Settings {
                 *value = min;
             }
         }
-        floor("feed.ping_interval_secs", &mut self.feed.ping_interval_secs, 1);
+        floor(
+            "feed.ping_interval_secs",
+            &mut self.feed.ping_interval_secs,
+            1,
+        );
         floor(
             "feed.reconnect_base_delay_ms",
             &mut self.feed.reconnect_base_delay_ms,
@@ -199,7 +203,11 @@ impl Settings {
             &mut self.feed.reconnect_max_delay_ms,
             1,
         );
-        floor("feed.rate_limit_requests", &mut self.feed.rate_limit_requests, 1);
+        floor(
+            "feed.rate_limit_requests",
+            &mut self.feed.rate_limit_requests,
+            1,
+        );
         floor(
             "feed.rate_limit_window_secs",
             &mut self.feed.rate_limit_window_secs,
@@ -284,7 +292,9 @@ impl Settings {
         Ok(pb_feed::RestClient::new(self.rate_limiter())?.with_config(self.rest_config()))
     }
 
-    pub fn checkpoint_config(&self) -> crate::commands::checkpoint_producer::CheckpointProducerConfig {
+    pub fn checkpoint_config(
+        &self,
+    ) -> crate::commands::checkpoint_producer::CheckpointProducerConfig {
         crate::commands::checkpoint_producer::CheckpointProducerConfig {
             rest_url: self.feed.rest_url.clone(),
             interval: Duration::from_secs(self.storage.checkpoint_interval_secs),

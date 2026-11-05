@@ -1,22 +1,19 @@
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use config::Config;
 use object_store::ObjectStoreExt;
 
-use crate::config_validation;
+use crate::settings::Settings;
 
 /// Preflight checklist: validate the effective configuration and probe every
 /// external dependency a poly-book process needs, printing a pass/warn/fail
 /// table and exiting non-zero on failure. Doubles as a deploy gate
 /// (`poly-book doctor && poly-book ingest`).
-pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
+pub async fn run(settings: Settings, skip_network: bool) -> Result<()> {
     let mut checks: Vec<Check> = Vec::new();
 
-    checks.push(check_config_keys(&settings));
     checks.push(check_parquet_path(&settings).await);
     checks.push(check_wal_dir(&settings));
 
@@ -26,27 +23,13 @@ pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
             "skipped (--skip-network); feed reachability not verified",
         ));
     } else {
-        let rest_url = settings
-            .get_string("feed.rest_url")
-            .unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
-        let gamma_url = settings
-            .get_string("feed.gamma_url")
-            .unwrap_or_else(|_| "https://gamma-api.polymarket.com".to_string());
-        checks.push(check_http("rest", &rest_url).await);
-        checks.push(check_http("gamma", &gamma_url).await);
-        checks.push(check_websocket(&settings).await);
+        checks.push(check_http("rest", &settings.feed.rest_url).await);
+        checks.push(check_http("gamma", &settings.feed.gamma_url).await);
+        checks.push(check_websocket(&settings.feed.ws_url).await);
     }
 
-    checks.push(check_port("api port", &settings, "api.listen_addr", "127.0.0.1:3000").await);
-    checks.push(
-        check_port(
-            "metrics port",
-            &settings,
-            "metrics.listen_addr",
-            "127.0.0.1:9090",
-        )
-        .await,
-    );
+    checks.push(check_port("api port", settings.api.listen_addr).await);
+    checks.push(check_port("metrics port", settings.metrics.listen_addr).await);
 
     let mut warns = 0usize;
     let mut fails = 0usize;
@@ -115,27 +98,8 @@ impl Check {
     }
 }
 
-/// Unknown keys are a hard failure here (unlike the warn-only startup path):
-/// doctor is exactly the moment an operator wants a typo surfaced loudly.
-fn check_config_keys(settings: &Config) -> Check {
-    let unknown = config_validation::unknown_keys_in(settings);
-    if unknown.is_empty() {
-        Check::pass("config", "no unknown keys")
-    } else {
-        Check::fail(
-            "config",
-            format!(
-                "unknown key(s): {} — typo or removed setting?",
-                unknown.join(", ")
-            ),
-        )
-    }
-}
-
-async fn check_parquet_path(settings: &Config) -> Check {
-    let base = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
+async fn check_parquet_path(settings: &Settings) -> Check {
+    let base = settings.storage.parquet_base_path.clone();
     let (store, prefix) = match super::pipeline::build_object_store(&base) {
         Ok(result) => result,
         Err(error) => {
@@ -199,11 +163,9 @@ async fn check_parquet_path(settings: &Config) -> Check {
     }
 }
 
-fn check_wal_dir(settings: &Config) -> Check {
-    let base = settings
-        .get_string("wal.base_path")
-        .unwrap_or_else(|_| "./data/wal".to_string());
-    let path = Path::new(&base);
+fn check_wal_dir(settings: &Settings) -> Check {
+    let path = settings.wal.base_path.as_path();
+    let base = path.display();
     if !path.is_dir() {
         return Check::warn(
             "wal",
@@ -266,11 +228,8 @@ async fn check_http(name: &'static str, url: &str) -> Check {
     }
 }
 
-async fn check_websocket(settings: &Config) -> Check {
-    let ws_url = settings
-        .get_string("feed.ws_url")
-        .unwrap_or_else(|_| pb_feed::WsConfig::default().ws_url);
-    match tokio::time::timeout(Duration::from_secs(10), pb_feed::probe_ws(&ws_url)).await {
+async fn check_websocket(ws_url: &str) -> Check {
+    match tokio::time::timeout(Duration::from_secs(10), pb_feed::probe_ws(ws_url)).await {
         Ok(Ok(latency)) => Check::pass(
             "websocket",
             format!("{ws_url} handshake ok ({} ms)", latency.as_millis()),
@@ -282,19 +241,9 @@ async fn check_websocket(settings: &Config) -> Check {
 
 /// A bindable port is available; a bound one usually means another poly-book
 /// instance is already running — worth knowing, not necessarily wrong.
-async fn check_port(name: &'static str, settings: &Config, key: &str, default: &str) -> Check {
-    let addr_str = settings
-        .get_string(key)
-        .unwrap_or_else(|_| default.to_string());
-    let addr: SocketAddr = match addr_str.parse() {
-        Ok(a) => a,
-        Err(e) => return Check::fail(name, format!("{key}={addr_str} does not parse: {e}")),
-    };
+async fn check_port(name: &'static str, addr: SocketAddr) -> Check {
     match tokio::net::TcpListener::bind(addr).await {
-        Ok(_) => Check::pass(name, format!("{addr_str} available")),
-        Err(_) => Check::warn(
-            name,
-            format!("{addr_str} in use (another instance running?)"),
-        ),
+        Ok(_) => Check::pass(name, format!("{addr} available")),
+        Err(_) => Check::warn(name, format!("{addr} in use (another instance running?)")),
     }
 }

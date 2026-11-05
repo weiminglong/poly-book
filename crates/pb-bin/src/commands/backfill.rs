@@ -1,10 +1,10 @@
+use crate::settings::Settings;
 use anyhow::Result;
-use config::Config;
 use pb_types::SlugRegistry;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     tokens: String,
     interval_secs: u64,
     duration_mins: u64,
@@ -28,9 +28,7 @@ pub async fn run(
         "starting backfill"
     );
 
-    let rest_url = settings
-        .get_string("feed.rest_url")
-        .unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
+    let rest_url = settings.feed.rest_url.clone();
 
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(10_000);
 
@@ -38,13 +36,9 @@ pub async fn run(
     // local base path (fixing a relative-path bug where the raw "./data"
     // was percent-encoded by object_store and every flush failed) and wires an
     // s3:// path to a real S3 store.
-    let configured = settings
-        .get_string("storage.parquet_base_path")
-        .unwrap_or_else(|_| "./data".to_string());
-    let (store, base_path) = super::pipeline::build_object_store(&configured)?;
-    let flush_secs = settings
-        .get_int("storage.parquet_flush_interval_secs")
-        .unwrap_or(300) as u64;
+    let (store, base_path) =
+        super::pipeline::build_object_store(&settings.storage.parquet_base_path)?;
+    let flush_secs = settings.storage.parquet_flush_interval_secs;
 
     let sink = pb_store::ParquetSink::new(event_rx, store, base_path)
         .with_flush_interval(std::time::Duration::from_secs(flush_secs));

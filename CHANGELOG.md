@@ -24,6 +24,20 @@ is practical to do so.
 
 ### Changed
 
+- `ingest` and `auto-ingest` are one command: `ingest --tokens A,B` or
+  `ingest --auto-rotate`. The WAL drain loop and the five-minute rotation loop
+  each existed twice (the second rotation copy, in `serve-api`, cancelled the
+  outgoing market immediately and so dropped its final seconds from the live
+  view). One shared feed runtime now drives both `ingest` and `serve-api`,
+  with the REST resnapshot self-heal wired into every subscription.
+- Configuration is one typed `Settings` struct deserialized once from
+  `config/default.toml` plus `PB__` overrides. An unknown or misspelled key is
+  now a startup error naming the field instead of a warning (the separate
+  key-allowlist module and `doctor`'s copy of that check are gone), negative
+  values are rejected, and out-of-range values are clamped in one place. The
+  dead `storage.parquet_row_group_size` key is removed. `--log-level info` on
+  the command line now wins over `logging.level` in the file, as any explicit
+  flag should.
 - CI trimmed from 15 jobs to 9 and from about 15 minutes to about 7: the
   `bench` compile-only job (redundant with `cargo check --all-targets`),
   `release-build` (subsumed by `docker-build`), `hygiene`, `audit`

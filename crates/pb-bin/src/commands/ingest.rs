@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use config::Config;
 use pb_types::SlugRegistry;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,9 +13,10 @@ use tokio_util::sync::CancellationToken;
 use super::feed::{run_feed, FeedPlan};
 use super::pipeline;
 use super::pipeline::now_micros;
+use crate::settings::Settings;
 
 pub async fn run(
-    settings: Config,
+    settings: Settings,
     plan: FeedPlan,
     enable_parquet: bool,
     enable_metrics: bool,
@@ -51,7 +51,7 @@ pub async fn run(
     // The WAL is the durability backbone: failing to open it is fatal. With
     // --standby, a process started against a WAL held by an active writer waits
     // and auto-promotes when that writer exits instead of failing fast.
-    let wal_config = pipeline::wal_config_from_settings(&settings);
+    let wal_config = settings.wal_config();
     if standby {
         tracing::info!("standby mode: will wait for the active writer's WAL lock before ingesting");
     }
