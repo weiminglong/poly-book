@@ -1,9 +1,9 @@
 # pb-api
 
 Read-only HTTP API and live read model for workstation clients. Serves live feed
-health, order book snapshots, historical replay, integrity summaries, execution
-timelines, and WebSocket streaming — all without coupling browser clients to
-ingest internals.
+health, order book snapshots, historical replay, integrity summaries, and
+WebSocket streaming — all without coupling browser clients to ingest
+internals.
 
 ## Routes
 
@@ -18,9 +18,6 @@ ingest internals.
 | GET | `/api/v1/orderbooks/{asset_id}/snapshot` | Live L2 book snapshot |
 | GET | `/api/v1/replay/reconstruct` | Point-in-time book reconstruction |
 | GET | `/api/v1/integrity/summary` | Dataset continuity and validation metrics |
-| GET | `/api/v1/execution/orders` | Order lifecycle timeline |
-| GET | `/api/v1/query/datasets` | Available datasets and column schemas |
-| POST | `/api/v1/query/sql` | Execute guarded read-only SQL query |
 | WS | `/api/v1/streams/orderbook` | Live book streaming via WebSocket |
 
 Full route contracts and error semantics: [docs/api.md](../../docs/api.md).
@@ -31,15 +28,14 @@ Full route contracts and error semantics: [docs/api.md](../../docs/api.md).
 |------|-------------|
 | `LiveReadModel` | Server-side book state maintained from the ingest channel. Groups snapshots for connected assets. |
 | `BookBroadcast` | `tokio::sync::broadcast` channel for WebSocket incremental updates. |
-| `AppState` | Shared axum state holding the live model, broadcast, slug registry, service backends, WAL lag tracking, and config. |
-| `ApiConfig` | API server configuration (depth limits, stale thresholds, query guard settings). |
+| `AppState` | Shared axum state holding the live model, broadcast, slug registry, the `HistoricalService`, WAL lag tracking, and config. |
+| `ApiConfig` | API server configuration (depth limits, stale thresholds, request limits, auth token). |
 | `HealthResponse` | Typed health response struct (avoids `serde_json::json!` dynamic `Value` tree allocation). |
 | `ApiError` | Structured error type mapped to HTTP status codes. |
 
 DTOs in `dto.rs`: `FeedStatusResponse`, `LiveOrderBookSnapshot`,
 `ReplayReconstructionResponse`, `IntegritySummaryResponse`,
-`ExecutionTimelineResponse`, `BookUpdateMessage`, `QueryResultResponse`,
-`QueryColumn`, `DatasetSchemaResponse`, `DatasetInfo`, and others.
+`BookUpdateMessage`, and others.
 
 ## Data Flow
 
@@ -47,8 +43,7 @@ DTOs in `dto.rs`: `FeedStatusResponse`, `LiveOrderBookSnapshot`,
 PersistedRecord channel ──▶ LiveReadModel ──┬──▶ REST handlers
                                             └──▶ BookBroadcast ──▶ WS clients
 
-AnyReplayService ──▶ replay/integrity/execution handlers
-AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
+HistoricalService (pb-service) ──▶ replay/integrity handlers
 ```
 
 ## Design Notes
@@ -68,8 +63,7 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   per-request timeout, a global in-flight concurrency cap, and a request-body
   size limit; the long-lived WS route is intentionally exempt from the request
   timeout. 5xx responses return an opaque message and log the real detail
-  server-side; URL-bearing ClickHouse transport errors are redacted before they
-  can reach that log path.
+  server-side.
 - `LiveReadModel` receives `PersistedRecord` events and maintains in-memory
   book state without persisting to disk. After each snapshot materialization,
   delta, and checkpoint apply it runs `L2Book::check_integrity`; a crossed/locked
@@ -92,16 +86,13 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
 - Both `serve-api` and separated `serve` mode route projector updates through
   the same broadcast fanout, so WAL-tail updates are streamed to WS clients as
   incremental book messages instead of snapshot-only sessions.
-- Historical reads use configurable backend (Parquet or ClickHouse) via `pb-service` enum dispatch.
-- Query workbench (`/query/datasets`, `/query/sql`) is ClickHouse-only and
-  optional (`query_service: Option<AnyQueryService>`). It exposes only the
-  documented dataset allowlist and rejects direct access to other tables or
-  qualified database names.
+- Historical reads go through `pb_service::HistoricalService` (Parquet-backed)
+  held in `AppState::historical`.
 - WebSocket `asset_id` accepts either the canonical token ID or a registered
   slug, matching the REST snapshot route.
 
 ## Tests
 
-83 tests covering health states, error format consistency, depth and time parameter
-validation, execution limits, `ServiceError` to `ApiError` mapping,
-`PerAssetBroadcast` unit tests, and `LiveReadModel` tests.
+Unit tests cover health states, error format consistency, depth and time
+parameter validation, `ServiceError` to `ApiError` mapping, `PerAssetBroadcast`,
+and `LiveReadModel`.

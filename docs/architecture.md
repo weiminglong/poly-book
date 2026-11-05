@@ -24,47 +24,46 @@
                                │
                     tokio::mpsc channel (PersistedRecord)
                                │
-         ┌─────────────────────┼────────────────────┐
-         │                     │                    │
-         ▼                     ▼                    ▼
-  ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
-  │ ParquetSink │      │ClickHouse   │      │  WalWriter   │
-  │  (pb-store) │      │Sink         │      │  (pb-wal)    │
-  │  5-min Zstd │      │(pb-store)   │      │ append+CRC32C│
-  └──────┬──────┘      │ 1s batch    │      └──────┬───────┘
-         │             └──────┬──────┘             │
-         │                    │               WAL segments
-         ▼                    ▼                    │
-  ┌──────────┐         ┌──────────┐                ▼
-  │ Parquet  │         │ClickHouse│         ┌──────────────┐
-  │  files   │         │  tables  │         │  WalReader   │
-  └────┬─────┘         └────┬─────┘         │  (pb-wal)    │
-       │                    │               └──────┬───────┘
-       └────────┬───────────┘                      │
-                │                                  ▼
-                ▼                           ┌──────────────┐
-         ┌─────────────┐                    │ LiveReadModel │
-         │ EventReader  │                   │   (pb-api)   │
-         │ (pb-replay)  │                   │ watch-based  │
-         └──────┬───────┘                   └──────┬───────┘
-                │                                  │
-                ▼                           ┌──────┴───────┐
-         ┌──────────────┐                   │              │
-         │ ReplayEngine │                REST/WS     per-asset
-         │ (pb-replay)  │                   │         broadcast
-         └──────┬───────┘                   ▼              ▼
-                │                        HTTP          WebSocket
-                ▼                       handlers        clients
-         ┌──────────────┐
-         │ pb-service   │  ReplayService / IntegrityService /
-         │  (traits)    │  ExecutionService
-         └──────┬───────┘
-                │
-                ▼
-         ┌──────────────┐
-         │   pb-api     │  thin HTTP adapters
-         │  (handlers)  │
-         └──────────────┘
+         ┌─────────────────────┴────────────────────┐
+         │                                          │
+         ▼                                          ▼
+  ┌─────────────┐                           ┌──────────────┐
+  │ ParquetSink │                           │  WalWriter   │
+  │  (pb-store) │                           │  (pb-wal)    │
+  │  5-min Zstd │                           │ append+CRC32C│
+  └──────┬──────┘                           └──────┬───────┘
+         │                                         │
+         │                                    WAL segments
+         ▼                                         │
+  ┌──────────┐                                     ▼
+  │ Parquet  │                              ┌──────────────┐
+  │  files   │                              │  WalReader   │
+  └────┬─────┘                              │  (pb-wal)    │
+       │                                    └──────┬───────┘
+       │                                           │
+       ▼                                           ▼
+  ┌──────────────┐                          ┌──────────────┐
+  │ParquetReader │                          │ LiveReadModel │
+  │ (pb-replay)  │                          │   (pb-api)   │
+  └──────┬───────┘                          │ watch-based  │
+         │                                  └──────┬───────┘
+         ▼                                         │
+  ┌──────────────┐                          ┌──────┴───────┐
+  │ ReplayEngine │                          │              │
+  │ (pb-replay)  │                       REST/WS     per-asset
+  └──────┬───────┘                          │         broadcast
+         │                                  ▼              ▼
+         ▼                               HTTP          WebSocket
+  ┌──────────────────┐                  handlers        clients
+  │ HistoricalService│
+  │   (pb-service)   │  reconstruct / integrity_summary
+  └──────┬───────────┘
+         │
+         ▼
+  ┌──────────────┐
+  │   pb-api     │  thin HTTP adapters
+  │  (handlers)  │
+  └──────────────┘
 ```
 
 ## Crate Dependency Graph
@@ -102,7 +101,7 @@ Leaf crates (no internal dependencies): **pb-types**, **pb-metrics**.
 ## Persisted Record Model
 
 All data flows through `PersistedRecord` (defined in pb-types), which splits into
-six event datasets. Each dataset has its own Parquet schema and ClickHouse table:
+five event datasets. Each dataset has its own Parquet schema:
 
 | Dataset             | Source          | Content                                |
 |---------------------|-----------------|----------------------------------------|
@@ -111,7 +110,6 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 | `IngestEvent`       | WS lifecycle    | Connect, disconnect, reconnect markers |
 | `BookCheckpoint`    | REST snapshots  | Full book state at a point in time     |
 | `ReplayValidation`  | Replay engine   | REST-vs-replay comparison results      |
-| `ExecutionEvent`    | External / CLI  | Order lifecycle state changes          |
 
 ## Runtime Topology
 
@@ -122,8 +120,8 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │                    ingest process                      │
 │                                                       │
 │  WsClient ──▶ Dispatcher ──┬──▶ WalWriter (pb-wal)   │
-│                    ▲        ├──▶ ParquetSink           │
-│  RestClient ───────┘        └──▶ ClickHouseSink        │
+│                    ▲        └──▶ ParquetSink           │
+│  RestClient ───────┘                                  │
 │                                                       │
 │  CheckpointProducer (periodic REST snapshots + WAL    │
 │                       offset capture)                  │
@@ -141,11 +139,11 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │                                                       │
 │  LiveReadModel (watch-based, zero-contention reads)   │
 │       │                                               │
-│       ├─▶ REST handlers (pb-service traits)           │
+│       ├─▶ REST handlers (pb-service)                  │
 │       └─▶ per-asset WS broadcasts                     │
 │                                                       │
-│  pb-service ──▶ Parquet or ClickHouse backend          │
-│  (configurable via api.historical_backend)            │
+│  HistoricalService (pb-service) ──▶ Parquet            │
+│  (replay reconstruct + integrity summary)             │
 │                                                       │
 │  API server on :3000                                  │
 │  Metrics server on :9090                              │
@@ -165,7 +163,7 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │  (in-memory only — no WAL, no storage sinks)        │
 │                                                     │
 │  pb-service ──▶ ReplayEngine ──▶ replay handlers    │
-│  (reads historical Parquet/ClickHouse for replay)   │
+│  (reads historical Parquet for replay)              │
 │                                                     │
 │  Metrics server on :9090                            │
 │  API server on :3000                                │
@@ -222,6 +220,6 @@ happens when a consumer falls behind is explicit:
 | [ADR-0006](adr/0006-fxhashmap-dispatcher.md) | FxHashMap in Dispatcher | Faster non-cryptographic lookups on trusted data |
 | [ADR-0007](adr/0007-release-profile.md) | panic=abort release profile with symbolizable backtraces | Fail-stop over limping on, without losing diagnosability |
 | [ADR-0008](adr/0008-embedded-wal-over-message-broker.md) | Embedded single-writer WAL over a message broker | Sub-µs appends, no broker ops on a single host |
-| [ADR-0009](adr/0009-dual-sink-storage.md) | Dual-sink storage: Parquet cold, ClickHouse warm | Portable replay truth + interactive SQL |
+| [ADR-0009](adr/0009-dual-sink-storage.md) | Dual-sink storage (superseded: ClickHouse sink removed, Parquet only) | Portable replay truth; historical record |
 | [ADR-0010](adr/0010-ingest-serve-process-separation.md) | Ingest/serve process separation | Isolate capture from read-path faults; restartable serving |
 | [ADR-0011](adr/0011-read-only-workstation-boundary.md) | Read-only workstation boundary | Blast-radius control; no control plane without its prerequisites |

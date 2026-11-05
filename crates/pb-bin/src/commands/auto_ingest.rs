@@ -14,7 +14,6 @@ use super::pipeline::now_micros;
 pub async fn run(
     settings: Config,
     enable_parquet: bool,
-    enable_clickhouse: bool,
     enable_metrics: bool,
     shutdown: CancellationToken,
     slug_registry: pb_types::SlugRegistry,
@@ -43,13 +42,7 @@ pub async fn run(
         &mut supervisor,
     );
 
-    let sinks = pipeline::start_storage_sinks(
-        &settings,
-        enable_parquet,
-        enable_clickhouse,
-        &mut supervisor,
-    )
-    .await?;
+    let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, &mut supervisor).await?;
 
     let mut fanout_txs: Vec<tokio::sync::mpsc::Sender<pb_types::PersistedRecord>> = Vec::new();
 
@@ -60,19 +53,6 @@ pub async fn run(
             while let Some(event) = frx.recv().await {
                 if let Err(e) = ptx.send(event).await {
                     tracing::warn!("parquet sink send failed: {e}");
-                    break;
-                }
-            }
-        });
-    }
-
-    if let Some(ctx) = sinks.clickhouse_tx.clone() {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
-        fanout_txs.push(ftx);
-        supervisor.spawn("clickhouse-fanout", async move {
-            while let Some(event) = frx.recv().await {
-                if let Err(e) = ctx.send(event).await {
-                    tracing::warn!("clickhouse sink send failed: {e}");
                     break;
                 }
             }
@@ -385,7 +365,6 @@ pub async fn run(
     shutdown.cancel();
     drop(event_tx);
     drop(sinks.parquet_tx);
-    drop(sinks.clickhouse_tx);
 
     // Join all supervised infrastructure tasks (drain, fan-out forwarders,
     // sinks, checkpoint producer) with a bounded timeout.

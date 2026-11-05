@@ -401,8 +401,7 @@ impl LiveState {
             }
             PersistedRecord::Trade(_)
             | PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => {}
+            | PersistedRecord::Validation(_) => {}
         }
 
         outcome

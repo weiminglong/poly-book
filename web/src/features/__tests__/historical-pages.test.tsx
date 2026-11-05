@@ -8,23 +8,19 @@ vi.mock('../../shared/api/queries', () => ({
   BACKGROUND_INTERVAL_MS: 5_000,
   useActiveAssets: vi.fn(),
   useReplayReconstruction: vi.fn(),
-  useExecutionTimeline: vi.fn(),
   useIntegritySummary: vi.fn(),
 }))
 
 import {
   useActiveAssets,
-  useExecutionTimeline,
   useIntegritySummary,
   useReplayReconstruction,
 } from '../../shared/api/queries'
-import ExecutionPage from '../execution/ExecutionPage'
 import IntegrityPage from '../integrity/IntegrityPage'
 import ReplayPage from '../replay/ReplayPage'
 
 const mockUseActiveAssets = vi.mocked(useActiveAssets)
 const mockUseReplayReconstruction = vi.mocked(useReplayReconstruction)
-const mockUseExecutionTimeline = vi.mocked(useExecutionTimeline)
 const mockUseIntegritySummary = vi.mocked(useIntegritySummary)
 
 // Helper to build a minimal UseQueryResult-shaped object
@@ -74,25 +70,6 @@ describe('ReplayPage', () => {
     render(<ReplayPage />)
     expect(screen.getByLabelText('Asset ID')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Run Reconstruction' })).toBeInTheDocument()
-  })
-})
-
-describe('ExecutionPage', () => {
-  function setupExecutionMocks() {
-    mockUseExecutionTimeline.mockReturnValue(queryResult({ data: undefined }))
-  }
-
-  it('renders the page heading "Execution Inspector"', () => {
-    setupExecutionMocks()
-    render(<ExecutionPage />)
-    expect(screen.getByText('Execution Inspector')).toBeInTheDocument()
-  })
-
-  it('renders the time window form inputs', () => {
-    setupExecutionMocks()
-    render(<ExecutionPage />)
-    expect(screen.getByLabelText('Window (minutes)')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Query' })).toBeInTheDocument()
   })
 })
 

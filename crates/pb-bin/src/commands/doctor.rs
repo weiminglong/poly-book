@@ -23,7 +23,7 @@ pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
     if skip_network {
         checks.push(Check::warn(
             "network",
-            "skipped (--skip-network); feed and ClickHouse reachability not verified",
+            "skipped (--skip-network); feed reachability not verified",
         ));
     } else {
         let rest_url = settings
@@ -35,7 +35,6 @@ pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
         checks.push(check_http("rest", &rest_url).await);
         checks.push(check_http("gamma", &gamma_url).await);
         checks.push(check_websocket(&settings).await);
-        checks.push(check_clickhouse(&settings).await);
     }
 
     checks.push(check_port("api port", &settings, "api.listen_addr", "127.0.0.1:3000").await);
@@ -278,39 +277,6 @@ async fn check_websocket(settings: &Config) -> Check {
         ),
         Ok(Err(e)) => Check::fail("websocket", format!("{ws_url} handshake failed: {e}")),
         Err(_) => Check::fail("websocket", format!("{ws_url} handshake timed out")),
-    }
-}
-
-/// ClickHouse is optional (warm storage + SQL workbench), so unreachable is a
-/// warning, not a failure.
-async fn check_clickhouse(settings: &Config) -> Check {
-    let url = settings
-        .get_string("storage.clickhouse_url")
-        .unwrap_or_else(|_| "http://localhost:8123".to_string());
-    let ping = format!("{}/ping", url.trim_end_matches('/'));
-    let client = match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return Check::warn("clickhouse", format!("http client build failed: {e}")),
-    };
-    match client.get(&ping).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            Check::pass("clickhouse", format!("{url} ping ok"))
-        }
-        Ok(resp) => Check::warn(
-            "clickhouse",
-            format!(
-                "{url} answered HTTP {} (optional component)",
-                resp.status().as_u16()
-            ),
-        ),
-        Err(_) => Check::warn(
-            "clickhouse",
-            format!("{url} unreachable (optional: needed for --clickhouse and the SQL workbench)"),
-        ),
     }
 }
 

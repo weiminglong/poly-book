@@ -33,6 +33,25 @@ is practical to do so.
 
 ### Removed
 
+- ClickHouse as a second storage backend and query engine: the sink, record
+  writer, reader, DDL, `storage.clickhouse_*` and `api.historical_backend`
+  config keys, the `--clickhouse` ingest flags, the `--source` replay flag,
+  the Docker-backed round-trip and cross-backend tests, and the compose
+  service. Parquet was already the default and the only backend `demo`,
+  `serve` hydration, and the checkpoint path used; every reader change had to
+  be made twice. Ad-hoc SQL over the Parquet tree is available with DuckDB
+  (`just parquet-*`).
+- Execution journaling: the `ExecutionEvent`/`LatencyTrace` types, the
+  `execution_events` dataset, `execution-append`/`execution-replay`, the
+  `GET /api/v1/execution/orders` route, and the SPA's Execution page. Nothing
+  in the system produced execution events except a human typing them in.
+- The SQL query workbench (`/api/v1/query/*`, `api.query_*` keys, the
+  `fuzz_query_guard` target, the SPA's Query page). It required ClickHouse.
+- The pb-service trait and enum-dispatch layer (`BookService`, `ReplayService`,
+  `IntegrityService`, `ExecutionService`, `QueryService`, `Any*Service`).
+  `BookService` had no implementor and the others had exactly one backend
+  left. One struct, `HistoricalService`, now answers replay and integrity
+  queries.
 - `infra/` (Terraform that was never applied), the `deploy.yml` workflow (never
   succeeded, and it re-ran the full CI on every push to `main`), the
   `iac-scan` job, the `openspec/` archive (its decisions live in `docs/adr/`),

@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "Parquet and ClickHouse storage sinks for the poly-book workspace"
+description = "Parquet storage sink and writer for the poly-book workspace"
 
 [lints]
 workspace = true
@@ -21,7 +21,6 @@ tokio-util = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
-clickhouse = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

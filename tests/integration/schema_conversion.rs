@@ -1,11 +1,9 @@
 //! Test Arrow schema conversion for split datasets.
 
-use pb_store::schema::{
-    book_event_schema, execution_event_schema, records_to_record_batch, trade_event_schema,
-};
+use pb_store::schema::{book_event_schema, records_to_record_batch, trade_event_schema};
 use pb_types::event::{
-    BookEvent, BookEventKind, DataSource, EventProvenance, ExecutionEvent, ExecutionEventKind,
-    LatencyTrace, PersistedRecord, Side, TradeEvent, TradeFidelity,
+    BookEvent, BookEventKind, DataSource, EventProvenance, PersistedRecord, Side, TradeEvent,
+    TradeFidelity,
 };
 use pb_types::{AssetId, FixedPrice, FixedSize, Sequence};
 
@@ -47,27 +45,6 @@ fn sample_records() -> Vec<PersistedRecord> {
                 ingest_ordinal: None,
             },
         }),
-        PersistedRecord::Execution(ExecutionEvent {
-            event_timestamp_us: 3_000_000,
-            asset_id: Some(AssetId::new("token-1")),
-            order_id: "order-1".to_string(),
-            client_order_id: Some("client-1".to_string()),
-            venue_order_id: None,
-            kind: ExecutionEventKind::SubmitIntent,
-            side: Some(Side::Bid),
-            price: Some(FixedPrice::from_f64(0.40).unwrap()),
-            size: Some(FixedSize::from_f64(12.0).unwrap()),
-            status: Some("open".to_string()),
-            reason: None,
-            latency: LatencyTrace {
-                market_data_recv_us: Some(10),
-                normalization_done_us: Some(12),
-                strategy_decision_us: Some(15),
-                order_submit_us: Some(20),
-                exchange_ack_us: None,
-                exchange_fill_us: None,
-            },
-        }),
     ]
 }
 
@@ -84,10 +61,6 @@ fn split_schemas_have_expected_fields() {
     let trade_schema = trade_event_schema();
     assert_eq!(trade_schema.fields().len(), 12);
     assert!(trade_schema.field_with_name("fidelity").is_ok());
-
-    let execution_schema = execution_event_schema();
-    assert_eq!(execution_schema.fields().len(), 12);
-    assert!(execution_schema.field_with_name("latency_json").is_ok());
 }
 
 #[test]
@@ -119,12 +92,4 @@ fn records_to_record_batch_serializes_each_dataset_shape() {
         .unwrap()
         .as_primitive::<UInt32Type>();
     assert_eq!(trade_prices.value(0), 4200);
-
-    let execution_batch = records_to_record_batch(&[&records[2]]).unwrap();
-    assert_eq!(execution_batch.num_rows(), 1);
-    let execution_sizes = execution_batch
-        .column_by_name("size")
-        .unwrap()
-        .as_primitive::<UInt64Type>();
-    assert_eq!(execution_sizes.value(0), 12_000_000);
 }

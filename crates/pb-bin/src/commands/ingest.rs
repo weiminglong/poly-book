@@ -11,7 +11,6 @@ pub async fn run(
     settings: Config,
     tokens: Option<String>,
     enable_parquet: bool,
-    enable_clickhouse: bool,
     enable_metrics: bool,
     standby: bool,
     shutdown: CancellationToken,
@@ -94,13 +93,7 @@ pub async fn run(
         &mut supervisor,
     );
 
-    let sinks = pipeline::start_storage_sinks(
-        &settings,
-        enable_parquet,
-        enable_clickhouse,
-        &mut supervisor,
-    )
-    .await?;
+    let sinks = pipeline::start_storage_sinks(&settings, enable_parquet, &mut supervisor).await?;
 
     // Open WAL writer for durable event streaming.
     // The writer is only accessed on this task's event loop so no Arc/Mutex needed.
@@ -140,19 +133,6 @@ pub async fn run(
             while let Some(event) = frx.recv().await {
                 if let Err(e) = ptx.send(event).await {
                     tracing::warn!("parquet sink send failed: {e}");
-                    break;
-                }
-            }
-        });
-    }
-
-    if let Some(ctx) = sinks.clickhouse_tx {
-        let (ftx, mut frx) = tokio::sync::mpsc::channel::<pb_types::PersistedRecord>(2_048);
-        fanout_txs.push(ftx);
-        supervisor.spawn("clickhouse-fanout", async move {
-            while let Some(event) = frx.recv().await {
-                if let Err(e) = ctx.send(event).await {
-                    tracing::warn!("clickhouse sink send failed: {e}");
                     break;
                 }
             }

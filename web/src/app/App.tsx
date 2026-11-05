@@ -17,24 +17,18 @@ import { Providers } from './providers'
 const loadLiveFeedPage = () => import('../features/live-feed/LiveFeedPage')
 const loadOrderbookPage = () => import('../features/orderbook/OrderbookPage')
 const loadReplayPage = () => import('../features/replay/ReplayPage')
-const loadExecutionPage = () => import('../features/execution/ExecutionPage')
 const loadIntegrityPage = () => import('../features/integrity/IntegrityPage')
-const loadQueryPage = () => import('../features/query/QueryPage')
 
 const LiveFeedPage = lazy(loadLiveFeedPage)
 const OrderbookPage = lazy(loadOrderbookPage)
 const ReplayPage = lazy(loadReplayPage)
-const ExecutionPage = lazy(loadExecutionPage)
 const IntegrityPage = lazy(loadIntegrityPage)
-const QueryPage = lazy(loadQueryPage)
 
 const navItems = [
   { to: '/live-feed', label: 'Live Feed', preload: loadLiveFeedPage },
   { to: '/orderbook', label: 'Orderbook', preload: loadOrderbookPage },
   { to: '/replay', label: 'Replay', preload: loadReplayPage },
-  { to: '/execution', label: 'Execution', preload: loadExecutionPage },
   { to: '/integrity', label: 'Integrity', preload: loadIntegrityPage },
-  { to: '/query', label: 'Query', preload: loadQueryPage },
 ]
 
 export default function App() {
@@ -110,9 +104,7 @@ function AppShell() {
                 <Route path="/live-feed" element={<LiveFeedPage />} />
                 <Route path="/orderbook" element={<OrderbookPage />} />
                 <Route path="/replay" element={<ReplayPage />} />
-                <Route path="/execution" element={<ExecutionPage />} />
                 <Route path="/integrity" element={<IntegrityPage />} />
-                <Route path="/query" element={<QueryPage />} />
               </Routes>
             </Suspense>
           </ErrorBoundary>
@@ -156,8 +148,8 @@ function Header({
         </p>
         <h1 className="m-0 text-2xl font-bold text-foreground">Quant Workstation</h1>
         <p className="mt-2 max-w-[72ch] text-muted-foreground">
-          Institutional-grade read-only workstation: live orderbooks, replay, execution inspection,
-          integrity analysis, and SQL workbench.
+          Institutional-grade read-only workstation: live orderbooks, replay, and integrity
+          analysis.
         </p>
       </div>
 

@@ -31,7 +31,7 @@ impl From<pb_service::ServiceError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Client-facing message. For 4xx the message is a validation hint and is
-        // safe to return; for 5xx the internal detail (ClickHouse URLs, storage
+        // safe to return; for 5xx the internal detail (storage paths, object-store
         // errors, etc.) must NOT leak to unauthenticated clients, so it is
         // logged server-side and replaced with an opaque message.
         let (status, client_message) = match &self {

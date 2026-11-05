@@ -84,19 +84,17 @@ The WAL failed to append; `ingest` treats this as fatal and exits non-zero.
 ## SinkFlushFailing
 **Severity: warning — storage falling behind; WAL still durable.**
 
-A Parquet or ClickHouse flush failed (the sink retries with backoff and retains
+A Parquet flush failed (the sink retries with backoff and retains
 its buffer; only after `MAX_FLUSH_RETRIES` does it surface the error).
 
-1. Identify the sink from the `sink` label (`parquet` / `clickhouse`).
-2. Parquet: check the object store (S3 creds/role, bucket policy, KMS key access),
-   or local disk. ClickHouse: check the server is up and the schema matches.
+1. Confirm the sink from the `sink` label (`parquet`).
+2. Check the object store (S3 creds/role, bucket policy, KMS key access), or
+   local disk.
 3. If the failed sink is Parquet and the retained WAL is intact, `reconcile` can
    republish only complete receive-time-partitioned book/trade/ingest hours.
    Stop ingest and every other writer using the same Parquet prefix, then follow
    `docs/operations.md` “Storage Recovery”. Partial boundary hours and
-   checkpoint/validation/execution datasets require a separate source-backed
-   repair. `reconcile` does not rebuild ClickHouse; repair or re-ingest that
-   backend separately.
+   checkpoint/validation datasets require a separate source-backed repair.
 
 ## WalDecodeError
 **Severity: critical — serve read model has diverged from the WAL.**

@@ -7,9 +7,10 @@ Accepted
 2026-07-06 (records a boundary in force since the workstation API shipped)
 
 ## Context
-The workstation backend exposes live books, replay reconstruction, integrity
-summaries, execution timelines, and a SQL workbench over HTTP and WebSocket
-(a gRPC mirror of the same reads existed until it was removed as unused). The
+The workstation backend exposes live books, replay reconstruction, and
+integrity summaries over HTTP and WebSocket (a gRPC mirror of the same reads
+existed until it was removed as unused, as were an order-timeline route and a
+SQL workbench). The
 obvious next step — order entry, cancels, risk toggles —
 would turn it into a trading control plane.
 
@@ -29,10 +30,8 @@ Every serving surface is read-only, and the trust boundary is explicit:
 - **No mutation routes.** HTTP and WebSocket expose only reads over
   data that ingest already persisted. The API processes derive a live read
   model in memory but never write market data; persistence belongs to the
-  `ingest`/`auto-ingest` processes alone. The one write-shaped surface — the
-  SQL workbench — is guarded (write keywords rejected, identifiers
-  allowlisted to the six advertised datasets, `LIMIT` injected, server-side
-  readonly enforcement) and fuzzed (`fuzz_query_guard`).
+  `ingest`/`auto-ingest` processes alone. (A guarded read-only SQL workbench
+  once existed as the one write-shaped surface; it has since been removed.)
 - **Loopback by default.** All surfaces bind to `127.0.0.1`; the default
   trust boundary is the host.
 - **Bearer token required off loopback.** Startup refuses a non-loopback

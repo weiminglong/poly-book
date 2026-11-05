@@ -5,8 +5,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use pb_types::event::{
-    BookCheckpoint, BookEvent, BookEventKind, ExecutionEvent, IngestEvent, PersistedRecord,
-    ReplayValidation, Side, TradeEvent,
+    BookCheckpoint, BookEvent, BookEventKind, IngestEvent, PersistedRecord, ReplayValidation, Side,
+    TradeEvent,
 };
 
 use crate::error::StoreError;
@@ -103,23 +103,6 @@ pub fn replay_validation_schema() -> Schema {
     ])
 }
 
-pub fn execution_event_schema() -> Schema {
-    versioned(vec![
-        Field::new("event_timestamp_us", DataType::UInt64, false),
-        Field::new("asset_id", DataType::Utf8, true),
-        Field::new("order_id", DataType::Utf8, false),
-        Field::new("client_order_id", DataType::Utf8, true),
-        Field::new("venue_order_id", DataType::Utf8, true),
-        Field::new("event_kind", DataType::Utf8, false),
-        Field::new("side", DataType::UInt8, true),
-        Field::new("price", DataType::UInt32, true),
-        Field::new("size", DataType::UInt64, true),
-        Field::new("status", DataType::Utf8, true),
-        Field::new("reason", DataType::Utf8, true),
-        Field::new("latency_json", DataType::Utf8, false),
-    ])
-}
-
 fn book_kind_to_u8(kind: BookEventKind) -> u8 {
     match kind {
         BookEventKind::Snapshot => 1,
@@ -191,16 +174,6 @@ pub fn records_to_record_batch(records: &[&PersistedRecord]) -> Result<RecordBat
                 .collect::<Result<Vec<_>, _>>()?;
             replay_validation_refs_to_record_batch(&values)
         }
-        PersistedRecord::Execution(_) => {
-            let values = records
-                .iter()
-                .map(|record| match record {
-                    PersistedRecord::Execution(event) => Ok(event),
-                    _ => Err(StoreError::Other("mixed dataset batch".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            execution_event_refs_to_record_batch(&values)
-        }
     }
 }
 
@@ -211,7 +184,6 @@ pub fn schema_for_record(record: &PersistedRecord) -> Schema {
         PersistedRecord::Ingest(_) => ingest_event_schema(),
         PersistedRecord::Checkpoint(_) => checkpoint_schema(),
         PersistedRecord::Validation(_) => replay_validation_schema(),
-        PersistedRecord::Execution(_) => execution_event_schema(),
     }
 }
 
@@ -620,103 +592,6 @@ pub fn replay_validation_refs_to_record_batch(
             matched,
             mismatch_summary,
             persisted_at,
-        ],
-    )
-    .map_err(StoreError::from)
-}
-
-pub fn execution_event_refs_to_record_batch(
-    events: &[&ExecutionEvent],
-) -> Result<RecordBatch, StoreError> {
-    let schema = Arc::new(execution_event_schema());
-    let event_ts: ArrayRef = Arc::new(UInt64Array::from(
-        events
-            .iter()
-            .map(|e| e.event_timestamp_us)
-            .collect::<Vec<_>>(),
-    ));
-    let asset_ids: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.asset_id.as_ref().map(|id| id.as_str()))
-            .collect::<Vec<_>>(),
-    ));
-    let order_ids: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.order_id.as_str())
-            .collect::<Vec<_>>(),
-    ));
-    let client_order_ids: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.client_order_id.as_deref())
-            .collect::<Vec<_>>(),
-    ));
-    let venue_order_ids: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.venue_order_id.as_deref())
-            .collect::<Vec<_>>(),
-    ));
-    let kinds: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.kind.to_string())
-            .collect::<Vec<_>>(),
-    ));
-    let sides: ArrayRef = Arc::new(UInt8Array::from(
-        events
-            .iter()
-            .map(|e| side_to_u8(e.side))
-            .collect::<Vec<_>>(),
-    ));
-    let prices: ArrayRef = Arc::new(UInt32Array::from(
-        events
-            .iter()
-            .map(|e| e.price.map(|p| p.raw()))
-            .collect::<Vec<_>>(),
-    ));
-    let sizes: ArrayRef = Arc::new(UInt64Array::from(
-        events
-            .iter()
-            .map(|e| e.size.map(|s| s.raw()))
-            .collect::<Vec<_>>(),
-    ));
-    let status: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.status.as_deref())
-            .collect::<Vec<_>>(),
-    ));
-    let reason: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| e.reason.as_deref())
-            .collect::<Vec<_>>(),
-    ));
-    let latency: ArrayRef = Arc::new(StringArray::from(
-        events
-            .iter()
-            .map(|e| serde_json::to_string(&e.latency))
-            .collect::<Result<Vec<_>, _>>()?,
-    ));
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            event_ts,
-            asset_ids,
-            order_ids,
-            client_order_ids,
-            venue_order_ids,
-            kinds,
-            sides,
-            prices,
-            sizes,
-            status,
-            reason,
-            latency,
         ],
     )
     .map_err(StoreError::from)

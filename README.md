@@ -7,7 +7,7 @@
 A production-grade market-data system for Polymarket order books, written in
 Rust: lock-free single-writer ingestion over zero-copy WebSocket
 deserialization, an embedded CRC-framed write-ahead log with torn-tail crash
-recovery and flock-based writer failover, split Parquet + ClickHouse storage,
+recovery and flock-based writer failover, hour-partitioned Parquet storage,
 deterministic point-in-time book reconstruction, and a read-only quant
 workstation (HTTP/WS + React UI) on top.
 
@@ -36,9 +36,10 @@ Measured hot-path medians (Apple M3, full context and 49-benchmark table in
 2. **[crates/pb-wal/README.md](crates/pb-wal/README.md)** — the embedded WAL:
    CRC-over-length framing, torn-tail truncation on recovery, single-writer
    `flock` that doubles as failover, independent tailing consumers.
-3. **[TESTING.md](TESTING.md)** — the failure-mode → defense matrix: 762
-   tests, 35 property suites, 6 fuzz targets, miri, offline alert-rule
-   incident tests, and an honest list of what is not yet covered.
+3. **[TESTING.md](TESTING.md)** — the failure-mode → defense matrix: per-crate
+   unit and integration tests, 35 property suites, 5 fuzz targets, miri,
+   offline alert-rule incident tests, and an honest list of what is not yet
+   covered.
 4. **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** — measured, machine-stamped
    numbers for every pipeline stage.
 5. **[research/orderbook_analysis.ipynb](research/orderbook_analysis.ipynb)** —
@@ -63,7 +64,7 @@ just demo        # or: cargo run --release -- demo
 
 Replays a committed capture of real Polymarket BTC-5-minute market data as a
 simulated live feed behind the full API — the book ticks at its original
-cadence, and replay/integrity/execution answer from the capture. No network,
+cadence, and replay/integrity answer from the capture. No network,
 no venue dependency, deterministic. The startup banner prints copy-paste
 `curl` examples with known-good timestamps.
 
@@ -87,7 +88,7 @@ docker compose --profile minimal up --build
 ```
 
 The `full` profile runs the production process separation (ingest + serve over
-a shared WAL volume, plus ClickHouse), and `observability` adds
+a shared WAL volume), and `observability` adds
 Prometheus/Alertmanager/Grafana with the committed dashboard. See
 [docs/operations.md](docs/operations.md) for all three topologies.
 
@@ -97,7 +98,6 @@ Prometheus/Alertmanager/Grafana with the committed dashboard. See
 - Docker for the full integration suite
 - `just` is optional
 - `duckdb` is optional for Parquet inspection
-- ClickHouse is optional unless you want warm-storage testing
 
 ### Build
 
@@ -118,17 +118,20 @@ just ci
 ```
 
 This runs formatting, Clippy, and the full test suite. The integration package
-includes ClickHouse round-trip coverage through `testcontainers`, so Docker must
-be available.
+includes an S3/MinIO round-trip behind `#[ignore]`, so Docker must be
+available to run that case.
 
 ### Integration Tests
 
-Integration tests live in `pb-integration-tests` and require Docker (for
-ClickHouse via testcontainers). They are excluded from the default test run:
+Integration tests live in `pb-integration-tests` and are excluded from the
+default test run. The S3/MinIO round-trip is `#[ignore]`d and needs a running
+MinIO/S3-compatible endpoint in `PB_TEST_S3_ENDPOINT`:
 
 ```bash
-# Run integration tests locally (requires Docker)
+# Run integration tests locally
 cargo test -p pb-integration-tests -- --test-threads=1
+# Include the Docker-backed S3 case
+cargo test -p pb-integration-tests -- --ignored
 ```
 
 ### Copy-Paste Demo
@@ -182,10 +185,10 @@ cargo run -- ingest --tokens <TOKEN_ID> --parquet --metrics
 ```bash
 just replay <TOKEN_ID> <TIMESTAMP_US>
 # or
-cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --source parquet --mode recv_time
+cargo run -- replay --token <TOKEN_ID> --at <TIMESTAMP_US> --mode recv_time
 ```
 
-Replay modes:
+Replay modes (`--mode` defaults to `recv_time`):
 
 - `recv_time` reproduces local observation order
 - `exchange_time` reorders by venue timestamp, then receive time, then sequence
@@ -216,18 +219,12 @@ npm run dev
 By default the Vite dev server binds `127.0.0.1:4173` and proxies `/api`
 requests to `http://127.0.0.1:3000`, so you can run it alongside
 `cargo run -- serve-api --auto-rotate`. Set `VITE_DEV_HOST=0.0.0.0` only for an
-intentional LAN-exposed dev session. The shipped SPA currently includes `Live Feed`, `Replay Lab`, `Integrity`,
-and `Execution Timeline`. Append
+intentional LAN-exposed dev session. The shipped SPA currently includes `Live Feed`,
+`Orderbook`, `Replay Lab`, and `Integrity`. Append
 `?source=demo` to the URL or use the in-app toggle to review seeded sample data
 without a running backend. The SPA uses a newer Node runtime than the Rust-only
 workspace commands; see [`web/README.md`](web/README.md) for the exact supported
 version and validation flow.
-
-### Replay execution history
-
-```bash
-cargo run -- execution-replay --start <START_US> --end <END_US> --source parquet
-```
 
 ### Backfill checkpoints
 
@@ -248,8 +245,8 @@ cargo run -- reconcile
 Recovery fails closed on WAL corruption and partial boundary hours. For every
 fully covered receive-time-partitioned UTC hour (`book_events`, `trade_events`,
 and `ingest_events`) it writes and verifies a new Parquet object, publishes an
-authoritative manifest, and only then cleans superseded objects. Checkpoint,
-validation, and execution partitions are left untouched because their partition
+authoritative manifest, and only then cleans superseded objects. Checkpoint
+and validation partitions are left untouched because their partition
 timestamps do not provide the same WAL coverage proof. Local files and S3 use
 the same object-store reader and manifest semantics.
 
@@ -305,7 +302,6 @@ cargo +nightly fuzz run fuzz_fixed_price     # FixedPrice/FixedSize parsing
 cargo +nightly fuzz run fuzz_book_delta      # book delta application invariants
 cargo +nightly fuzz run fuzz_wal_corruption  # corrupted WAL segments: reader survives
 cargo +nightly fuzz run fuzz_codec_decode    # WAL codec decode of arbitrary bytes
-cargo +nightly fuzz run fuzz_query_guard     # SQL query guard sanitizer + LIMIT normalization
 ```
 
 ### Latency Design
@@ -333,7 +329,7 @@ The project demonstrates a specific style of trading-infrastructure design:
 ## Architecture
 
 ```text
-Polymarket WS -> pb-feed -> pb-wal -> pb-store -> Parquet / ClickHouse
+Polymarket WS -> pb-feed -> pb-wal -> pb-store -> Parquet
                  |            |                    ^
                  v            v                    |
               pb-api <---- pb-service <-- pb-replay --+
@@ -354,10 +350,10 @@ Workspace crates:
 | `pb-types` | Fixed-point types, wire formats, and persisted records |
 | `pb-book` | In-memory L2 order book engine with analytics (weighted mid, top-N, integrity checks) |
 | `pb-feed` | WebSocket ingest, REST discovery, dispatcher, rate limiting |
-| `pb-store` | Parquet and ClickHouse sinks |
+| `pb-store` | Parquet storage sink and writer |
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
 | `pb-wal` | Embedded write-ahead log with append-only segments and CRC32C framing |
-| `pb-service` | Transport-neutral domain service layer with configurable backends |
+| `pb-service` | Transport-neutral historical service (Parquet-backed replay and integrity) |
 | `pb-metrics` | Prometheus metrics endpoint |
 | `pb-bin` | CLI entrypoint |
 
@@ -389,11 +385,10 @@ Current workstation API routes and runtime notes live in:
 Near-term work that would make strong public contributions:
 
 - broader replay validation and determinism coverage
-- workstation integrity, latency, execution, and query expansion beyond the
-  current Live Feed + Replay Lab SPA slice
+- workstation latency surfaces beyond the current Live Feed, Orderbook,
+  Replay Lab, and Integrity SPA pages
 - more explicit schema/versioning guarantees for persisted datasets
-- clearer operational docs for ClickHouse and cloud object storage
-- examples for strategy hooks and execution-event workflows
+- clearer operational docs for cloud object storage
 
 ## Development Workflow
 

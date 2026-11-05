@@ -6,7 +6,7 @@ Thanks for contributing. This repository is a Rust workspace for Polymarket mark
 
 - Read the [README](README.md) for project scope and the fastest local workflow.
 - Use the pinned Rust toolchain or Rust 1.94+.
-- Install Docker if you want to run the full integration suite. The ClickHouse integration tests use `testcontainers`.
+- Install Docker if you want to run the full integration suite. The S3/MinIO round-trip test needs a MinIO/S3-compatible endpoint.
 - Install `just` if you want the shortcut commands. Cargo commands work directly too.
 
 ## Local Setup
@@ -21,7 +21,6 @@ Optional tools:
 
 - `just` for task aliases
 - `duckdb` for local Parquet inspection
-- ClickHouse for manual warm-storage testing
 
 ## Test Matrix
 
@@ -40,7 +39,7 @@ Runs unit tests and fast workspace checks without the integration package.
 cargo test -p pb-integration-tests
 ```
 
-Runs integration tests, including the ClickHouse round-trip coverage. Docker must be available.
+Runs integration tests. The `#[ignore]`d S3/MinIO round-trip additionally needs Docker and `PB_TEST_S3_ENDPOINT` (`-- --ignored`).
 
 ```bash
 just ci
@@ -63,7 +62,7 @@ For a meaningful architecture change, add or amend an ADR under `docs/adr/` so t
 - Run `cargo clippy --workspace -- -D warnings`.
 - Prefer explicit, typed interfaces over stringly-typed plumbing.
 - Keep hot-path code simple and measurable.
-- Preserve split dataset semantics across `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`, `replay_validations`, and `execution_events`.
+- Preserve split dataset semantics across `book_events`, `trade_events`, `ingest_events`, `book_checkpoints`, and `replay_validations`.
 
 ## Pull Requests
 

@@ -1,7 +1,7 @@
 name: Fuzz
 
 # 30-second smoke runs of every fuzz target. These have caught real bugs
-# (query-guard UTF-8 normalization, codec decode panics) but cost ~12 minutes
+# (codec decode panics, fixed-point parse edge cases) but cost ~12 minutes
 # per run, most of it building the targets, so they run nightly and on pushes
 # to main rather than gating every pull request. Run one locally with
 # `cargo +nightly fuzz run <target>`.
@@ -27,8 +27,6 @@ jobs:
         run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
       - name: Fuzz book delta (30s)
         run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
-      - name: Fuzz query guard (30s)
-        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
       - name: Fuzz WS deserialization (30s)
         run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
       - name: Fuzz WAL codec decode (30s)

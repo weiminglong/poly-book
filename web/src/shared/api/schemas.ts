@@ -86,35 +86,6 @@ export const replayReconstructionResponseSchema = z.object({
   continuity_events: z.array(continuityWarningSchema),
 })
 
-export const latencyTraceViewSchema = z.object({
-  market_data_recv_us: z.number().nullable(),
-  normalization_done_us: z.number().nullable(),
-  strategy_decision_us: z.number().nullable(),
-  order_submit_us: z.number().nullable(),
-  exchange_ack_us: z.number().nullable(),
-  exchange_fill_us: z.number().nullable(),
-})
-
-export const executionEventViewSchema = z.object({
-  event_timestamp_us: z.number(),
-  asset_id: z.string().nullable(),
-  order_id: z.string(),
-  client_order_id: z.string().nullable(),
-  venue_order_id: z.string().nullable(),
-  kind: z.string(),
-  side: z.string().nullable(),
-  price: z.string().nullable(),
-  size: z.string().nullable(),
-  status: z.string().nullable(),
-  reason: z.string().nullable(),
-  latency: latencyTraceViewSchema,
-})
-
-export const executionTimelineResponseSchema = z.object({
-  events: z.array(executionEventViewSchema),
-  total_count: z.number(),
-})
-
 export const integritySummaryResponseSchema = z.object({
   asset_id: z.string(),
   slug: z.string().optional(),
@@ -130,29 +101,6 @@ export const integritySummaryResponseSchema = z.object({
   validations_mismatched: z.number(),
   completeness: completenessLabelSchema,
   continuity_events: z.array(continuityWarningSchema),
-})
-
-export const queryColumnSchema = z.object({
-  name: z.string(),
-  data_type: z.string(),
-})
-
-export const queryResultResponseSchema = z.object({
-  columns: z.array(queryColumnSchema),
-  rows: z.array(z.array(z.unknown())),
-  row_count: z.number(),
-  truncated: z.boolean(),
-  execution_time_ms: z.number(),
-})
-
-export const datasetInfoSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  columns: z.array(queryColumnSchema),
-})
-
-export const datasetSchemaResponseSchema = z.object({
-  datasets: z.array(datasetInfoSchema),
 })
 
 export const apiErrorResponseSchema = z.object({

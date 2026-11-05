@@ -1,7 +1,10 @@
 # ADR-0009: Dual-Sink Storage — Parquet Cold, ClickHouse Warm
 
 ## Status
-Accepted
+Superseded. The ClickHouse sink was removed as an unused second backend;
+storage is Parquet only (`ParquetSink`, read back by `ParquetReader`). The
+rest of this document is kept as the historical record of the original
+decision.
 
 ## Date
 2026-07-06 (records a decision implemented incrementally through March 2026)
@@ -70,11 +73,9 @@ the Parquet backend with a warning.
   exponential-backoff retries.
 - **The two stores can diverge** (a sink outage, a partial batch). This is
   accepted and managed rather than prevented: Parquet is authoritative, three
-  cross-backend equivalence tests (replay, integrity, execution in
-  `tests/integration/cross_backend_service.rs`) verify both backends give the
-  same answers over the same records, and `reconcile` rebuilds a lost Parquet
-  window from the WAL. The equivalence tests are Docker-backed and `#[ignore]`d
-  for ordinary unit runs; the `integration-docker` CI job executes them.
+  cross-backend equivalence tests (replay, integrity, execution) verified both
+  backends gave the same answers over the same records while the sink existed,
+  and `reconcile` rebuilds a lost Parquet window from the WAL.
 - **Storage lag never blocks durability**: sinks consume from their own
   bounded fan-out channels and may fall behind; the WAL (ADR-0008) remains
   the unconditionally-blocking consumer, so a slow sink degrades freshness,

@@ -1,9 +1,6 @@
-import { type UseQueryOptions, useMutation, useQuery } from '@tanstack/react-query'
+import { type UseQueryOptions, useQuery } from '@tanstack/react-query'
 import type {
   ActiveAssetSummary,
-  DatasetSchemaResponse,
-  ExecutionRequest,
-  ExecutionTimelineResponse,
   FeedStatusResponse,
   IntegrityRequest,
   IntegritySummaryResponse,
@@ -12,25 +9,19 @@ import type {
   ReplayRequest,
 } from '../../types'
 import { useSourceModeContext } from '../hooks/use-source-mode'
-import { buildUrl, fetchAndValidate, getApiBaseUrl, postAndValidate } from './client'
+import { buildUrl, fetchAndValidate, getApiBaseUrl } from './client'
 import {
   getDemoActiveAssets,
-  getDemoDatasets,
-  getDemoExecution,
   getDemoFeedStatus,
   getDemoIntegrity,
-  getDemoQueryResult,
   getDemoReplay,
   getDemoSnapshot,
 } from './demo'
 import {
   activeAssetsResponseSchema,
-  datasetSchemaResponseSchema,
-  executionTimelineResponseSchema,
   feedStatusResponseSchema,
   integritySummaryResponseSchema,
   liveOrderBookSnapshotSchema,
-  queryResultResponseSchema,
   replayReconstructionResponseSchema,
 } from './schemas'
 
@@ -47,18 +38,6 @@ export const queryKeys = {
   orderbook: (assetId: string, depth: number) => ['orderbook', assetId, depth] as const,
   replay: (req: ReplayRequest) => ['replay', req.assetId, req.atUs, req.mode, req.depth] as const,
   integrity: (req: IntegrityRequest) => ['integrity', req.assetId, req.startUs, req.endUs] as const,
-  execution: (req: ExecutionRequest) =>
-    [
-      'execution',
-      req.orderId,
-      req.assetId,
-      req.startUs,
-      req.endUs,
-      req.limit,
-      req.offset,
-      req.order,
-    ] as const,
-  datasets: ['datasets'] as const,
 }
 
 // --- Query hooks ---
@@ -148,7 +127,6 @@ export function useReplayReconstruction(
               asset_id: request.assetId,
               at_us: String(request.atUs),
               mode: request.mode,
-              source: 'parquet',
               depth: String(request.depth),
             }),
             // Historical reconstruction can scan a wide window; the default 4s
@@ -189,80 +167,6 @@ export function useIntegritySummary(
     enabled: isDemo || Boolean(request),
     staleTime: isDemo ? Number.POSITIVE_INFINITY : BACKGROUND_INTERVAL_MS,
     ...opts,
-  })
-}
-
-export function useExecutionTimeline(
-  request: ExecutionRequest | null,
-  opts?: Partial<UseQueryOptions<ExecutionTimelineResponse>>,
-) {
-  const sourceMode = useSourceModeContext()
-  const base = getApiBaseUrl()
-  const isDemo = sourceMode === 'demo'
-  return useQuery({
-    queryKey: [sourceMode, ...(request ? queryKeys.execution(request) : ['execution-disabled'])],
-    queryFn: isDemo
-      ? () => getDemoExecution()
-      : ({ signal }) => {
-          if (!request) throw new Error('No execution request')
-          const params: Record<string, string> = {
-            start_us: String(request.startUs),
-            end_us: String(request.endUs),
-          }
-          if (request.orderId) params.order_id = request.orderId
-          if (request.assetId) params.asset_id = request.assetId
-          if (request.limit !== undefined) params.limit = String(request.limit)
-          if (request.offset !== undefined) params.offset = String(request.offset)
-          if (request.order !== undefined) params.order = request.order
-          return fetchAndValidate(
-            executionTimelineResponseSchema,
-            buildUrl(base, '/api/v1/execution/orders', params),
-            { signal },
-          )
-        },
-    enabled: isDemo || Boolean(request),
-    staleTime: isDemo ? Number.POSITIVE_INFINITY : BACKGROUND_INTERVAL_MS,
-    ...opts,
-  })
-}
-
-export function useDatasets(opts?: Partial<UseQueryOptions<DatasetSchemaResponse>>) {
-  const sourceMode = useSourceModeContext()
-  const base = getApiBaseUrl()
-  const isDemo = sourceMode === 'demo'
-  return useQuery({
-    queryKey: [sourceMode, ...queryKeys.datasets],
-    queryFn: isDemo
-      ? () => getDemoDatasets()
-      : ({ signal }) =>
-          fetchAndValidate(datasetSchemaResponseSchema, buildUrl(base, '/api/v1/query/datasets'), {
-            signal,
-          }),
-    staleTime: isDemo ? Number.POSITIVE_INFINITY : 60_000,
-    ...opts,
-  })
-}
-
-export function useQuerySql() {
-  const sourceMode = useSourceModeContext()
-  const base = getApiBaseUrl()
-  const isDemo = sourceMode === 'demo'
-
-  return useMutation({
-    mutationFn: async (sql: string) => {
-      if (isDemo) {
-        return getDemoQueryResult()
-      }
-      // The SQL workbench runs analytic queries that can legitimately take
-      // longer than the default snappy-read timeout. Allow up to just above the
-      // server-side query timeout so valid queries are not aborted client-side.
-      return postAndValidate(
-        queryResultResponseSchema,
-        buildUrl(base, '/api/v1/query/sql'),
-        { sql },
-        { timeoutMs: 35_000 },
-      )
-    },
   })
 }
 

@@ -8,9 +8,6 @@ pub enum StoreError {
     #[error("Arrow schema/conversion error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
-    #[error("ClickHouse query/insert error: {0}")]
-    ClickHouse(#[from] clickhouse::error::Error),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

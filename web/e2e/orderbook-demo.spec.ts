@@ -26,15 +26,6 @@ test.describe('Orderbook page in demo mode', () => {
     }).toPass({ timeout: 5_000 })
   })
 
-  test('query page returns fixture results instead of erroring', async ({ page }) => {
-    await page.goto('/query?source=demo')
-
-    // The editor is pre-seeded, so Run works on the first click.
-    await page.getByRole('button', { name: /run/i }).click()
-    await expect(page.getByText('btc-5m-yes').first()).toBeVisible()
-    await expect(page.getByText(/failed/i)).not.toBeVisible()
-  })
-
   test('replay form is prefilled and reconstructs on first click', async ({ page }) => {
     await page.goto('/replay?source=demo')
 

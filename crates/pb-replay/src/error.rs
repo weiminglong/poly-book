@@ -14,9 +14,6 @@ pub enum ReplayError {
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
-    #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] clickhouse::error::Error),
-
     #[error("book reconstruction error: {0}")]
     BookError(#[from] pb_book::BookError),
 

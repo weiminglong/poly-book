@@ -27,10 +27,7 @@ object_store = { workspace = true }
 url = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
-clickhouse = { workspace = true }
 serde = { workspace = true }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
 tempfile = "3"
 
 [[test]]
@@ -54,16 +51,8 @@ name = "schema_conversion"
 path = "schema_conversion.rs"
 
 [[test]]
-name = "clickhouse_roundtrip"
-path = "clickhouse_roundtrip.rs"
-
-[[test]]
 name = "checkpoint_wal_hydration"
 path = "checkpoint_wal_hydration.rs"
-
-[[test]]
-name = "cross_backend_service"
-path = "cross_backend_service.rs"
 
 [[test]]
 name = "s3_minio_roundtrip"

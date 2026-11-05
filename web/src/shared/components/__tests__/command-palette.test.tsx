@@ -81,9 +81,7 @@ describe('CommandPalette', () => {
     expect(screen.getByText('Live Feed')).toBeInTheDocument()
     expect(screen.getByText('Orderbook')).toBeInTheDocument()
     expect(screen.getByText('Replay Workbench')).toBeInTheDocument()
-    expect(screen.getByText('Execution Inspector')).toBeInTheDocument()
     expect(screen.getByText('Integrity Dashboard')).toBeInTheDocument()
-    expect(screen.getByText('Query Workbench')).toBeInTheDocument()
   })
 
   // ---------------------------------------------------------------------------
@@ -108,8 +106,6 @@ describe('CommandPalette', () => {
     // Other navigation items should be filtered out
     expect(screen.queryByText('Live Feed')).not.toBeInTheDocument()
     expect(screen.queryByText('Replay Workbench')).not.toBeInTheDocument()
-    expect(screen.queryByText('Execution Inspector')).not.toBeInTheDocument()
     expect(screen.queryByText('Integrity Dashboard')).not.toBeInTheDocument()
-    expect(screen.queryByText('Query Workbench')).not.toBeInTheDocument()
   })
 })

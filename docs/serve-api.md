@@ -20,7 +20,7 @@ It is not meant for:
 - live order submission
 - risk controls
 - execution control
-- research query serving beyond the current narrow API
+- research query serving
 
 ## Runtime Topology
 
@@ -57,9 +57,8 @@ book from raw feed messages directly.
 
 ## Why It Is Read-Only
 
-The current repository has market-data ingestion, replay, metrics, and
-execution journaling, but it does not yet own the full trading control-plane
-requirements:
+The current repository has market-data ingestion, replay, and metrics, but it
+does not yet own the full trading control-plane requirements:
 
 - authentication and authorization
 - risk checks and kill switches
@@ -93,18 +92,12 @@ unset by default outside Docker. Static assets are served without auth — the
 UI is public code, while every data route it calls still requires the bearer
 token when one is configured.
 
-## Configurable Historical Backend
+## Historical Service
 
-Historical routes (replay, integrity, execution) are served through `pb-service`
-traits with configurable backends:
-
-- `api.historical_backend = "parquet"` (default) — uses `ParquetReader` via
-  `pb-replay`; local files and cloud object stores share the same range-read path
-  and recovered partitions are selected through atomic recovery manifests
-- `api.historical_backend = "clickhouse"` — uses `ClickHouseReader` via `pb-replay`
-
-If ClickHouse is configured but unavailable at startup, the system probes
-connectivity with a 3-second timeout and falls back to Parquet with a warning.
+Historical routes (replay, integrity) are served through
+`pb_service::HistoricalService`, which wraps a `ParquetReader` from
+`pb-replay`; local files and cloud object stores share the same range-read path
+and recovered partitions are selected through atomic recovery manifests.
 
 ## Process Separation
 
@@ -196,35 +189,10 @@ The current implementation exposes:
 - `GET /api/v1/orderbooks/{asset_id}/snapshot`
 - `GET /api/v1/replay/reconstruct`
 - `GET /api/v1/integrity/summary`
-- `GET /api/v1/execution/orders`
 - `GET /health`
-- `GET /api/v1/query/datasets`
-- `POST /api/v1/query/sql`
 - `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
-
-### Query Workbench
-
-When `api.query_workbench_enabled = true` and the historical backend is
-`clickhouse`, the query workbench endpoints become active:
-
-- `GET /api/v1/query/datasets` — lists available tables and their column schemas
-- `POST /api/v1/query/sql` — executes a read-only SQL query with guard rails
-
-Guard rails:
-- Write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`,
-  `TRUNCATE`) are rejected at the adapter level
-- Quoted identifiers are scanned, so quoted I/O table functions and `system`
-  database references are rejected
-- SQL can reference only the advertised datasets: `book_events`,
-  `trade_events`, `ingest_events`, `book_checkpoints`, `replay_validations`,
-  and `execution_events`
-- `LIMIT` is injected if not present (default `query_max_rows = 10000`)
-- Queries time out after `query_timeout_secs` (default 30s)
-- ClickHouse transport/decode errors strip request URL context before becoming
-  internal API errors, so credential-bearing backend URLs do not enter API logs
-- Both endpoints return 503 when the query workbench is disabled
 
 ### Health Endpoints
 
@@ -253,9 +221,9 @@ The separate SPA talks to these HTTP and WebSocket routes. The currently shipped
 web surfaces are:
 
 - `Live Feed`
+- `Orderbook`
 - `Replay Lab`
 - `Integrity`
-- `Execution Timeline`
 
 Current browser transport behavior:
 

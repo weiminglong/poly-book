@@ -7,18 +7,17 @@
 #       system against the real venue.
 #
 #   docker compose --profile full up --build
-#       The production process separation: `ingest` (feed -> WAL + Parquet +
-#       ClickHouse sinks) and `serve` (checkpoint hydration -> WAL tail -> API
-#       + UI) over a shared data volume, plus ClickHouse warm storage.
-#       UI at http://localhost:3000, ClickHouse at http://localhost:8123.
+#       The production process separation: `ingest` (feed -> WAL + Parquet)
+#       and `serve` (checkpoint hydration -> WAL tail -> API + UI) over a
+#       shared data volume. UI at http://localhost:3000.
 #
 #   docker compose --profile full --profile observability up --build
 #       Adds Prometheus (alert rules loaded), Alertmanager, and Grafana with
 #       the committed dashboard provisioned. Grafana at http://localhost:3001
 #       (anonymous admin, local only), Prometheus at http://localhost:9091.
 #
-# Trust boundary: only the UI/API, Grafana, Prometheus, and ClickHouse HTTP
-# ports are mapped to the host. Metrics endpoints stay on the compose-internal
+# Trust boundary: only the UI/API, Grafana, and Prometheus ports are mapped to
+# the host. Metrics endpoints stay on the compose-internal
 # network. Do not expose this compose file's ports beyond localhost without
 # setting PB__API__AUTH_TOKEN.
 
@@ -56,13 +55,9 @@ services:
       ["--config", "/etc/poly-book/default.toml", "auto-ingest"]
     environment:
       PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
-      PB__STORAGE__CLICKHOUSE_URL: http://clickhouse:8123
       PB__LOGGING__LEVEL: info
     volumes:
       - pipeline-data:/data
-    depends_on:
-      clickhouse:
-        condition: service_healthy
 
   serve:
     build: .
@@ -73,8 +68,6 @@ services:
     environment:
       PB__API__LISTEN_ADDR: 0.0.0.0:3000
       PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
-      PB__STORAGE__CLICKHOUSE_URL: http://clickhouse:8123
-      PB__API__HISTORICAL_BACKEND: clickhouse
       PB__LOGGING__LEVEL: info
     ports:
       - "127.0.0.1:3000:3000"
@@ -90,25 +83,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    profiles: [full]
-    environment:
-      CLICKHOUSE_SKIP_USER_SETUP: "1"
-    ports:
-      - "127.0.0.1:8123:8123"
-    volumes:
-      - clickhouse-data:/var/lib/clickhouse
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8123/ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
 
   # --- observability: Prometheus + Alertmanager + Grafana ------------------
   prometheus:
@@ -144,4 +118,3 @@ services:
 volumes:
   workstation-data:
   pipeline-data:
-  clickhouse-data:

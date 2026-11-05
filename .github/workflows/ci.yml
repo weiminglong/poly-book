@@ -32,8 +32,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --exclude pb-integration-tests
-      # Integration suite. The ClickHouse-backed cases are #[ignore]d and
-      # skipped here; the Parquet/hydration/replay roundtrips run.
+      # Integration suite without Docker: the Parquet/hydration/replay
+      # roundtrips. The MinIO-backed S3 case is #[ignore]d and runs below.
       - run: cargo test -p pb-integration-tests
 
   integration-docker:
@@ -65,12 +65,8 @@ jobs:
           docker run --rm --network host --entrypoint /bin/sh \
             minio/mc:RELEASE.2025-07-21T05-28-08Z \
             -c 'mc alias set local http://127.0.0.1:9100 minioadmin minioadmin && mc mb --ignore-existing local/poly-book-test'
-      # The #[ignore]d cases: ClickHouse roundtrips, Parquet-vs-ClickHouse
-      # cross-backend equivalence, and the MinIO S3 roundtrip — the strongest
-      # consistency evidence in the suite, previously never enforced in CI.
-      # Ubuntu runners ship a working Docker daemon for testcontainers.
-      # Single-threaded: the containers are memory-hungry and the tests share
-      # fixed host ports.
+      # The #[ignore]d case: the MinIO S3 roundtrip through the production
+      # ParquetReader (persist, restart, read back over the object store).
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
         env:
           PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100

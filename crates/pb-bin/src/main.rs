@@ -49,9 +49,6 @@ enum Commands {
         /// Enable Parquet storage (use --parquet=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
-        /// Enable ClickHouse storage (use --clickhouse=true to enable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
-        clickhouse: bool,
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
@@ -68,33 +65,13 @@ enum Commands {
         /// Target timestamp in microseconds since epoch
         #[arg(long)]
         at: u64,
-        /// Data source: "parquet" or "clickhouse"
-        #[arg(long, default_value = "parquet")]
-        source: String,
         /// Replay ordering mode: "recv_time" or "exchange_time"
-        #[arg(long)]
+        #[arg(long, default_value = "recv_time")]
         mode: String,
         /// Validate against the next checkpoint and persist the validation result
         #[arg(long, default_value_t = false)]
         validate: bool,
     },
-    /// Replay stored execution history independently of market-data replay
-    ExecutionReplay {
-        /// Optional order ID filter
-        #[arg(long)]
-        order_id: Option<String>,
-        /// Start timestamp in microseconds since epoch
-        #[arg(long)]
-        start: u64,
-        /// End timestamp in microseconds since epoch
-        #[arg(long)]
-        end: u64,
-        /// Data source: "parquet" or "clickhouse"
-        #[arg(long, default_value = "parquet")]
-        source: String,
-    },
-    /// Append execution events to storage from flags or JSON input
-    ExecutionAppend(Box<commands::execution_append::ExecutionAppendArgs>),
     /// Backfill historical data via REST API snapshots
     Backfill {
         /// Comma-separated token IDs to backfill
@@ -112,9 +89,6 @@ enum Commands {
         /// Enable Parquet storage (use --parquet=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
-        /// Enable ClickHouse storage (use --clickhouse=true to enable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
-        clickhouse: bool,
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
@@ -123,7 +97,7 @@ enum Commands {
     /// dependency (feed endpoints, storage paths, ports); exits non-zero on
     /// failure so it can gate deploys
     Doctor {
-        /// Skip feed/ClickHouse reachability probes (offline/CI use)
+        /// Skip feed reachability probes (offline/CI use)
         #[arg(long, default_value_t = false)]
         skip_network: bool,
     },
@@ -282,7 +256,6 @@ async fn main() -> Result<()> {
         Commands::Ingest {
             tokens,
             parquet,
-            clickhouse,
             metrics,
             standby,
         } => {
@@ -290,7 +263,6 @@ async fn main() -> Result<()> {
                 settings,
                 tokens,
                 parquet,
-                clickhouse,
                 metrics,
                 standby,
                 shutdown,
@@ -301,22 +273,10 @@ async fn main() -> Result<()> {
         Commands::Replay {
             token,
             at,
-            source,
             mode,
             validate,
         } => {
-            commands::replay::run(settings, token, at, source, mode, validate).await?;
-        }
-        Commands::ExecutionReplay {
-            order_id,
-            start,
-            end,
-            source,
-        } => {
-            commands::execution_replay::run(settings, order_id, start, end, source).await?;
-        }
-        Commands::ExecutionAppend(args) => {
-            commands::execution_append::run(settings, *args).await?;
+            commands::replay::run(settings, token, at, mode, validate).await?;
         }
         Commands::Backfill {
             tokens,
@@ -333,20 +293,8 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::AutoIngest {
-            parquet,
-            clickhouse,
-            metrics,
-        } => {
-            commands::auto_ingest::run(
-                settings,
-                parquet,
-                clickhouse,
-                metrics,
-                shutdown,
-                slug_registry,
-            )
-            .await?;
+        Commands::AutoIngest { parquet, metrics } => {
+            commands::auto_ingest::run(settings, parquet, metrics, shutdown, slug_registry).await?;
         }
         Commands::Doctor { skip_network } => {
             commands::doctor::run(settings, skip_network).await?;
@@ -487,13 +435,11 @@ mod tests {
             Commands::Ingest {
                 tokens,
                 parquet,
-                clickhouse,
                 metrics,
                 standby,
             } => {
                 assert!(tokens.is_none());
                 assert!(parquet);
-                assert!(!clickhouse);
                 assert!(metrics);
                 assert!(!standby);
             }
@@ -512,20 +458,10 @@ mod tests {
 
     #[test]
     fn parse_ingest_with_tokens() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "ingest",
-            "--tokens",
-            "tok1,tok2",
-            "--clickhouse",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--tokens", "tok1,tok2"]).unwrap();
         match cli.command {
-            Commands::Ingest {
-                tokens, clickhouse, ..
-            } => {
+            Commands::Ingest { tokens, .. } => {
                 assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
-                assert!(clickhouse);
             }
             _ => panic!("expected Ingest"),
         }
@@ -534,27 +470,22 @@ mod tests {
     #[test]
     fn ingest_toggles_can_be_disabled_and_presence_still_enables() {
         // Default-true toggles must be disable-able with `=false`, while a
-        // bare `--clickhouse` still enables via default_missing_value.
+        // bare `--metrics` still enables via default_missing_value.
         let cli = Cli::try_parse_from([
             "poly-book",
             "ingest",
             "--tokens",
             "tok1",
-            "--metrics=false",
+            "--metrics",
             "--parquet=false",
-            "--clickhouse",
         ])
         .unwrap();
         match cli.command {
             Commands::Ingest {
-                metrics,
-                parquet,
-                clickhouse,
-                ..
+                metrics, parquet, ..
             } => {
-                assert!(!metrics, "--metrics=false should disable metrics");
+                assert!(metrics, "bare --metrics should enable metrics");
                 assert!(!parquet, "--parquet=false should disable parquet");
-                assert!(clickhouse, "bare --clickhouse should enable clickhouse");
             }
             _ => panic!("expected Ingest"),
         }
@@ -577,44 +508,15 @@ mod tests {
             Commands::Replay {
                 token,
                 at,
-                source,
                 mode,
                 validate,
             } => {
                 assert_eq!(token, "tok1");
                 assert_eq!(at, 1_000_000);
-                assert_eq!(source, "parquet");
                 assert_eq!(mode, "recv_time");
                 assert!(!validate);
             }
             _ => panic!("expected Replay"),
-        }
-    }
-
-    #[test]
-    fn parse_execution_replay() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "execution-replay",
-            "--start",
-            "100",
-            "--end",
-            "200",
-        ])
-        .unwrap();
-        match cli.command {
-            Commands::ExecutionReplay {
-                order_id,
-                start,
-                end,
-                source,
-            } => {
-                assert!(order_id.is_none());
-                assert_eq!(start, 100);
-                assert_eq!(end, 200);
-                assert_eq!(source, "parquet");
-            }
-            _ => panic!("expected ExecutionReplay"),
         }
     }
 
@@ -647,13 +549,8 @@ mod tests {
     fn parse_auto_ingest() {
         let cli = Cli::try_parse_from(["poly-book", "auto-ingest"]).unwrap();
         match cli.command {
-            Commands::AutoIngest {
-                parquet,
-                clickhouse,
-                metrics,
-            } => {
+            Commands::AutoIngest { parquet, metrics } => {
                 assert!(parquet);
-                assert!(!clickhouse);
                 assert!(metrics);
             }
             _ => panic!("expected AutoIngest"),
@@ -726,9 +623,15 @@ mod tests {
 
     #[test]
     fn parse_replay_missing_required_args_fails() {
-        // --token and --at and --mode are required
+        // --token and --at are required; --mode defaults to recv_time
         let result = Cli::try_parse_from(["poly-book", "replay", "--token", "tok1"]);
         assert!(result.is_err());
+        let cli =
+            Cli::try_parse_from(["poly-book", "replay", "--token", "tok1", "--at", "5"]).unwrap();
+        match cli.command {
+            Commands::Replay { mode, .. } => assert_eq!(mode, "recv_time"),
+            _ => panic!("expected Replay"),
+        }
     }
 
     #[test]

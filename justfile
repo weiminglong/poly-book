@@ -70,7 +70,7 @@ backfill tokens:
 # ── Data Inspection (DuckDB) ─────────────────────────────────
 # Datasets are split into separate Parquet trees with different schemas
 # (book_events, trade_events, ingest_events, book_checkpoints,
-# replay_validations, execution_events). Inspect ONE dataset at a time — globbing
+# replay_validations). Inspect ONE dataset at a time — globbing
 # across all of them mixes incompatible schemas. Override the dataset, e.g.
 # `just parquet-count trade_events`.
 
@@ -124,7 +124,7 @@ demo:
 up:
     docker compose --profile minimal up --build
 
-# Full topology: ingest + serve (shared WAL) + ClickHouse
+# Full topology: ingest + serve over a shared WAL volume
 up-full:
     docker compose --profile full up --build
 

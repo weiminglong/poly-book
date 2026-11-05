@@ -93,7 +93,6 @@ pub async fn start_metrics_server(settings: &Config) -> Result<()> {
 
 pub struct SinkHandles {
     pub parquet_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
-    pub clickhouse_tx: Option<mpsc::Sender<pb_types::PersistedRecord>>,
 }
 
 /// Supervises long-lived background tasks. Each task is tagged with a stable
@@ -254,7 +253,6 @@ async fn probe_object_store_read(
 pub async fn start_storage_sinks(
     settings: &Config,
     enable_parquet: bool,
-    enable_clickhouse: bool,
     supervisor: &mut Supervisor,
 ) -> Result<SinkHandles> {
     let parquet_tx = if enable_parquet {
@@ -279,41 +277,7 @@ pub async fn start_storage_sinks(
         None
     };
 
-    let clickhouse_tx = if enable_clickhouse {
-        let ch_url = settings
-            .get_string("storage.clickhouse_url")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        let ch_db = settings
-            .get_string("storage.clickhouse_database")
-            .unwrap_or_else(|_| "poly_book".to_string());
-
-        let (ctx, crx) = mpsc::channel::<pb_types::PersistedRecord>(10_000);
-        let client = clickhouse::Client::default()
-            .with_url(&ch_url)
-            .with_database(&ch_db);
-        let batch_size = cfg_int_min(settings, "storage.clickhouse_batch_size", 10_000, 1) as usize;
-        // min 1s: a 0 interval would make the batch timer fire continuously.
-        let batch_interval_secs =
-            cfg_int_min(settings, "storage.clickhouse_batch_interval_secs", 1, 1) as u64;
-        let sink = pb_store::ClickHouseSink::new(crx, client)
-            .with_batch_config(batch_size, Duration::from_secs(batch_interval_secs));
-        if let Err(e) = sink.ensure_table().await {
-            tracing::warn!(error = %e, "failed to ensure ClickHouse table (will retry on insert)");
-        }
-        supervisor.spawn("clickhouse-sink", async move {
-            if let Err(e) = sink.run().await {
-                tracing::error!(error = %e, "clickhouse sink failed");
-            }
-        });
-        Some(ctx)
-    } else {
-        None
-    };
-
-    Ok(SinkHandles {
-        parquet_tx,
-        clickhouse_tx,
-    })
+    Ok(SinkHandles { parquet_tx })
 }
 
 pub fn checkpoint_config_from_settings(
@@ -486,164 +450,16 @@ pub fn validate_api_auth_boundary(api_addr: SocketAddr, auth_token: Option<&str>
     Ok(())
 }
 
-pub fn redact_url_for_log(raw: &str) -> String {
-    match url::Url::parse(raw) {
-        Ok(mut parsed) => {
-            if !parsed.username().is_empty() {
-                let _ = parsed.set_username("redacted");
-            }
-            if parsed.password().is_some() {
-                let _ = parsed.set_password(Some("redacted"));
-            }
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            parsed.to_string()
-        }
-        Err(_) => "<invalid-url>".to_string(),
-    }
-}
-
-/// Build service backends from config.
-///
-/// Reads `api.historical_backend` (default: "parquet") to select the backend.
-/// If "clickhouse" is selected but the connection cannot be established, falls
-/// back to Parquet with a warning.
-pub async fn build_services(
-    settings: &Config,
-) -> Result<(
-    pb_service::AnyReplayService,
-    pb_service::AnyIntegrityService,
-    pb_service::AnyExecutionService,
-)> {
-    let backend = settings
-        .get_string("api.historical_backend")
-        .unwrap_or_else(|_| "parquet".to_string());
+/// Build the Parquet-backed historical service from config.
+pub async fn build_historical_service(settings: &Config) -> Result<pb_service::HistoricalService> {
     let parquet_base_path = settings
         .get_string("storage.parquet_base_path")
         .unwrap_or_else(|_| "./data".to_string());
-
-    match backend.as_str() {
-        "clickhouse" => {
-            let ch_url = settings
-                .get_string("storage.clickhouse_url")
-                .unwrap_or_else(|_| "http://localhost:8123".to_string());
-            let ch_db = settings
-                .get_string("storage.clickhouse_database")
-                .unwrap_or_else(|_| "poly_book".to_string());
-
-            // Probe ClickHouse connectivity before committing to it.
-            let probe_client = clickhouse::Client::default()
-                .with_url(&ch_url)
-                .with_database(&ch_db);
-            let probe = tokio::time::timeout(
-                Duration::from_secs(3),
-                probe_client.query("SELECT 1").fetch_one::<u8>(),
-            )
-            .await;
-
-            match probe {
-                Ok(Ok(_)) => {
-                    tracing::info!(
-                        url = %redact_url_for_log(&ch_url),
-                        database = %ch_db,
-                        "using ClickHouse historical backend"
-                    );
-                    return Ok((
-                        pb_service::AnyReplayService::ClickHouse(
-                            pb_service::ClickHouseReplayService::new(&ch_url, &ch_db),
-                        ),
-                        pb_service::AnyIntegrityService::ClickHouse(
-                            pb_service::ClickHouseIntegrityService::new(&ch_url, &ch_db),
-                        ),
-                        pb_service::AnyExecutionService::ClickHouse(
-                            pb_service::ClickHouseExecutionService::new(&ch_url, &ch_db),
-                        ),
-                    ));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        error = %e,
-                        url = %redact_url_for_log(&ch_url),
-                        "ClickHouse unavailable, falling back to Parquet"
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        url = %redact_url_for_log(&ch_url),
-                        "ClickHouse probe timed out, falling back to Parquet"
-                    );
-                }
-            }
-        }
-        other if other != "parquet" => {
-            tracing::warn!(
-                backend = %other,
-                "unknown historical_backend, falling back to parquet"
-            );
-        }
-        _ => {}
-    }
-
     tracing::info!(path = %parquet_base_path, "using Parquet historical backend");
     let (store, base_path) = build_object_store(&parquet_base_path)?;
     probe_object_store_read(&store, &base_path).await?;
     let reader = pb_replay::ParquetReader::from_store(store, base_path);
-    Ok((
-        pb_service::AnyReplayService::Parquet(pb_service::ParquetReplayService::from_reader(
-            reader.clone(),
-        )),
-        pb_service::AnyIntegrityService::Parquet(pb_service::ParquetIntegrityService::from_reader(
-            reader.clone(),
-        )),
-        pb_service::AnyExecutionService::Parquet(pb_service::ParquetExecutionService::from_reader(
-            reader,
-        )),
-    ))
-}
-
-/// Build the query service from config.
-///
-/// Returns `None` if `api.query_workbench_enabled` is not set to `true`.
-pub async fn build_query_service(
-    settings: &Config,
-    effective_backend_is_clickhouse: bool,
-) -> Option<pb_service::AnyQueryService> {
-    let enabled = settings
-        .get_bool("api.query_workbench_enabled")
-        .unwrap_or(false);
-    if !enabled {
-        tracing::info!("query workbench disabled");
-        return None;
-    }
-
-    if effective_backend_is_clickhouse {
-        let ch_url = settings
-            .get_string("storage.clickhouse_url")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        let ch_db = settings
-            .get_string("storage.clickhouse_database")
-            .unwrap_or_else(|_| "poly_book".to_string());
-        tracing::info!(
-            url = %redact_url_for_log(&ch_url),
-            database = %ch_db,
-            "query workbench enabled (ClickHouse)"
-        );
-        Some(pb_service::AnyQueryService::ClickHouse(
-            pb_service::ClickHouseQueryService::new(&ch_url, &ch_db),
-        ))
-    } else {
-        tracing::warn!(
-            "query workbench requires the effective historical backend to be ClickHouse"
-        );
-        None
-    }
-}
-
-/// Read query guard settings from config.
-pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
-    let max_rows = cfg_int_min(settings, "api.query_max_rows", 10_000, 1) as usize;
-    let timeout_secs = cfg_int_min(settings, "api.query_timeout_secs", 30, 1) as u64;
-    (max_rows, timeout_secs)
+    Ok(pb_service::HistoricalService::from_reader(reader))
 }
 
 pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
@@ -969,46 +785,6 @@ mod tests {
         assert_eq!(cfg.reconnect_max_delay_ms, 60000);
     }
 
-    // --- query_config_from_settings ---
-
-    #[test]
-    fn query_config_defaults() {
-        let (max_rows, timeout) = query_config_from_settings(&empty_config());
-        assert_eq!(max_rows, 10_000);
-        assert_eq!(timeout, 30);
-    }
-
-    #[test]
-    fn query_config_overrides() {
-        let settings = Config::builder()
-            .set_override("api.query_max_rows", 5000)
-            .unwrap()
-            .set_override("api.query_timeout_secs", 60)
-            .unwrap()
-            .build()
-            .unwrap();
-        let (max_rows, timeout) = query_config_from_settings(&settings);
-        assert_eq!(max_rows, 5000);
-        assert_eq!(timeout, 60);
-    }
-
-    #[tokio::test]
-    async fn query_service_uses_the_effective_backend_after_fallback() {
-        let settings = Config::builder()
-            .set_override("api.query_workbench_enabled", true)
-            .unwrap()
-            .set_override("api.historical_backend", "clickhouse")
-            .unwrap()
-            .build()
-            .unwrap();
-
-        assert!(build_query_service(&settings, false).await.is_none());
-        assert!(matches!(
-            build_query_service(&settings, true).await,
-            Some(pb_service::AnyQueryService::ClickHouse(_))
-        ));
-    }
-
     #[test]
     fn api_auth_token_from_settings_trims_empty_values() {
         assert_eq!(api_auth_token_from_settings(&empty_config()), None);
@@ -1030,19 +806,6 @@ mod tests {
         assert!(validate_api_auth_boundary(api_loopback, None).is_ok());
         assert!(validate_api_auth_boundary(api_external, None).is_err());
         assert!(validate_api_auth_boundary(api_external, Some("secret")).is_ok());
-    }
-
-    #[test]
-    fn redact_url_for_log_removes_credentials_query_and_fragment() {
-        assert_eq!(
-            redact_url_for_log("http://user:pass@clickhouse:8123/path?password=secret#frag"),
-            "http://redacted:redacted@clickhouse:8123/path"
-        );
-        assert_eq!(
-            redact_url_for_log("http://clickhouse:8123?secret=x"),
-            "http://clickhouse:8123/"
-        );
-        assert_eq!(redact_url_for_log("not a url"), "<invalid-url>");
     }
 
     // --- checkpoint_config_from_settings ---

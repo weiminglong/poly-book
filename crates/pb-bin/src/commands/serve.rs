@@ -124,13 +124,7 @@ pub async fn run(
     );
 
     // Build and start HTTP/WS server.
-    let (replay_service, integrity_service, execution_service) =
-        pipeline::build_services(&settings).await?;
-    let effective_backend_is_clickhouse =
-        matches!(&replay_service, pb_service::AnyReplayService::ClickHouse(_));
-    let query_service =
-        pipeline::build_query_service(&settings, effective_backend_is_clickhouse).await;
-    let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
+    let historical = pipeline::build_historical_service(&settings).await?;
     let auth_token = pipeline::api_auth_token_from_settings(&settings);
     pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
@@ -141,8 +135,6 @@ pub async fn run(
             default_depth,
             max_depth,
             stale_after_secs,
-            query_max_rows,
-            query_timeout_secs,
             http_request_timeout_secs: pipeline::cfg_int_min(
                 &settings,
                 "api.http_request_timeout_secs",
@@ -158,10 +150,7 @@ pub async fn run(
         },
         broadcast: Some(broadcast),
         slug_registry,
-        replay_service,
-        integrity_service,
-        execution_service,
-        query_service,
+        historical,
         wal_lag_bytes,
         needs_resync,
     };

@@ -174,8 +174,7 @@ def main() -> int:
             f"{fmt_ns(r['stddev_ns'])} |"
         )
     a("")
-    a("The ClickHouse-backed cross-backend comparison bench requires a running")
-    a("ClickHouse and is not part of this run.")
+    a("All Criterion benchmarks in the workspace are included in this run.")
     a("")
 
     OUT.write_text("\n".join(lines))

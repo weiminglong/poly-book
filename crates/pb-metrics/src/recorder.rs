@@ -51,10 +51,7 @@ pub fn register_metrics() {
         "pb_stale_snapshots_skipped_total",
         "Total stale snapshots skipped"
     );
-    describe_counter!(
-        "pb_storage_flushes_total",
-        "Total storage flushes (parquet + clickhouse)"
-    );
+    describe_counter!("pb_storage_flushes_total", "Total storage flushes");
     describe_counter!("pb_rest_requests_total", "Total REST API requests made");
     describe_counter!("pb_rotations_total", "Total market rotations performed");
     describe_counter!(

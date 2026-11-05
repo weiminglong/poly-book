@@ -9,11 +9,9 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/ClickHouse/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
+| `ingest` | Start live orderbook ingestion with Parquet/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
 | `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
-| `replay` | Reconstruct historical orderbook state at a specific timestamp. |
-| `execution-replay` | Replay stored execution history independently of market-data replay. |
-| `execution-append` | Append execution events to storage from flags or JSON input. |
+| `replay` | Reconstruct historical orderbook state at a specific timestamp (`--mode` defaults to `recv_time`). |
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
 | `serve` | Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS). |
@@ -27,7 +25,7 @@ config/default.toml  →  env vars (PB__ prefix)  →  CLI flags
 
 Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`.
 
-Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
+Example: `PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data`
 
 ## Design Notes
 
@@ -49,9 +47,6 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   `Arc<Mutex<_>>` overhead).
 - `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic
   shared between `ingest` and `auto_ingest`.
-- ClickHouse URLs are redacted before logging so userinfo, passwords, query
-  parameters, and fragments are not emitted during backend probes or query
-  workbench startup.
 - Forwarder tasks use idiomatic `while let` receive loops instead of
   `tokio::select!` patterns.
 - **Task supervision**: long-lived background tasks (feed, dispatcher, storage

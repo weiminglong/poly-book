@@ -28,8 +28,7 @@ deploy (`poly-book doctor && poly-book ingest`). Checks: unknown config keys
 (a hard failure here, unlike the warn-only startup path), Parquet path
 writability, WAL directory state (segments, consumer positions, last-write
 age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
-through the same connector the feed uses, ClickHouse ping (warn-only — it is
-an optional component), and API/metrics port availability.
+through the same connector the feed uses, and API/metrics port availability.
 
 Current defaults:
 
@@ -119,7 +118,6 @@ Primary datasets:
 - `ingest_events`
 - `book_checkpoints`
 - `replay_validations`
-- `execution_events`
 
 ### WAL Layout
 
@@ -152,7 +150,7 @@ unrecognized version rather than silently misreading bytes:
 | Format | Version constant | Reader gate |
 |---|---|---|
 | WAL frame codec | `pb_wal::codec::CURRENT_VERSION` (currently `2`) | `decode` rejects any other version byte; pre-v2 frames return an error with a "drain and re-create the WAL" hint |
-| Parquet / ClickHouse columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
+| Parquet columns | `pb_store::schema::PB_SCHEMA_VERSION` (currently `"2"`, written as the `pb_schema_version` Parquet key-value metadata on every file) | `pb-replay`'s Parquet reader rejects files whose `pb_schema_version` differs from the expected version |
 
 Frozen golden fixtures (`golden_codec_book_v2_bytes_are_stable` in `pb-wal`, and
 the determinism fixture in `tests/integration/book_determinism.rs`) make any
@@ -166,7 +164,7 @@ deliberate act.
    version bump. A field whose absence changes meaning, a re-typed/removed field,
    or any reordering that breaks the frozen golden bytes **does**.
 2. **Bump exactly one constant** — `CURRENT_VERSION` for WAL frame changes,
-   `PB_SCHEMA_VERSION` for Parquet/ClickHouse column changes — in the same commit
+   `PB_SCHEMA_VERSION` for Parquet column changes — in the same commit
    as the format change.
 3. **Add a cross-version fixture** capturing the *previous* version's bytes and a
    test asserting the new reader either reads them or rejects them with a clear,
@@ -175,15 +173,13 @@ deliberate act.
    store: stop `ingest`, let `serve` consume to the end, then let the new build
    create fresh segments. Old segments are not auto-upgraded — a version mismatch
    is surfaced, not papered over.
-5. **Re-snapshot / migrate Parquet and ClickHouse.** Historical Parquet files keep
+5. **Re-snapshot / migrate Parquet.** Historical Parquet files keep
    their original `pb_schema_version`. Either (a) keep readers able to accept the
    prior version for the retention window, or (b) use a dedicated migration or
    re-export from the durable source of truth for every affected dataset.
    `backfill` only creates book checkpoints, while `reconcile` only republishes
    complete retained-WAL hours for book, trade, and ingest data; neither is a
-   general migration path for all six datasets or arbitrary history. ClickHouse
-   column changes go through a normal `ALTER TABLE` migration before the new
-   writer starts.
+   general migration path for all five datasets or arbitrary history.
 6. **Verify with replay.** Run the golden replay regression and a
    `replay validate` over a migrated window before promoting the deploy.
 
@@ -202,7 +198,7 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
   Playwright end-to-end tests against the built bundle
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
 
-Outside the per-PR gate: fuzz smoke tests (all six targets at 30s each on
+Outside the per-PR gate: fuzz smoke tests (all five targets at 30s each on
 nightly Rust) run nightly and on pushes to `main` (`fuzz.yml`), and
 `cargo-deny` (advisories, bans, licenses, sources) runs on PRs and weekly
 (`supply-chain.yml`).
@@ -265,10 +261,10 @@ pre-seeds every asset's book from its first captured venue snapshot, then
 streams the records into the same read model the live pipeline uses — at
 original cadence (divided by `--speed`), looping forever, with provenance
 timestamps shifted to the wall clock so live surfaces read as current.
-Historical routes (replay, integrity, execution) answer from the capture with
-its original timestamps; the startup banner prints copy-paste examples with
-known-good values. The SQL workbench stays disabled (ClickHouse-only). Any
-directory produced by `ingest`/`auto-ingest` works as `--data-dir`.
+Historical routes (replay, integrity) answer from the capture with its
+original timestamps; the startup banner prints copy-paste examples with
+known-good values. Any directory produced by `ingest`/`auto-ingest` works as
+`--data-dir`.
 
 ### Docker Compose (one command)
 
@@ -276,7 +272,7 @@ directory produced by `ingest`/`auto-ingest` works as `--data-dir`.
 # One-container live workstation: feed + API + web UI at http://localhost:3000
 docker compose --profile minimal up --build      # or: just up
 
-# Production process separation: ingest + serve (shared WAL volume) + ClickHouse
+# Production process separation: ingest + serve (shared WAL volume)
 docker compose --profile full up --build         # or: just up-full
 
 # Full topology plus Prometheus/Alertmanager/Grafana (Grafana at :3001)
@@ -357,9 +353,9 @@ default 512 MiB maintenance-task class.
 
 Only datasets partitioned exactly by receive time are eligible: `book_events`,
 `trade_events`, and `ingest_events`. `book_checkpoints` uses exchange snapshot
-time, while validation and execution timestamps are independently supplied;
-those partitions are left untouched because the retained WAL endpoints cannot
-prove them complete.
+time, while validation timestamps are independently supplied; those
+partitions are left untouched because the retained WAL endpoints cannot prove
+them complete.
 
 For each eligible `(dataset, asset, hour)`, recovery performs a two-phase cut:
 
@@ -378,9 +374,9 @@ application view is still published but the command exits non-zero; direct
 DuckDB/Polars scans are unsafe until a rerun reports zero cleanup failures.
 After clean promotion and cleanup, the active object is in the normal tree for
 direct inspection. The command is idempotent and does not commit a consumer
-position. ClickHouse is not rebuilt by this command.
-Do not run `backfill`, `execution-append`, or another Parquet-writing task
-against the same prefix concurrently: those commands do not share the WAL lease,
+position.
+Do not run `backfill` or another Parquet-writing task against the same prefix
+concurrently: those commands do not share the WAL lease,
 and a write racing the manifest cut would make the recovered view ambiguous.
 Application reads retry manifest resolution once if cleanup crosses a request.
 Stop ad-hoc DuckDB/Polars scans during the maintenance cut, and do not resume
@@ -434,45 +430,6 @@ failover drill — which adds container scheduling + health-check time on top of
 locally-measured durability-layer handoff above. The single-writer flock +
 `--standby` auto-promotion + durable storage + `reconcile` is the supported
 recovery path.
-
-### Historical Backend Selection
-
-Set `api.historical_backend` to choose the query backend for replay, integrity,
-and execution routes:
-
-```bash
-PB__API__HISTORICAL_BACKEND=clickhouse cargo run -- serve-api --auto-rotate
-```
-
-If ClickHouse is configured but unreachable at startup, the system falls back to
-Parquet with a warning.
-
-### Query Workbench
-
-Enable the query workbench for ad-hoc read-only SQL against ClickHouse:
-
-```bash
-PB__API__QUERY_WORKBENCH_ENABLED=true \
-PB__API__HISTORICAL_BACKEND=clickhouse \
-cargo run -- serve-api --auto-rotate
-```
-
-```bash
-# List available datasets
-curl http://localhost:3000/api/v1/query/datasets
-
-# Execute a query
-curl -X POST http://localhost:3000/api/v1/query/sql \
-  -H 'Content-Type: application/json' \
-  -d '{"sql": "SELECT count() FROM book_events", "max_rows": 100}'
-```
-
-The workbench rejects write SQL, dangerous ClickHouse table functions (including
-quoted identifiers), and table references outside the advertised dataset
-allowlist. It injects `LIMIT` if not present. ClickHouse transport and decode
-errors strip request URL context before they become internal API errors, so
-credential-bearing backend URLs do not enter API logs. Returns 503 when disabled
-(the default).
 
 ### Health Endpoints
 
@@ -547,11 +504,9 @@ byte retention window), so disk usage stays bounded.
 - read-only HTTP and WebSocket API
 - live feed status and active asset visibility
 - live in-memory order book snapshots and per-asset WS streaming
-- configurable Parquet or ClickHouse historical backend
-- replay reconstruction, integrity summaries, execution timeline inspection
+- Parquet-backed replay reconstruction and integrity summaries
 - WAL gap detection, lag tracking, and backpressure-aware pruning
 - health endpoint with hydration and WAL status
-- query workbench for ad-hoc read-only SQL (ClickHouse backend, opt-in)
 
 ### Not Yet Provided
 
@@ -563,9 +518,9 @@ byte retention window), so disk usage stays bounded.
 The SPA currently ships:
 
 - `Live Feed`
+- `Orderbook`
 - `Replay Lab`
 - `Integrity`
-- `Execution Timeline`
 
 ### Running API and Web App Together
 
@@ -628,4 +583,3 @@ VITE_API_BASE_URL=http://127.0.0.1:3000 npm run dev
 ### Deferred from the Current SPA Pass
 
 - Latency (reserved for metrics-backed summaries)
-- Query Workbench SPA view (backend routes are implemented and opt-in)

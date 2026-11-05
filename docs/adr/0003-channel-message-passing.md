@@ -15,7 +15,6 @@ Dispatcher runs single-threaded — no locks on the book update path.
 
 ```
 WS → mpsc → Dispatcher → mpsc → ParquetSink
-                       → mpsc → ClickHouseSink
                        → mpsc → LiveReadModel
 ```
 

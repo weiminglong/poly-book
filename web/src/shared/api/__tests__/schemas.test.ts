@@ -1,22 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   demoActiveAssets,
-  demoDatasets,
-  demoExecutionTimeline,
   demoFeedStatus,
   demoIntegritySummary,
-  demoQueryResult,
   getDemoReplay,
   getDemoSnapshot,
 } from '../../api/demo-fixtures'
 import {
   activeAssetsResponseSchema,
-  datasetSchemaResponseSchema,
-  executionTimelineResponseSchema,
   feedStatusResponseSchema,
   integritySummaryResponseSchema,
   liveOrderBookSnapshotSchema,
-  queryResultResponseSchema,
   replayReconstructionResponseSchema,
 } from '../schemas'
 
@@ -45,21 +39,6 @@ describe('Zod schema round-trip validation against demo fixtures', () => {
 
   it('demoIntegritySummary passes integritySummaryResponseSchema', () => {
     const result = integritySummaryResponseSchema.safeParse(demoIntegritySummary)
-    expect(result.success).toBe(true)
-  })
-
-  it('demoExecutionTimeline passes executionTimelineResponseSchema', () => {
-    const result = executionTimelineResponseSchema.safeParse(demoExecutionTimeline)
-    expect(result.success).toBe(true)
-  })
-
-  it('demoDatasets passes datasetSchemaResponseSchema', () => {
-    const result = datasetSchemaResponseSchema.safeParse(demoDatasets)
-    expect(result.success).toBe(true)
-  })
-
-  it('demoQueryResult passes queryResultResponseSchema', () => {
-    const result = queryResultResponseSchema.safeParse(demoQueryResult)
     expect(result.success).toBe(true)
   })
 })

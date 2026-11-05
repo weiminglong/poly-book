@@ -6,12 +6,9 @@ use axum::extract::{DefaultBodyLimit, MatchedPath, Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
-use pb_service::{
-    AnyExecutionService, AnyIntegrityService, AnyQueryService, AnyReplayService, ExecutionService,
-    IntegrityService, QueryService, ReplayService,
-};
+use pb_service::HistoricalService;
 use pb_types::{AssetId, ReplayMode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -19,10 +16,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{
-    AssetRef, AssetResolveResponse, CompletenessLabel, ContinuityWarning, DatasetInfo,
-    DatasetSchemaResponse, ExecutionEventView, ExecutionTimelineResponse, FeedStatusResponse,
-    IntegritySummaryResponse, LatencyTraceView, LiveOrderBookSnapshot, QueryColumn,
-    QueryResultResponse, ReplayReconstructionResponse,
+    AssetRef, AssetResolveResponse, CompletenessLabel, ContinuityWarning, FeedStatusResponse,
+    IntegritySummaryResponse, LiveOrderBookSnapshot, ReplayReconstructionResponse,
 };
 use crate::error::ApiError;
 use crate::live_state::{LiveReadModel, SnapshotLookupError};
@@ -33,8 +28,6 @@ pub struct ApiConfig {
     pub default_depth: usize,
     pub max_depth: usize,
     pub stale_after_secs: u64,
-    pub query_max_rows: usize,
-    pub query_timeout_secs: u64,
     /// Per-request wall-clock timeout for request/response HTTP routes, in
     /// seconds. Production defaults to `DEFAULT_HTTP_REQUEST_TIMEOUT_SECS` (30);
     /// tests set a large value so the timeout is not load-sensitive under the
@@ -58,10 +51,8 @@ pub struct AppState {
     pub config: ApiConfig,
     pub broadcast: Option<crate::streaming::BookBroadcast>,
     pub slug_registry: pb_types::SlugRegistry,
-    pub replay_service: AnyReplayService,
-    pub integrity_service: AnyIntegrityService,
-    pub execution_service: AnyExecutionService,
-    pub query_service: Option<AnyQueryService>,
+    /// Parquet-backed replay and integrity queries.
+    pub historical: HistoricalService,
     /// WAL consumer lag in bytes, updated by the WAL tailer.
     pub wal_lag_bytes: Arc<AtomicU64>,
     /// Whether the WAL reader detected a segment gap and needs re-hydration.
@@ -78,7 +69,6 @@ struct ReplayQuery {
     asset_id: String,
     at_us: u64,
     mode: String,
-    source: Option<String>,
     depth: Option<usize>,
 }
 
@@ -90,27 +80,8 @@ struct IntegrityQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecutionQuery {
-    order_id: Option<String>,
-    asset_id: Option<String>,
-    start_us: u64,
-    end_us: u64,
-    limit: Option<usize>,
-    /// Server-side pagination offset into the ordered result set.
-    offset: Option<usize>,
-    /// Result ordering: `desc` (default, most recent first) or `asc`.
-    order: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct ResolveQuery {
     q: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct QuerySqlRequest {
-    sql: String,
-    max_rows: Option<usize>,
 }
 
 /// Resolve a slug or token ID to the canonical token ID string.
@@ -136,7 +107,7 @@ pub const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Max in-flight HTTP API requests; excess requests wait for a slot. Bounds the
 /// blast radius of expensive historical/replay queries.
 const MAX_INFLIGHT_HTTP_REQUESTS: usize = 256;
-/// Max request body size for HTTP routes (the SQL workbench POST in particular).
+/// Max request body size for HTTP routes.
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
 
 fn http_concurrency_limiter() -> &'static Semaphore {
@@ -159,9 +130,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/replay/reconstruct", get(replay_reconstruct))
         .route("/api/v1/assets/resolve", get(asset_resolve))
         .route("/api/v1/integrity/summary", get(integrity_summary))
-        .route("/api/v1/execution/orders", get(execution_orders))
-        .route("/api/v1/query/datasets", get(query_datasets))
-        .route("/api/v1/query/sql", post(query_sql))
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -402,16 +370,10 @@ async fn replay_reconstruct(
         query.depth.unwrap_or(state.config.default_depth),
         state.config.max_depth,
     )?;
-    let source = query.source.as_deref().unwrap_or("parquet");
-    if source != "parquet" {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported replay source: {source}"
-        )));
-    }
     let mode = parse_replay_mode(&query.mode)?;
     let asset_id = AssetId::new(asset_id_str.clone());
     let result = state
-        .replay_service
+        .historical
         .reconstruct(&asset_id, query.at_us, mode, Some(depth))
         .await?;
 
@@ -459,35 +421,15 @@ async fn asset_resolve(
     }
 }
 
-const EXECUTION_DEFAULT_LIMIT: usize = 100;
-const EXECUTION_MAX_LIMIT: usize = 1000;
-const MAX_QUERY_WINDOW_US: u64 = 24 * 3_600 * 1_000_000; // 24 hours
-
-fn validate_time_window(start_us: u64, end_us: u64) -> Result<(), ApiError> {
-    if start_us >= end_us {
-        return Err(ApiError::BadRequest(
-            "start_us must be less than end_us".to_string(),
-        ));
-    }
-    if end_us - start_us > MAX_QUERY_WINDOW_US {
-        return Err(ApiError::BadRequest(format!(
-            "time window exceeds maximum of {} hours",
-            MAX_QUERY_WINDOW_US / 3_600_000_000
-        )));
-    }
-    Ok(())
-}
-
 async fn integrity_summary(
     State(state): State<AppState>,
     Query(query): Query<IntegrityQuery>,
 ) -> Result<Json<IntegritySummaryResponse>, ApiError> {
     let asset_id_str = resolve_asset_id(&state, &query.asset_id);
-    validate_time_window(query.start_us, query.end_us)?;
     let asset_id = AssetId::new(asset_id_str.clone());
     let summary = state
-        .integrity_service
-        .summary(&asset_id, query.start_us, query.end_us)
+        .historical
+        .integrity_summary(&asset_id, query.start_us, query.end_us)
         .await?;
 
     let validation_count = summary.validation_count as u32;
@@ -516,148 +458,6 @@ async fn integrity_summary(
             .into_iter()
             .map(service_continuity_warning)
             .collect(),
-    }))
-}
-
-async fn execution_orders(
-    State(state): State<AppState>,
-    Query(query): Query<ExecutionQuery>,
-) -> Result<Json<ExecutionTimelineResponse>, ApiError> {
-    validate_time_window(query.start_us, query.end_us)?;
-    let limit = query.limit.unwrap_or(EXECUTION_DEFAULT_LIMIT);
-    if limit == 0 || limit > EXECUTION_MAX_LIMIT {
-        return Err(ApiError::BadRequest(format!(
-            "limit must be between 1 and {EXECUTION_MAX_LIMIT}"
-        )));
-    }
-    let offset = query.offset.unwrap_or(0);
-    // Default to most-recent-first, which is what an execution inspector usually
-    // wants; `order=asc` pages forward from the window start.
-    let descending = match query.order.as_deref() {
-        None | Some("desc") => true,
-        Some("asc") => false,
-        Some(other) => {
-            return Err(ApiError::BadRequest(format!(
-                "order must be 'asc' or 'desc', got '{other}'"
-            )));
-        }
-    };
-
-    let asset_id = query
-        .asset_id
-        .as_ref()
-        .map(|raw| resolve_asset_id(&state, raw))
-        .map(|s| AssetId::new(s.as_str()));
-    let timeline = state
-        .execution_service
-        .timeline(
-            asset_id.as_ref(),
-            query.order_id.as_deref(),
-            query.start_us,
-            query.end_us,
-            limit,
-            offset,
-            descending,
-        )
-        .await?;
-
-    let views: Vec<ExecutionEventView> = timeline
-        .events
-        .into_iter()
-        .map(execution_event_view)
-        .collect();
-
-    Ok(Json(ExecutionTimelineResponse {
-        events: views,
-        total_count: timeline.total_count as u64,
-    }))
-}
-
-fn execution_event_view(event: pb_types::ExecutionEvent) -> ExecutionEventView {
-    ExecutionEventView {
-        event_timestamp_us: event.event_timestamp_us,
-        asset_id: event.asset_id.map(|id| id.to_string()),
-        order_id: event.order_id,
-        client_order_id: event.client_order_id,
-        venue_order_id: event.venue_order_id,
-        kind: event.kind.to_string(),
-        side: event.side.map(|s| s.to_string()),
-        price: event.price,
-        size: event.size,
-        status: event.status,
-        reason: event.reason,
-        latency: LatencyTraceView {
-            market_data_recv_us: event.latency.market_data_recv_us,
-            normalization_done_us: event.latency.normalization_done_us,
-            strategy_decision_us: event.latency.strategy_decision_us,
-            order_submit_us: event.latency.order_submit_us,
-            exchange_ack_us: event.latency.exchange_ack_us,
-            exchange_fill_us: event.latency.exchange_fill_us,
-        },
-    }
-}
-
-async fn query_datasets(
-    State(state): State<AppState>,
-) -> Result<Json<DatasetSchemaResponse>, ApiError> {
-    let service = state.query_service.as_ref().ok_or_else(|| {
-        ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
-    })?;
-    let datasets = service.list_datasets().await?;
-    Ok(Json(DatasetSchemaResponse {
-        datasets: datasets
-            .into_iter()
-            .map(|d| DatasetInfo {
-                name: d.name,
-                description: d.description,
-                columns: d
-                    .columns
-                    .into_iter()
-                    .map(|c| QueryColumn {
-                        name: c.name,
-                        data_type: c.data_type,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }))
-}
-
-async fn query_sql(
-    State(state): State<AppState>,
-    Json(req): Json<QuerySqlRequest>,
-) -> Result<Json<QueryResultResponse>, ApiError> {
-    let service = state.query_service.as_ref().ok_or_else(|| {
-        ApiError::ServiceUnavailable("query workbench is not enabled".to_string())
-    })?;
-
-    // Clamp the client-supplied row cap to the configured ceiling so a request
-    // cannot raise its own limit above the server policy.
-    let ceiling = state.config.query_max_rows.max(1);
-    let max_rows = req
-        .max_rows
-        .map(|requested| requested.clamp(1, ceiling))
-        .unwrap_or(ceiling);
-    let guard = pb_service::QueryGuard {
-        max_rows,
-        timeout_secs: state.config.query_timeout_secs,
-    };
-
-    let result = service.execute_sql(&req.sql, &guard).await?;
-
-    Ok(Json(QueryResultResponse {
-        columns: result
-            .columns
-            .into_iter()
-            .map(|c| QueryColumn {
-                name: c.name,
-                data_type: c.data_type,
-            })
-            .collect(),
-        rows: result.rows,
-        row_count: result.row_count as u64,
-        truncated: result.truncated,
-        execution_time_ms: result.execution_time_ms,
     }))
 }
 
@@ -751,8 +551,6 @@ mod tests {
                 default_depth: 20,
                 max_depth: 200,
                 stale_after_secs: 60,
-                query_max_rows: 10_000,
-                query_timeout_secs: 30,
                 // Large in tests so the per-request timeout is not load-sensitive
                 // under the parallel workspace run (the replay tests do real
                 // Parquet reads and could exceed a 30s wall clock when the CPU is
@@ -763,16 +561,7 @@ mod tests {
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
-            replay_service: AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
-                &temp_path,
-            )),
-            integrity_service: AnyIntegrityService::Parquet(
-                pb_service::ParquetIntegrityService::new(&temp_path),
-            ),
-            execution_service: AnyExecutionService::Parquet(
-                pb_service::ParquetExecutionService::new(&temp_path),
-            ),
-            query_service: None,
+            historical: HistoricalService::new(&temp_path),
             wal_lag_bytes: Arc::new(AtomicU64::new(0)),
             needs_resync: Arc::new(AtomicBool::new(false)),
         }
@@ -1222,241 +1011,6 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/integrity/summary?asset_id=tok1&start_us=200&end_us=100")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn execution_orders_returns_timeline_from_parquet() {
-        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let base_path = tmp_dir.path().to_string_lossy().to_string();
-        let writer = parquet_writer(&base_path);
-        let base_ts = 1_700_000_000_000_000u64;
-
-        writer
-            .write_batch(&[
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: base_ts,
-                    asset_id: Some(AssetId::new("tok1")),
-                    order_id: "order-1".to_string(),
-                    client_order_id: Some("client-1".to_string()),
-                    venue_order_id: None,
-                    kind: ExecutionEventKind::SubmitIntent,
-                    side: Some(Side::Bid),
-                    price: Some(FixedPrice::new(5000).unwrap()),
-                    size: Some(FixedSize::from_f64(10.0).unwrap()),
-                    status: None,
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                }),
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: base_ts + 100,
-                    asset_id: Some(AssetId::new("tok1")),
-                    order_id: "order-1".to_string(),
-                    client_order_id: Some("client-1".to_string()),
-                    venue_order_id: Some("venue-1".to_string()),
-                    kind: ExecutionEventKind::ExchangeAck,
-                    side: Some(Side::Bid),
-                    price: Some(FixedPrice::new(5000).unwrap()),
-                    size: Some(FixedSize::from_f64(10.0).unwrap()),
-                    status: Some("accepted".to_string()),
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                }),
-            ])
-            .await
-            .unwrap();
-
-        let app = router(test_state(base_path).await);
-        let end_ts = base_ts + 1_000_000;
-        // order=asc to assert chronological ordering explicitly.
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&order=asc"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let timeline: crate::dto::ExecutionTimelineResponse = response_json(response).await;
-        assert_eq!(timeline.total_count, 2);
-        assert_eq!(timeline.events.len(), 2);
-        assert_eq!(timeline.events[0].order_id, "order-1");
-        assert_eq!(timeline.events[0].kind, "submit_intent");
-        assert_eq!(timeline.events[1].kind, "exchange_ack");
-    }
-
-    #[tokio::test]
-    async fn execution_orders_defaults_to_most_recent_first_and_paginates() {
-        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let base_path = tmp_dir.path().to_string_lossy().to_string();
-        let writer = parquet_writer(&base_path);
-        let base_ts = 1_700_000_000_000_000u64;
-
-        let records: Vec<PersistedRecord> = (0..5)
-            .map(|i| {
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: base_ts + i * 10,
-                    asset_id: Some(AssetId::new("tok1")),
-                    order_id: format!("order-{i}"),
-                    client_order_id: None,
-                    venue_order_id: None,
-                    kind: ExecutionEventKind::SubmitIntent,
-                    side: Some(Side::Bid),
-                    price: None,
-                    size: None,
-                    status: None,
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                })
-            })
-            .collect();
-        writer.write_batch(&records).await.unwrap();
-
-        let state = test_state(base_path).await;
-        let end_ts = base_ts + 1_000_000;
-
-        // Default order (desc) + limit 2 → the two most recent, newest first.
-        let response = router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let page1: crate::dto::ExecutionTimelineResponse = response_json(response).await;
-        assert_eq!(page1.total_count, 5);
-        assert_eq!(page1.events.len(), 2);
-        assert_eq!(page1.events[0].order_id, "order-4");
-        assert_eq!(page1.events[1].order_id, "order-3");
-
-        // Next page via offset=2 → the next two most recent.
-        let response = router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/execution/orders?start_us={base_ts}&end_us={end_ts}&limit=2&offset=2"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let page2: crate::dto::ExecutionTimelineResponse = response_json(response).await;
-        assert_eq!(page2.total_count, 5);
-        assert_eq!(page2.events.len(), 2);
-        assert_eq!(page2.events[0].order_id, "order-2");
-        assert_eq!(page2.events[1].order_id, "order-1");
-    }
-
-    #[tokio::test]
-    async fn execution_orders_rejects_invalid_order_param() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/execution/orders?start_us=1&end_us=2&order=sideways")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn execution_orders_filters_by_order_id() {
-        use pb_types::event::{ExecutionEvent, ExecutionEventKind, LatencyTrace};
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let base_path = tmp_dir.path().to_string_lossy().to_string();
-        let writer = parquet_writer(&base_path);
-        let base_ts = 1_700_000_000_000_000u64;
-
-        writer
-            .write_batch(&[
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: base_ts,
-                    asset_id: Some(AssetId::new("tok1")),
-                    order_id: "order-A".to_string(),
-                    client_order_id: None,
-                    venue_order_id: None,
-                    kind: ExecutionEventKind::SubmitIntent,
-                    side: Some(Side::Bid),
-                    price: None,
-                    size: None,
-                    status: None,
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                }),
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: base_ts + 50,
-                    asset_id: Some(AssetId::new("tok1")),
-                    order_id: "order-B".to_string(),
-                    client_order_id: None,
-                    venue_order_id: None,
-                    kind: ExecutionEventKind::SubmitIntent,
-                    side: Some(Side::Ask),
-                    price: None,
-                    size: None,
-                    status: None,
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                }),
-            ])
-            .await
-            .unwrap();
-
-        let app = router(test_state(base_path).await);
-        let end_ts = base_ts + 1_000_000;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/execution/orders?order_id=order-A&start_us={base_ts}&end_us={end_ts}"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let timeline: crate::dto::ExecutionTimelineResponse = response_json(response).await;
-        assert_eq!(timeline.total_count, 1);
-        assert_eq!(timeline.events[0].order_id, "order-A");
-    }
-
-    #[tokio::test]
-    async fn execution_orders_returns_400_for_invalid_limit() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/execution/orders?start_us=100&end_us=200&limit=0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1942,44 +1496,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_sql_returns_503_when_disabled() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/query/sql")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"sql":"SELECT 1"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn query_datasets_returns_503_when_disabled() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/query/datasets")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
     async fn health_reports_not_ready_when_resync_needed() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let state = test_state(tmp_dir.path().to_string_lossy().to_string()).await;
@@ -2020,24 +1536,13 @@ mod tests {
                 default_depth: 20,
                 max_depth: 200,
                 stale_after_secs: 60,
-                query_max_rows: 10_000,
-                query_timeout_secs: 30,
                 http_request_timeout_secs: 600,
                 auth_token: None,
                 static_assets_dir: None,
             },
             broadcast: None,
             slug_registry: pb_types::SlugRegistry::new(),
-            replay_service: AnyReplayService::Parquet(pb_service::ParquetReplayService::new(
-                tmp_dir.path().to_str().unwrap(),
-            )),
-            integrity_service: AnyIntegrityService::Parquet(
-                pb_service::ParquetIntegrityService::new(tmp_dir.path().to_str().unwrap()),
-            ),
-            execution_service: AnyExecutionService::Parquet(
-                pb_service::ParquetExecutionService::new(tmp_dir.path().to_str().unwrap()),
-            ),
-            query_service: None,
+            historical: HistoricalService::new(tmp_dir.path().to_str().unwrap()),
             wal_lag_bytes: Arc::new(AtomicU64::new(0)),
             needs_resync: Arc::new(AtomicBool::new(false)),
         };
@@ -2213,64 +1718,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn execution_returns_400_for_reversed_time_window() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/execution/orders?start_us=500&end_us=100")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn execution_returns_400_for_limit_exceeding_max() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/execution/orders?start_us=100&end_us=200&limit=5000")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
     // -----------------------------------------------------------------------
     // Replay mode validation
     // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn replay_returns_400_for_unsupported_source() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let app = router(test_state(tmp_dir.path().to_string_lossy().to_string()).await);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(
-                        "/api/v1/replay/reconstruct?asset_id=tok1&at_us=100&mode=recv_time&source=clickhouse",
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: crate::dto::ApiErrorResponse = response_json(response).await;
-        assert!(body.error.contains("clickhouse"));
-    }
 
     #[tokio::test]
     async fn replay_exchange_time_mode_is_valid() {

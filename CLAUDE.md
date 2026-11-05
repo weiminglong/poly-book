@@ -8,10 +8,9 @@ and a read-only workstation API. Cargo workspace with crates under `crates/`.
 ```bash
 cargo check                                          # type-check all crates
 cargo test --workspace --exclude pb-integration-tests # unit + property tests
-cargo bench                                          # Criterion benchmarks (pb-types, pb-book, pb-wal, pb-api, pb-service)
+cargo bench                                          # Criterion benchmarks (pb-types, pb-book, pb-feed, pb-wal, pb-api)
 cargo +nightly fuzz run fuzz_book_delta               # fuzz targets (requires nightly)
 cargo +nightly fuzz run fuzz_codec_decode             # WAL codec decode fuzz target (requires nightly)
-cargo +nightly fuzz run fuzz_query_guard              # query guard fuzz target (requires nightly)
 cargo run -- --help                                  # CLI binary
 ```
 
@@ -19,7 +18,7 @@ cargo run -- --help                                  # CLI binary
 Single-threaded book updates, no locks on hot path. Components communicate via bounded `tokio::mpsc` channels.
 
 ```
-pb-feed (WS/REST) -> dispatcher -> pb-wal -> pb-store (Parquet + ClickHouse)
+pb-feed (WS/REST) -> dispatcher -> pb-wal -> pb-store (Parquet)
                     |                 |                  ^
                     v                 v                  |
                  pb-api <-- pb-service <-- pb-replay ----+
@@ -29,16 +28,16 @@ Full system diagram, crate dependency graph, and runtime topology:
 [docs/architecture.md](docs/architecture.md).
 
 ## Crates
-- **pb-api**: Read-only HTTP API with watch-based read model and per-asset WebSocket broadcasts. Thin HTTP adapters delegate to `pb-service` traits. Routes: feed status, active assets, live snapshots, replay, integrity, execution, streaming.
-- **pb-types**: Foundation types. `FixedPrice(u32)` scaled by 10,000, `FixedSize(u64)` scaled by 1,000,000. Persisted record model includes split datasets such as `BookEvent`, `TradeEvent`, `IngestEvent`, `BookCheckpoint`, `ReplayValidation`, and `ExecutionEvent`.
+- **pb-api**: Read-only HTTP API with watch-based read model and per-asset WebSocket broadcasts. Thin HTTP adapters delegate to `pb_service::HistoricalService`. Routes: feed status, active assets, live snapshots, replay, integrity, streaming.
+- **pb-types**: Foundation types. `FixedPrice(u32)` scaled by 10,000, `FixedSize(u64)` scaled by 1,000,000. Persisted record model is five split datasets: `BookEvent`, `TradeEvent`, `IngestEvent`, `BookCheckpoint`, and `ReplayValidation`.
 - **pb-book**: `L2Book` using `BTreeMap<Reverse<FixedPrice>, FixedSize>` for bids (best-first iteration). Methods: `apply_snapshot`, `apply_delta`, `best_bid/ask`, `mid_price`, `spread`, `weighted_mid_price`, `total_bid_size/total_ask_size`, `top_bids/top_asks`, `check_integrity`, `check_sequence`.
 - **pb-feed**: `WsClient` (reconnect with exp backoff + jitter), `RestClient` (with `RateLimiter` via governor), `Dispatcher` (deser + normalize to split `PersistedRecord` events). Dispatcher uses `FxHashMap` for hot-path lookups.
-- **pb-store**: `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ClickHouseSink` (1s batch, `MergeTree`).
-- **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
+- **pb-store**: Parquet storage sink and writer. `ParquetSink` (5-min flush, Zstd, `object_store` abstraction) and `ParquetRecordWriter`.
+- **pb-replay**: `EventReader` trait with `ParquetReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-wal**: Embedded write-ahead log. BufWriter-wrapped append-only segments with length-prefix + CRC32C framing. `WalWriter` appends, rotates, and reclaims sealed segments via `prune`/`prune_with_backpressure` (count-capped by `max_segments`, single-writer `flock`); `WalReader` tails with independent consumer positions. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
-- **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService`, `QueryService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, `AnyIntegrityService`, `AnyExecutionService`, `AnyQueryService`) for configurable backend selection.
+- **pb-service**: Transport-neutral domain service layer. One struct, `HistoricalService` (`new(base_path)` / `from_reader(ParquetReader)`), with async `reconstruct(asset_id, at_us, mode, depth)` and `integrity_summary(asset_id, start_us, end_us)` (24h window enforced via `validate_time_window`). Domain types: `ReplayResult`, `IntegritySummary`, `ContinuityEvent`, `CompletenessLevel`, `ServiceError`. Built in pb-bin via `pipeline::build_historical_service(&settings)`; held in `pb_api::AppState::historical`.
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
-- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, `serve`, `demo` (replay a committed capture as a simulated live feed behind the full API, offline), `doctor` (config + connectivity preflight, exits non-zero on failure), and `reconcile` (offline WAL→Parquet rebuild for crash recovery). Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
+- **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `serve-api`, `serve`, `demo` (replay a committed capture as a simulated live feed behind the full API, offline), `doctor` (config + connectivity preflight, exits non-zero on failure), and `reconcile` (offline WAL→Parquet rebuild for crash recovery). Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
 ## Per-Crate Documentation
 Each crate has a `README.md` at its root with: purpose, key types, data flow,
@@ -67,7 +66,7 @@ Each fact has one home. Do not restate it elsewhere; link instead:
 - ADRs in `docs/adr/` document key architectural decisions
 
 ## Config
-`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
+`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__PARQUET_BASE_PATH`).
 
 ## Read This First
 If you are working on the workstation API, frontend, or runtime boundaries, read
@@ -98,10 +97,10 @@ boundaries.
 ## Current Workstation Boundary
 The workstation backend is read-only with process separation:
 
-- `ingest` process: feed → dispatcher → WAL + storage sinks (Parquet, ClickHouse)
+- `ingest` process: feed → dispatcher → WAL + Parquet storage sink
 - `serve` process: checkpoint hydration → WAL tail → watch-based read model → HTTP/WS
 - `serve-api`: combined mode (feed + API in one process, no WAL)
-- configurable backend: `api.historical_backend = "parquet" | "clickhouse"` with auto-fallback
+- historical routes (replay, integrity) are Parquet-backed via `pb_service::HistoricalService`
 - WAL coordination: gap detection, lag tracking, backpressure pruning for multi-replica setups
 - current routes:
   - `GET /api/v1/feed/status`
@@ -110,10 +109,7 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/orderbooks/{asset_id}/snapshot`
   - `GET /api/v1/replay/reconstruct`
   - `GET /api/v1/integrity/summary`
-  - `GET /api/v1/execution/orders`
   - `GET /health`
-  - `GET /api/v1/query/datasets`
-  - `POST /api/v1/query/sql`
   - `WS /api/v1/streams/orderbook?asset_id=...`
 
 Deferred for later phases:
@@ -125,7 +121,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 
 - `check` — `cargo check --all-targets`
 - `test` — `cargo test --workspace --exclude pb-integration-tests` plus the non-Docker integration suite
-- `integration-docker` — the #[ignore]d Docker-backed integration cases (ClickHouse roundtrips, cross-backend equivalence, MinIO S3 roundtrip) via testcontainers
+- `integration-docker` — the #[ignore]d Docker-backed integration case (MinIO S3 round-trip through the production `ParquetReader`)
 - `clippy` — `cargo clippy --all-targets -- -D warnings`
 - `fmt` — `cargo fmt --all -- --check`
 - `monitoring` — `promtool check rules` + `promtool test rules` (alert-rule syntax + offline incident unit tests)
@@ -134,7 +130,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 - `e2e` — Playwright end-to-end tests (depends on `web` build artifact)
 - `miri` — undefined behavior checks on pb-types, pb-book
 
-Additional workflows: `fuzz.yml` (30s smoke runs of all six fuzz targets, nightly and on pushes to `main`), `supply-chain.yml` (cargo-deny: advisories, bans, licenses, sources; on PRs and weekly), `release.yml` (tags), `pages.yml` (hosted demo).
+Additional workflows: `fuzz.yml` (30s smoke runs of all five fuzz targets, nightly and on pushes to `main`), `supply-chain.yml` (cargo-deny: advisories, bans, licenses, sources; on PRs and weekly), `release.yml` (tags), `pages.yml` (hosted demo).
 
 ## Git Workflow
 - **Branch**: `feat/`, `fix/`, `docs/` prefix with kebab-case (e.g. `feat/discover-btc-5m-slug-lookup`)

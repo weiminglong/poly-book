@@ -89,5 +89,4 @@ iteration; the per-item column divides by the batch size.
 | `wire_deser/last_trade_price` | 259 ns | 262 ns | 5 ns |
 | `wire_deser/price_change_delta` | 504 ns | 509 ns | 11 ns |
 
-The ClickHouse-backed cross-backend comparison bench requires a running
-ClickHouse and is not part of this run.
+All Criterion benchmarks in the workspace are included in this run.

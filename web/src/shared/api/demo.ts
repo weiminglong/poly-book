@@ -1,11 +1,8 @@
 import type {
   ActiveAssetSummary,
-  DatasetSchemaResponse,
-  ExecutionTimelineResponse,
   FeedStatusResponse,
   IntegritySummaryResponse,
   LiveOrderBookSnapshot,
-  QueryResultResponse,
   ReplayFormValues,
   ReplayMode,
   ReplayReconstructionResponse,
@@ -56,19 +53,4 @@ export async function getDemoReplayDefaults(): Promise<ReplayFormValues> {
 export async function getDemoIntegrity(): Promise<IntegritySummaryResponse> {
   const f = await loadFixtures()
   return f.demoIntegritySummary
-}
-
-export async function getDemoExecution(): Promise<ExecutionTimelineResponse> {
-  const f = await loadFixtures()
-  return f.demoExecutionTimeline
-}
-
-export async function getDemoDatasets(): Promise<DatasetSchemaResponse> {
-  const f = await loadFixtures()
-  return f.demoDatasets
-}
-
-export async function getDemoQueryResult(): Promise<QueryResultResponse> {
-  const f = await loadFixtures()
-  return f.demoQueryResult
 }

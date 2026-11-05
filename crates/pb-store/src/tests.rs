@@ -14,9 +14,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use pb_types::event::{
-    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, ExecutionEvent,
-    ExecutionEventKind, IngestEvent, IngestEventKind, LatencyTrace, PersistedRecord, ReplayMode,
-    ReplayValidation, Side, TradeEvent,
+    BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, IngestEvent,
+    IngestEventKind, PersistedRecord, ReplayMode, ReplayValidation, Side, TradeEvent,
 };
 use pb_types::{AssetId, FixedPrice, FixedSize, PriceLevel, Sequence, TradeFidelity};
 
@@ -111,30 +110,6 @@ fn make_validation(persisted_at: u64) -> ReplayValidation {
     }
 }
 
-fn make_execution_event(event_ts: u64) -> ExecutionEvent {
-    ExecutionEvent {
-        event_timestamp_us: event_ts,
-        asset_id: Some(test_asset_id()),
-        order_id: "order-001".into(),
-        client_order_id: Some("client-001".into()),
-        venue_order_id: Some("venue-001".into()),
-        kind: ExecutionEventKind::SubmitIntent,
-        side: Some(Side::Bid),
-        price: Some(FixedPrice::new(4900).unwrap()),
-        size: Some(FixedSize::new(100_000)),
-        status: Some("pending".into()),
-        reason: None,
-        latency: LatencyTrace {
-            market_data_recv_us: Some(event_ts - 50),
-            normalization_done_us: Some(event_ts - 30),
-            strategy_decision_us: Some(event_ts - 10),
-            order_submit_us: Some(event_ts),
-            exchange_ack_us: None,
-            exchange_fill_us: None,
-        },
-    }
-}
-
 fn local_store(dir: &TempDir) -> Arc<dyn ObjectStore> {
     Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap())
 }
@@ -198,15 +173,6 @@ fn replay_validation_schema_has_correct_fields() {
 }
 
 #[test]
-fn execution_event_schema_has_correct_fields() {
-    let schema = execution_event_schema();
-    assert_eq!(schema.fields().len(), 12);
-    assert_eq!(schema.field(0).name(), "event_timestamp_us");
-    assert!(schema.field(1).is_nullable()); // asset_id
-    assert_eq!(schema.field(11).name(), "latency_json");
-}
-
-#[test]
 fn schema_for_record_dispatches_correctly() {
     let book = PersistedRecord::Book(make_book_event(FIXED_TS_US));
     assert_eq!(schema_for_record(&book).fields().len(), 12);
@@ -222,9 +188,6 @@ fn schema_for_record_dispatches_correctly() {
 
     let validation = PersistedRecord::Validation(make_validation(FIXED_TS_US));
     assert_eq!(schema_for_record(&validation).fields().len(), 7);
-
-    let execution = PersistedRecord::Execution(make_execution_event(FIXED_TS_US));
-    assert_eq!(schema_for_record(&execution).fields().len(), 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,14 +232,6 @@ fn validation_record_batch_roundtrip() {
     let batch = records_to_record_batch(&[&record]).unwrap();
     assert_eq!(batch.num_rows(), 1);
     assert_eq!(batch.num_columns(), 7);
-}
-
-#[test]
-fn execution_event_record_batch_roundtrip() {
-    let record = PersistedRecord::Execution(make_execution_event(FIXED_TS_US));
-    let batch = records_to_record_batch(&[&record]).unwrap();
-    assert_eq!(batch.num_rows(), 1);
-    assert_eq!(batch.num_columns(), 12);
 }
 
 #[test]
@@ -700,41 +655,6 @@ async fn reconcile_refuses_partial_hour_without_deleting_existing_data() {
 }
 
 #[tokio::test]
-async fn reconcile_refuses_dataset_without_receive_time_partition_proof() {
-    let dir = TempDir::new().unwrap();
-    let store = local_store(&dir);
-    let writer = ParquetRecordWriter::new(store.clone(), "data");
-    let record = PersistedRecord::Execution(make_execution_event(FIXED_TS_US));
-    writer.write_record(record.clone()).await.unwrap();
-
-    let hour_start = FIXED_TS_US / 3_600_000_000 * 3_600_000_000;
-    let coverage =
-        crate::writer::RecoveryCoverage::new(hour_start - 1, hour_start + 3_600_000_000).unwrap();
-    let error = writer
-        .write_batch_replacing(&[record], coverage)
-        .await
-        .unwrap_err();
-    assert!(matches!(error, StoreError::UnsafeRecovery(_)));
-
-    let parquet_files = store
-        .list(None)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|meta| {
-            meta.location
-                .filename()
-                .is_some_and(|name| name.ends_with(".parquet"))
-        })
-        .count();
-    assert_eq!(
-        parquet_files, 1,
-        "unsupported dataset must remain untouched"
-    );
-}
-
-#[tokio::test]
 async fn reconcile_delete_matches_asset_component_exactly() {
     let dir = TempDir::new().unwrap();
     let store = local_store(&dir);
@@ -862,7 +782,6 @@ async fn writer_all_record_types_produce_valid_parquet() {
         PersistedRecord::Ingest(make_ingest_event(FIXED_TS_US)),
         PersistedRecord::Checkpoint(make_checkpoint(FIXED_TS_US)),
         PersistedRecord::Validation(make_validation(FIXED_TS_US)),
-        PersistedRecord::Execution(make_execution_event(FIXED_TS_US)),
     ];
     writer.write_batch(&records).await.unwrap();
 
@@ -873,7 +792,7 @@ async fn writer_all_record_types_produce_valid_parquet() {
         .into_iter()
         .filter_map(|r| r.ok())
         .collect();
-    assert_eq!(entries.len(), 6, "six datasets should produce six files");
+    assert_eq!(entries.len(), 5, "five datasets should produce five files");
 
     for entry in &entries {
         let data = store

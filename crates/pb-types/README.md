@@ -2,7 +2,7 @@
 
 Shared fixed-point, wire, and persisted event types for the poly-book workspace.
 Every other crate depends on pb-types — it defines the foundational vocabulary
-for prices, sizes, identifiers, and the six event datasets that flow through
+for prices, sizes, identifiers, and the five event datasets that flow through
 the system.
 
 ## Key Types
@@ -14,13 +14,13 @@ the system.
 | `AssetId` | Typed newtype wrapping a string identifier for a market asset. Provides `storage_key()` for safe object-store filenames. |
 | `Sequence` | Monotonically increasing event sequence number. `const fn` constructors and accessors. |
 | `SlugRegistry` | Maps condition IDs to human-readable market slugs. |
-| `PersistedRecord` | Enum dispatching to the six event datasets below. |
+| `PersistedRecord` | Enum dispatching to the five event datasets below. |
 | `ParquetRecoveryManifest` | Versioned, atomically published object-store view for one recovered `(dataset, asset, hour)` partition. |
 | `time::normalize_to_micros` / `parse_to_micros` | The single timestamp-unit converter: classifies a raw value as s/ms/µs/ns by magnitude and returns microseconds (0 preserved as the unknown sentinel). Used by both the dispatcher and REST backfill so they never diverge. |
 
 ## Persisted Record Model
 
-Six event datasets, each with its own Parquet schema and ClickHouse table:
+Five event datasets, each with its own Parquet schema:
 
 | Dataset | Purpose |
 |---------|---------|
@@ -29,7 +29,6 @@ Six event datasets, each with its own Parquet schema and ClickHouse table:
 | `IngestEvent` | Feed lifecycle events plus continuity boundaries such as `source_reset`. |
 | `BookCheckpoint` | Full book state captured via periodic REST snapshots. |
 | `ReplayValidation` | REST-vs-replay comparison results from the replay engine. |
-| `ExecutionEvent` | Order lifecycle state changes (fill, cancel, etc.). |
 
 ## Dependents
 
@@ -65,7 +64,7 @@ pb-types ◄── pb-feed    (wire deserialization)
   `Sequence`.
 - Wire types borrow from raw buffers (`&'a str`) for zero-copy deserialization
   on the ingest hot path. See [ADR-0004](../../docs/adr/0004-zero-copy-deserialization.md).
-- `PersistedRecord` is the single enum that splits into all six datasets. Adding
+- `PersistedRecord` is the single enum that splits into all five datasets. Adding
   a new dataset means adding a variant here, plus corresponding schema and writer
   in pb-store and reader in pb-replay.
 - `storage_key_for()` percent-encodes asset partitions for Parquet object names,

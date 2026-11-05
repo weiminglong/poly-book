@@ -28,7 +28,7 @@ AT_US=1783332112508603      # a mid-capture instant
 Two encoding rules apply everywhere: prices and sizes are fixed-point decimal
 strings (4 and 6 decimal places), and timestamps are microseconds since the
 Unix epoch. Live surfaces (snapshot, feed status, streams) reflect the looping
-playback clock; historical surfaces (replay, integrity, execution) answer from
+playback clock; historical surfaces (replay, integrity) answer from
 the capture's original timestamps. Full contract: [`docs/api.md`](../docs/api.md).
 
 ## Health
@@ -193,55 +193,6 @@ curl "$BASE/api/v1/integrity/summary?asset_id=$ASSET&start_us=$START_US&end_us=$
 ```
 
 The window may not exceed 24 hours.
-
-## Execution orders
-
-```bash
-curl "$BASE/api/v1/execution/orders?start_us=$START_US&end_us=$END_US&limit=5"
-```
-
-```json
-{"events":[],"total_count":0}
-```
-
-The sample capture contains market data only, so the page is empty. When
-execution events exist (appended via `poly-book execution-append`), each
-event carries order IDs, kind, side, price, size, status, reason, and a
-latency trace; `total_count` is the pre-pagination total. Supports
-`order_id`, `asset_id`, `limit`, `offset`, and `order=asc|desc` parameters.
-
-## Query workbench
-
-```bash
-curl "$BASE/api/v1/query/datasets"
-curl -X POST "$BASE/api/v1/query/sql" \
-  -H 'content-type: application/json' \
-  -d '{"sql": "SELECT count(*) AS n FROM book_events"}'
-```
-
-The workbench is ClickHouse-backed and disabled in the offline demo (and by
-default), so both routes return 503:
-
-```json
-{"error":"service temporarily unavailable"}
-```
-
-With `api.query_workbench_enabled = true` and ClickHouse configured (see
-`docs/operations.md`), `datasets` lists each queryable dataset with its
-columns, and `sql` returns:
-
-```json
-{
-  "columns": [{"name": "n", "data_type": "UInt64"}],
-  "rows": [[517416]],
-  "row_count": 1,
-  "truncated": false,
-  "execution_time_ms": 4
-}
-```
-
-Only single read-only statements against the advertised datasets are
-accepted; a `LIMIT` is injected when missing.
 
 ## WebSocket orderbook stream
 

@@ -33,7 +33,6 @@ fn record_label(record: &PersistedRecord) -> &'static str {
         PersistedRecord::Ingest(_) => "ingest",
         PersistedRecord::Checkpoint(_) => "checkpoint",
         PersistedRecord::Validation(_) => "validation",
-        PersistedRecord::Execution(_) => "execution",
     }
 }
 
@@ -687,9 +686,7 @@ impl Dispatcher {
                     pb_metrics::record_gap_detected();
                 }
             }
-            PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => {}
+            PersistedRecord::Checkpoint(_) | PersistedRecord::Validation(_) => {}
         }
 
         let latency_pair = match &record {
@@ -705,9 +702,7 @@ impl Dispatcher {
                 event.provenance.recv_timestamp_us,
                 event.provenance.exchange_timestamp_us,
             )),
-            PersistedRecord::Checkpoint(_)
-            | PersistedRecord::Validation(_)
-            | PersistedRecord::Execution(_) => None,
+            PersistedRecord::Checkpoint(_) | PersistedRecord::Validation(_) => None,
         };
         if let Some((recv, exchange)) = latency_pair {
             if exchange > 0 && recv > exchange {
@@ -1747,10 +1742,7 @@ mod tests {
 
     #[test]
     fn record_label_covers_all_variants() {
-        use pb_types::event::{
-            BookCheckpoint, ExecutionEvent, ExecutionEventKind, LatencyTrace, ReplayMode,
-            ReplayValidation,
-        };
+        use pb_types::event::{BookCheckpoint, ReplayMode, ReplayValidation};
 
         let prov = EventProvenance {
             recv_timestamp_us: 0,
@@ -1829,23 +1821,6 @@ mod tests {
                 persisted_at_us: 0,
             })),
             "validation"
-        );
-        assert_eq!(
-            record_label(&PersistedRecord::Execution(ExecutionEvent {
-                event_timestamp_us: 0,
-                asset_id: None,
-                order_id: "o1".to_string(),
-                client_order_id: None,
-                venue_order_id: None,
-                kind: ExecutionEventKind::SubmitIntent,
-                side: None,
-                price: None,
-                size: None,
-                status: None,
-                reason: None,
-                latency: LatencyTrace::default(),
-            })),
-            "execution"
         );
     }
 

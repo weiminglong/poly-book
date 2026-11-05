@@ -26,7 +26,7 @@ Polymarket WS ──▶ WsClient ──▶ Dispatcher ──▶ PersistedRecord 
                                     ▲
 Polymarket REST ──▶ RestClient ─────┘
 
-Channel consumers: pb-store (ParquetSink, ClickHouseSink), pb-api (LiveReadModel)
+Channel consumers: pb-store (ParquetSink), pb-api (LiveReadModel)
 ```
 
 - `WsClient` sends `FeedMessage` values (wrapping `WsRawMessage` and

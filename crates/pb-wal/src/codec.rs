@@ -250,31 +250,6 @@ mod tests {
         })
     }
 
-    fn test_execution_record() -> PersistedRecord {
-        use pb_types::event::{ExecutionEventKind, LatencyTrace};
-        PersistedRecord::Execution(pb_types::event::ExecutionEvent {
-            event_timestamp_us: 6_000_000,
-            asset_id: Some(AssetId::new("tok1")),
-            order_id: "order-1".to_string(),
-            client_order_id: Some("client-1".to_string()),
-            venue_order_id: Some("venue-1".to_string()),
-            kind: ExecutionEventKind::Fill,
-            side: Some(Side::Bid),
-            price: Some(FixedPrice::new(5000).unwrap()),
-            size: Some(FixedSize::from_f64(10.0).unwrap()),
-            status: Some("filled".to_string()),
-            reason: None,
-            latency: LatencyTrace {
-                market_data_recv_us: Some(100),
-                normalization_done_us: Some(200),
-                strategy_decision_us: Some(300),
-                order_submit_us: Some(400),
-                exchange_ack_us: Some(500),
-                exchange_fill_us: Some(600),
-            },
-        })
-    }
-
     #[test]
     fn encode_decode_roundtrip_trade() {
         let record = test_trade_record();
@@ -294,14 +269,6 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_validation() {
         let record = test_validation_record();
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(format!("{decoded:?}"), format!("{record:?}"));
-    }
-
-    #[test]
-    fn encode_decode_roundtrip_execution() {
-        let record = test_execution_record();
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(format!("{decoded:?}"), format!("{record:?}"));
@@ -350,7 +317,6 @@ mod tests {
             test_trade_record(),
             test_checkpoint_record(),
             test_validation_record(),
-            test_execution_record(),
         ];
         for record in records {
             let encoded = encode(&record).unwrap();

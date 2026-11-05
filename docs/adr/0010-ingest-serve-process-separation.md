@@ -27,8 +27,8 @@ restart, redeploy, and evolve.
 Split the runtime into two processes with the WAL (ADR-0008) as the only
 handoff between them:
 
-- **`ingest`**: venue WebSocket → dispatcher → WAL writer + storage sinks
-  (Parquet, ClickHouse) + periodic checkpoints. Serves no HTTP.
+- **`ingest`**: venue WebSocket → dispatcher → WAL writer + Parquet storage
+  sink + periodic checkpoints. Serves no HTTP.
 - **`serve`**: on cold start, loads the latest `BookCheckpoint` (which carries
   the WAL offset it was taken at), replays WAL records from that offset, then
   live-tails the WAL into a watch-based read model serving HTTP/WS. Writes no

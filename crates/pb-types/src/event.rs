@@ -25,8 +25,6 @@ pub enum DataSource {
     WebSocket,
     RestSnapshot,
     ReplayValidator,
-    Strategy,
-    Exchange,
     System,
 }
 
@@ -36,8 +34,6 @@ impl std::fmt::Display for DataSource {
             DataSource::WebSocket => write!(f, "websocket"),
             DataSource::RestSnapshot => write!(f, "rest_snapshot"),
             DataSource::ReplayValidator => write!(f, "replay_validator"),
-            DataSource::Strategy => write!(f, "strategy"),
-            DataSource::Exchange => write!(f, "exchange"),
             DataSource::System => write!(f, "system"),
         }
     }
@@ -209,109 +205,6 @@ pub struct ReplayValidation {
     pub persisted_at_us: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct LatencyTrace {
-    pub market_data_recv_us: Option<u64>,
-    pub normalization_done_us: Option<u64>,
-    pub strategy_decision_us: Option<u64>,
-    pub order_submit_us: Option<u64>,
-    pub exchange_ack_us: Option<u64>,
-    pub exchange_fill_us: Option<u64>,
-}
-
-impl LatencyTrace {
-    pub fn from_optional_timestamps(
-        market_data_recv_us: Option<u64>,
-        normalization_done_us: Option<u64>,
-        strategy_decision_us: Option<u64>,
-        order_submit_us: Option<u64>,
-        exchange_ack_us: Option<u64>,
-        exchange_fill_us: Option<u64>,
-    ) -> Self {
-        Self {
-            market_data_recv_us,
-            normalization_done_us,
-            strategy_decision_us,
-            order_submit_us,
-            exchange_ack_us,
-            exchange_fill_us,
-        }
-    }
-
-    /// The latency stages in causal order, skipping absent ones.
-    fn present_stages(&self) -> impl Iterator<Item = u64> + '_ {
-        [
-            self.market_data_recv_us,
-            self.normalization_done_us,
-            self.strategy_decision_us,
-            self.order_submit_us,
-            self.exchange_ack_us,
-            self.exchange_fill_us,
-        ]
-        .into_iter()
-        .flatten()
-    }
-
-    /// True if the present stage timestamps are non-decreasing in causal order.
-    /// A violation means a consumer would compute a negative stage duration
-    ///.
-    pub fn is_monotonic(&self) -> bool {
-        let mut last: Option<u64> = None;
-        for stage in self.present_stages() {
-            if last.is_some_and(|prev| stage < prev) {
-                return false;
-            }
-            last = Some(stage);
-        }
-        true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ExecutionEventKind {
-    SubmitIntent,
-    ExchangeAck,
-    CancelRequest,
-    CancelAck,
-    Reject,
-    PartialFill,
-    Fill,
-    Terminal,
-}
-
-impl std::fmt::Display for ExecutionEventKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExecutionEventKind::SubmitIntent => write!(f, "submit_intent"),
-            ExecutionEventKind::ExchangeAck => write!(f, "exchange_ack"),
-            ExecutionEventKind::CancelRequest => write!(f, "cancel_request"),
-            ExecutionEventKind::CancelAck => write!(f, "cancel_ack"),
-            ExecutionEventKind::Reject => write!(f, "reject"),
-            ExecutionEventKind::PartialFill => write!(f, "partial_fill"),
-            ExecutionEventKind::Fill => write!(f, "fill"),
-            ExecutionEventKind::Terminal => write!(f, "terminal"),
-        }
-    }
-}
-
-impl std::str::FromStr for ExecutionEventKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "submit_intent" => Ok(Self::SubmitIntent),
-            "exchange_ack" => Ok(Self::ExchangeAck),
-            "cancel_request" => Ok(Self::CancelRequest),
-            "cancel_ack" => Ok(Self::CancelAck),
-            "reject" => Ok(Self::Reject),
-            "partial_fill" => Ok(Self::PartialFill),
-            "fill" => Ok(Self::Fill),
-            "terminal" => Ok(Self::Terminal),
-            other => Err(format!("unknown execution event kind: {other}")),
-        }
-    }
-}
-
 impl std::str::FromStr for Side {
     type Err = String;
 
@@ -324,22 +217,6 @@ impl std::str::FromStr for Side {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionEvent {
-    pub event_timestamp_us: u64,
-    pub asset_id: Option<AssetId>,
-    pub order_id: String,
-    pub client_order_id: Option<String>,
-    pub venue_order_id: Option<String>,
-    pub kind: ExecutionEventKind,
-    pub side: Option<Side>,
-    pub price: Option<FixedPrice>,
-    pub size: Option<FixedSize>,
-    pub status: Option<String>,
-    pub reason: Option<String>,
-    pub latency: LatencyTrace,
-}
-
 /// Persisted record routed through storage sinks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PersistedRecord {
@@ -348,7 +225,6 @@ pub enum PersistedRecord {
     Ingest(IngestEvent),
     Checkpoint(BookCheckpoint),
     Validation(ReplayValidation),
-    Execution(ExecutionEvent),
 }
 
 impl PersistedRecord {
@@ -359,7 +235,6 @@ impl PersistedRecord {
             PersistedRecord::Ingest(_) => "ingest_events",
             PersistedRecord::Checkpoint(_) => "book_checkpoints",
             PersistedRecord::Validation(_) => "replay_validations",
-            PersistedRecord::Execution(_) => "execution_events",
         }
     }
 
@@ -374,11 +249,6 @@ impl PersistedRecord {
                 .unwrap_or("global"),
             PersistedRecord::Checkpoint(event) => event.asset_id.as_str(),
             PersistedRecord::Validation(event) => event.asset_id.as_str(),
-            PersistedRecord::Execution(event) => event
-                .asset_id
-                .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or("global"),
         }
     }
 
@@ -389,26 +259,24 @@ impl PersistedRecord {
             PersistedRecord::Ingest(event) => event.provenance.recv_timestamp_us,
             PersistedRecord::Checkpoint(event) => event.checkpoint_timestamp_us,
             PersistedRecord::Validation(event) => event.persisted_at_us,
-            PersistedRecord::Execution(event) => event.event_timestamp_us,
         }
     }
 
     /// The feed-receive timestamp (µs) for records that carry provenance, used to
     /// measure end-to-end recv→durable latency at ingest.
-    /// `ReplayValidation`/`ExecutionEvent` have no feed-receive provenance.
+    /// `ReplayValidation` has no feed-receive provenance.
     pub fn recv_timestamp_us(&self) -> Option<u64> {
         match self {
             PersistedRecord::Book(e) => Some(e.provenance.recv_timestamp_us),
             PersistedRecord::Trade(e) => Some(e.provenance.recv_timestamp_us),
             PersistedRecord::Ingest(e) => Some(e.provenance.recv_timestamp_us),
             PersistedRecord::Checkpoint(e) => Some(e.provenance.recv_timestamp_us),
-            PersistedRecord::Validation(_) | PersistedRecord::Execution(_) => None,
+            PersistedRecord::Validation(_) => None,
         }
     }
 
     /// Mutable access to the record's `EventProvenance`, if it carries one.
-    /// `ReplayValidation` and `ExecutionEvent` have no provenance and return
-    /// `None`. Used at the single ingest serialization point to stamp the
+    /// `ReplayValidation` has no provenance and returns `None`. Used at the single ingest serialization point to stamp the
     /// monotonic `ingest_ordinal`.
     pub fn provenance_mut(&mut self) -> Option<&mut EventProvenance> {
         match self {
@@ -417,7 +285,6 @@ impl PersistedRecord {
             PersistedRecord::Ingest(event) => Some(&mut event.provenance),
             PersistedRecord::Checkpoint(event) => Some(&mut event.provenance),
             PersistedRecord::Validation(_) => None,
-            PersistedRecord::Execution(_) => None,
         }
     }
 }
@@ -429,42 +296,9 @@ pub struct MarketDataWindow {
     pub ingest_events: Vec<IngestEvent>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionWindow {
-    pub execution_events: Vec<ExecutionEvent>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn latency_trace_monotonicity() {
-        // In-order (with gaps) is monotonic.
-        let ok = LatencyTrace::from_optional_timestamps(
-            Some(100),
-            None,
-            Some(200),
-            None,
-            Some(300),
-            Some(300),
-        );
-        assert!(ok.is_monotonic());
-
-        // An earlier stage after a later one is a violation.
-        let bad = LatencyTrace::from_optional_timestamps(
-            Some(100),
-            Some(50), // normalization_done before market_data_recv
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(!bad.is_monotonic());
-
-        // All-absent is vacuously monotonic.
-        assert!(LatencyTrace::default().is_monotonic());
-    }
 
     fn sample_provenance() -> EventProvenance {
         EventProvenance {
@@ -544,8 +378,6 @@ mod tests {
             format!("{}", DataSource::ReplayValidator),
             "replay_validator"
         );
-        assert_eq!(format!("{}", DataSource::Strategy), "strategy");
-        assert_eq!(format!("{}", DataSource::Exchange), "exchange");
         assert_eq!(format!("{}", DataSource::System), "system");
     }
 
@@ -555,8 +387,6 @@ mod tests {
             DataSource::WebSocket,
             DataSource::RestSnapshot,
             DataSource::ReplayValidator,
-            DataSource::Strategy,
-            DataSource::Exchange,
             DataSource::System,
         ];
         for src in variants {
@@ -650,67 +480,6 @@ mod tests {
             let json = serde_json::to_string(&mode).unwrap();
             let m2: ReplayMode = serde_json::from_str(&json).unwrap();
             assert_eq!(mode, m2);
-        }
-    }
-
-    // --- ExecutionEventKind tests ---
-
-    #[test]
-    fn execution_event_kind_display_all() {
-        let pairs = [
-            (ExecutionEventKind::SubmitIntent, "submit_intent"),
-            (ExecutionEventKind::ExchangeAck, "exchange_ack"),
-            (ExecutionEventKind::CancelRequest, "cancel_request"),
-            (ExecutionEventKind::CancelAck, "cancel_ack"),
-            (ExecutionEventKind::Reject, "reject"),
-            (ExecutionEventKind::PartialFill, "partial_fill"),
-            (ExecutionEventKind::Fill, "fill"),
-            (ExecutionEventKind::Terminal, "terminal"),
-        ];
-        for (kind, expected) in pairs {
-            assert_eq!(format!("{kind}"), expected);
-        }
-    }
-
-    #[test]
-    fn execution_event_kind_from_str_all() {
-        let pairs = [
-            ("submit_intent", ExecutionEventKind::SubmitIntent),
-            ("exchange_ack", ExecutionEventKind::ExchangeAck),
-            ("cancel_request", ExecutionEventKind::CancelRequest),
-            ("cancel_ack", ExecutionEventKind::CancelAck),
-            ("reject", ExecutionEventKind::Reject),
-            ("partial_fill", ExecutionEventKind::PartialFill),
-            ("fill", ExecutionEventKind::Fill),
-            ("terminal", ExecutionEventKind::Terminal),
-        ];
-        for (input, expected) in pairs {
-            assert_eq!(input.parse::<ExecutionEventKind>().unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn execution_event_kind_from_str_invalid() {
-        assert!("unknown".parse::<ExecutionEventKind>().is_err());
-        assert!("".parse::<ExecutionEventKind>().is_err());
-    }
-
-    #[test]
-    fn execution_event_kind_serde_roundtrip_all() {
-        let kinds = [
-            ExecutionEventKind::SubmitIntent,
-            ExecutionEventKind::ExchangeAck,
-            ExecutionEventKind::CancelRequest,
-            ExecutionEventKind::CancelAck,
-            ExecutionEventKind::Reject,
-            ExecutionEventKind::PartialFill,
-            ExecutionEventKind::Fill,
-            ExecutionEventKind::Terminal,
-        ];
-        for kind in kinds {
-            let json = serde_json::to_string(&kind).unwrap();
-            let k2: ExecutionEventKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(kind, k2);
         }
     }
 
@@ -873,99 +642,6 @@ mod tests {
         assert_eq!(validation, v2);
     }
 
-    // --- ExecutionEvent serde round-trip ---
-
-    #[test]
-    fn execution_event_serde_roundtrip() {
-        let event = ExecutionEvent {
-            event_timestamp_us: 5_000_000,
-            asset_id: Some(AssetId::new("tok-9")),
-            order_id: "order-1".to_string(),
-            client_order_id: Some("client-1".to_string()),
-            venue_order_id: Some("venue-1".to_string()),
-            kind: ExecutionEventKind::Fill,
-            side: Some(Side::Bid),
-            price: Some(FixedPrice::from_f64(0.60).unwrap()),
-            size: Some(FixedSize::from_f64(25.0).unwrap()),
-            status: Some("filled".to_string()),
-            reason: None,
-            latency: LatencyTrace {
-                market_data_recv_us: Some(1_000_000),
-                normalization_done_us: Some(1_001_000),
-                strategy_decision_us: Some(1_002_000),
-                order_submit_us: Some(1_003_000),
-                exchange_ack_us: Some(1_004_000),
-                exchange_fill_us: Some(1_005_000),
-            },
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: ExecutionEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(event, event2);
-    }
-
-    #[test]
-    fn execution_event_minimal() {
-        let event = ExecutionEvent {
-            event_timestamp_us: 0,
-            asset_id: None,
-            order_id: "order-min".to_string(),
-            client_order_id: None,
-            venue_order_id: None,
-            kind: ExecutionEventKind::SubmitIntent,
-            side: None,
-            price: None,
-            size: None,
-            status: None,
-            reason: None,
-            latency: LatencyTrace::default(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: ExecutionEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(event, event2);
-    }
-
-    // --- LatencyTrace tests ---
-
-    #[test]
-    fn latency_trace_default_all_none() {
-        let lt = LatencyTrace::default();
-        assert_eq!(lt.market_data_recv_us, None);
-        assert_eq!(lt.normalization_done_us, None);
-        assert_eq!(lt.strategy_decision_us, None);
-        assert_eq!(lt.order_submit_us, None);
-        assert_eq!(lt.exchange_ack_us, None);
-        assert_eq!(lt.exchange_fill_us, None);
-    }
-
-    #[test]
-    fn latency_trace_from_optional_timestamps() {
-        let lt = LatencyTrace::from_optional_timestamps(
-            Some(1),
-            Some(2),
-            Some(3),
-            Some(4),
-            Some(5),
-            Some(6),
-        );
-        assert_eq!(lt.market_data_recv_us, Some(1));
-        assert_eq!(lt.exchange_fill_us, Some(6));
-    }
-
-    #[test]
-    fn latency_trace_serde_roundtrip() {
-        let lt = LatencyTrace {
-            market_data_recv_us: Some(100),
-            normalization_done_us: None,
-            strategy_decision_us: Some(200),
-            order_submit_us: None,
-            exchange_ack_us: None,
-            exchange_fill_us: Some(300),
-        };
-        let json = serde_json::to_string(&lt).unwrap();
-        let lt2: LatencyTrace = serde_json::from_str(&json).unwrap();
-        assert_eq!(lt, lt2);
-    }
-
     // --- PersistedRecord tests ---
 
     #[test]
@@ -1029,23 +705,6 @@ mod tests {
                 }),
                 "replay_validations",
             ),
-            (
-                PersistedRecord::Execution(ExecutionEvent {
-                    event_timestamp_us: 0,
-                    asset_id: None,
-                    order_id: "o".to_string(),
-                    client_order_id: None,
-                    venue_order_id: None,
-                    kind: ExecutionEventKind::SubmitIntent,
-                    side: None,
-                    price: None,
-                    size: None,
-                    status: None,
-                    reason: None,
-                    latency: LatencyTrace::default(),
-                }),
-                "execution_events",
-            ),
         ];
         for (record, expected_name) in &records {
             assert_eq!(record.dataset_name(), *expected_name);
@@ -1076,25 +735,6 @@ mod tests {
             expected_sequence: None,
             observed_sequence: None,
             details: None,
-        });
-        assert_eq!(record.asset_partition(), "global");
-    }
-
-    #[test]
-    fn persisted_record_asset_partition_global_execution() {
-        let record = PersistedRecord::Execution(ExecutionEvent {
-            event_timestamp_us: 0,
-            asset_id: None,
-            order_id: "o".to_string(),
-            client_order_id: None,
-            venue_order_id: None,
-            kind: ExecutionEventKind::Terminal,
-            side: None,
-            price: None,
-            size: None,
-            status: None,
-            reason: None,
-            latency: LatencyTrace::default(),
         });
         assert_eq!(record.asset_partition(), "global");
     }
@@ -1144,23 +784,6 @@ mod tests {
             persisted_at_us: 444,
         });
         assert_eq!(r.partition_timestamp_us(), 444);
-
-        // Execution uses event_timestamp_us
-        let r = PersistedRecord::Execution(ExecutionEvent {
-            event_timestamp_us: 555,
-            asset_id: None,
-            order_id: "o".to_string(),
-            client_order_id: None,
-            venue_order_id: None,
-            kind: ExecutionEventKind::SubmitIntent,
-            side: None,
-            price: None,
-            size: None,
-            status: None,
-            reason: None,
-            latency: LatencyTrace::default(),
-        });
-        assert_eq!(r.partition_timestamp_us(), 555);
     }
 
     #[test]
@@ -1212,20 +835,6 @@ mod tests {
                 mismatch_summary: Some("diff".to_string()),
                 persisted_at_us: 200,
             }),
-            PersistedRecord::Execution(ExecutionEvent {
-                event_timestamp_us: 300,
-                asset_id: Some(AssetId::new("t")),
-                order_id: "o1".to_string(),
-                client_order_id: None,
-                venue_order_id: None,
-                kind: ExecutionEventKind::Reject,
-                side: None,
-                price: None,
-                size: None,
-                status: None,
-                reason: Some("insufficient funds".to_string()),
-                latency: LatencyTrace::default(),
-            }),
         ];
         for record in &records {
             let json = serde_json::to_string(record).unwrap();
@@ -1234,7 +843,7 @@ mod tests {
         }
     }
 
-    // --- MarketDataWindow / ExecutionWindow tests ---
+    // --- MarketDataWindow tests ---
 
     #[test]
     fn market_data_window_default() {
@@ -1242,12 +851,6 @@ mod tests {
         assert!(w.book_events.is_empty());
         assert!(w.trade_events.is_empty());
         assert!(w.ingest_events.is_empty());
-    }
-
-    #[test]
-    fn execution_window_default() {
-        let w = ExecutionWindow::default();
-        assert!(w.execution_events.is_empty());
     }
 
     #[test]
@@ -1293,7 +896,7 @@ mod tests {
         let prov = EventProvenance {
             recv_timestamp_us: u64::MAX,
             exchange_timestamp_us: u64::MAX,
-            source: DataSource::Exchange,
+            source: DataSource::System,
             source_event_id: Some("max".to_string()),
             source_session_id: Some("max-session".to_string()),
             sequence: Some(Sequence::new(u64::MAX)),

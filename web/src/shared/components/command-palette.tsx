@@ -76,14 +76,8 @@ export function CommandPalette({ onToggleTheme, onSetDensity, onSetSource }: Com
               <CommandItem onSelect={() => runAndClose(() => navigate('/replay'))}>
                 Replay Workbench
               </CommandItem>
-              <CommandItem onSelect={() => runAndClose(() => navigate('/execution'))}>
-                Execution Inspector
-              </CommandItem>
               <CommandItem onSelect={() => runAndClose(() => navigate('/integrity'))}>
                 Integrity Dashboard
-              </CommandItem>
-              <CommandItem onSelect={() => runAndClose(() => navigate('/query'))}>
-                Query Workbench
               </CommandItem>
             </Command.Group>
 
