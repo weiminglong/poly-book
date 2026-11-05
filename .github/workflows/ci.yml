@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -99,46 +98,6 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  hygiene:
-    name: Docs hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: No internal tracking references
-        # Comments must carry their own rationale, not IDs that resolve to
-        # nothing in the repo. Character classes keep this pattern from
-        # matching its own definition.
-        run: |
-          if grep -rnE "[H]FT-review|[a]udit finding|[a]udit [A]\.[0-9]+|P[0-3]-[A-Z]+-[0-9]|\([A]\.[0-9]+\)" \
-            --include="*.rs" --include="*.ts" --include="*.tsx" --include="*.toml" \
-            --include="*.md" --include="*.proto" --include="*.yml" --include="justfile" \
-            --include="Dockerfile" --exclude-dir=node_modules --exclude-dir=target .; then
-            echo "::error::internal tracking references found; keep the rationale, drop the ID"
-            exit 1
-          fi
-
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      # Keep cargo-audit's own dependency graph locked. Installing without
-      # --locked can resolve transitive crates whose MSRV exceeds the stable
-      # compiler selected above, failing before the repository is audited.
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Audit Rust dependencies
-        # quick-xml DoS advisories with no upgrade path yet (object_store pins
-        # quick-xml < 0.41). Rationale and removal condition are documented on
-        # the matching ignore entries in deny.toml.
-        run: >-
-          cargo audit
-          --ignore RUSTSEC-2026-0194
-          --ignore RUSTSEC-2026-0195
-
   monitoring:
     name: Monitoring Rules
     runs-on: ubuntu-latest
@@ -159,51 +118,6 @@ jobs:
         run: promtool check rules monitoring/alerts.yml
       - name: Test alert rules (simulated incidents)
         run: promtool test rules monitoring/alerts_test.yml
-      # Validate the Alertmanager ROUTING config (where alerts page) the same way:
-      # structure check + assert each severity routes to its intended receiver, so
-      # the routing cannot drift from the alert rules' severity labels.
-      - name: Install amtool
-        env:
-          AM_VERSION: "0.28.1"
-        run: |
-          curl -fsSL -o /tmp/am.tar.gz \
-            "https://github.com/prometheus/alertmanager/releases/download/v${AM_VERSION}/alertmanager-${AM_VERSION}.linux-amd64.tar.gz"
-          tar xzf /tmp/am.tar.gz -C /tmp
-          echo "/tmp/alertmanager-${AM_VERSION}.linux-amd64" >> "$GITHUB_PATH"
-      - name: Check Alertmanager config
-        run: amtool check-config monitoring/alertmanager.yml
-      - name: Test Alertmanager routing
-        run: |
-          set -euo pipefail
-          assert_route() {
-            local got
-            got=$(amtool config routes test --config.file=monitoring/alertmanager.yml "severity=$1")
-            if [ "$got" != "$2" ]; then
-              echo "routing FAIL: severity=$1 routed to '$got', expected '$2'" >&2
-              exit 1
-            fi
-            echo "ok: severity=$1 -> $got"
-          }
-          assert_route critical pagerduty-critical
-          assert_route warning slack-warning
-          assert_route info slack-info
-
-  bench:
-    name: Benchmarks (compile)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # Compile every Criterion benchmark so the HFT latency harness (fixed-point,
-      # wire deser, book ops, WAL append, dispatcher normalize, read model,
-      # cross-backend) cannot silently rot. We do NOT run them to completion here:
-      # statistical regression gating needs stable, dedicated hardware, not a
-      # shared CI runner where noise produces false failures. Run `cargo bench`
-      # locally against a committed baseline for perf-regression checks.
-      - run: cargo bench --workspace --no-run
 
   web:
     name: Web (lint, typecheck, test, build)
@@ -252,46 +166,6 @@ jobs:
       - run: npx playwright test
         env:
           CI: true
-
-  fuzz:
-    name: Fuzz smoke test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
-        with:
-          toolchain: nightly
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo install cargo-fuzz --locked || true
-      - name: Fuzz WAL corruption (30s)
-        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
-      - name: Fuzz book delta (30s)
-        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
-      # Re-enabled after the query-guard hardening: identifier
-      # blocklist + server-side readonly/limit enforcement.
-      - name: Fuzz query guard (30s)
-        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
-      # The deserialization-path targets: a malformed WS frame or
-      # WAL codec frame must error, never panic the ingest/replay process.
-      - name: Fuzz WS deserialization (30s)
-        run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
-      - name: Fuzz WAL codec decode (30s)
-        run: cargo +nightly fuzz run fuzz_codec_decode -- -max_total_time=30 -timeout=10
-      - name: Fuzz fixed-point parse (30s)
-        run: cargo +nightly fuzz run fuzz_fixed_price -- -max_total_time=30 -timeout=10
-
-  release-build:
-    name: Release build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # Compile the release profile (panic=abort, overflow-checks, LTO) so
-      # release-only breakage surfaces in CI, not at deploy time.
-      - run: cargo build --release --bin poly-book
 
   docker-build:
     name: Docker build

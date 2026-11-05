@@ -300,9 +300,11 @@ invariants across randomized inputs:
 Fuzz targets under `fuzz/` cover deserialization and book mutation:
 
 ```bash
-cargo +nightly fuzz run fuzz_ws_deser       # wire protocol parsing
+cargo +nightly fuzz run fuzz_ws_deser        # wire protocol parsing
 cargo +nightly fuzz run fuzz_fixed_price     # FixedPrice/FixedSize parsing
 cargo +nightly fuzz run fuzz_book_delta      # book delta application invariants
+cargo +nightly fuzz run fuzz_wal_corruption  # corrupted WAL segments: reader survives
+cargo +nightly fuzz run fuzz_codec_decode    # WAL codec decode of arbitrary bytes
 cargo +nightly fuzz run fuzz_query_guard     # SQL query guard sanitizer + LIMIT normalization
 ```
 

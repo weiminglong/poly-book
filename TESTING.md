@@ -25,12 +25,11 @@ commands so they can be re-checked instead of trusted.
 | 8 | SQL escaping the read-only query workbench | `fuzz_query_guard` (guarded SQL must be a fixed point of the guard) | Guard unit tests in pb-service/pb-api; server-side readonly + LIMIT enforcement | yes (`fuzz`, `test`) |
 | 9 | Crash/restart data loss across the ingest/serve boundary | 2 checkpoint + WAL hydration integration tests (`checkpoint_wal_hydration.rs`) | pb-wal reopen-recovery and position-file tests; standby-writer flock takeover test | yes (`test`) |
 | 10 | Undefined behavior / memory unsafety | Miri on pb-types and pb-book unit tests | Workspace is overwhelmingly safe Rust; `clippy -D warnings` | yes (`miri`) |
-| 11 | Latency-harness rot and perf regressions | `cargo bench --workspace --no-run` compiles all 8 Criterion benchmarks every CI run | Statistical regression gating against a committed baseline — local only (shared runners are too noisy) | compile: yes (`bench`); gating: **no** |
-| 12 | Alert rules that no longer fire, or page the wrong channel | `promtool test rules`: 8 simulated-incident scenarios with 10 fire/no-fire assertions against the 13 rules in `monitoring/alerts.yml` | `promtool check rules`, `amtool check-config`, and 3 severity→receiver routing assertions | yes (`monitoring`) |
-| 13 | Vulnerable dependencies, license violations | `rustsec/audit-check` on every push/PR | `cargo-deny` (advisories/bans/licenses/sources), CodeQL SAST | yes (`audit`, separate workflows) |
+| 11 | Latency-harness rot and perf regressions | `cargo check --all-targets` compiles all 8 Criterion benchmarks every CI run | Statistical regression gating against a committed baseline — local only (shared runners are too noisy) | compile: yes (`check`); gating: **no** |
+| 12 | Alert rules that no longer fire, or page the wrong channel | `promtool test rules`: 8 simulated-incident scenarios with 10 fire/no-fire assertions against the 13 rules in `monitoring/alerts.yml` | `promtool check rules` | yes (`monitoring`) |
+| 13 | Vulnerable dependencies, license violations | `cargo-deny` (advisories/bans/licenses/sources) on every push/PR and weekly | — | yes (`supply-chain.yml`) |
 | 14 | Frontend regressions | 140 vitest cases across 16 test files; `tsc -b` strict typecheck; `biome check` | 5 Playwright end-to-end tests (3 specs) against the built bundle | yes (`web`, `e2e`) |
-| 15 | Release-profile-only breakage (panic=abort, LTO) and Docker image rot | `cargo build --release` in CI | `docker build` of the production image in CI | yes (`release-build`, `docker-build`) |
-| 16 | Documentation and comment hygiene drift | `hygiene` job greps for internal tracking references that resolve to nothing in a public repo | — | yes (`hygiene`) |
+| 15 | Release-profile-only breakage (panic=abort, LTO) and Docker image rot | `docker build` of the production image in CI (a release-profile build) | — | yes (`docker-build`) |
 
 ## Layer detail
 
@@ -86,9 +85,9 @@ inputs on every `cargo test` run:
 
 ### Fuzzing
 
-Six libFuzzer targets under `fuzz/fuzz_targets/`. CI runs each for 30 seconds
-as a smoke test on every push/PR (`fuzz` job); longer local runs use the same
-commands without the time cap.
+Six libFuzzer targets under `fuzz/fuzz_targets/`. `fuzz.yml` runs each for 30
+seconds as a smoke test nightly and on every push to `main`; longer local runs
+use the same commands without the time cap.
 
 ```bash
 cargo +nightly fuzz run fuzz_ws_deser        # venue wire frames: error, never panic
@@ -132,7 +131,6 @@ overhead), and Miri does not cover the tokio-heavy crates.
 ```bash
 promtool check rules monitoring/alerts.yml
 promtool test rules monitoring/alerts_test.yml
-amtool check-config monitoring/alertmanager.yml
 ```
 
 `monitoring/alerts.yml` defines 15 alert rules. `monitoring/alerts_test.yml`
@@ -154,13 +152,13 @@ iteration (pb-book), dispatcher normalization (pb-feed), WAL append/encode
 (pb-service).
 
 ```bash
-cargo bench --workspace --no-run   # what CI does: compile, don't measure
+cargo check --all-targets          # what CI does: compile the harness, don't measure
 cargo bench                        # local measurement runs
 ```
 
-CI compiles every benchmark so the harness cannot rot, but does not gate on
-timings: statistical regression detection needs quiet, dedicated hardware, not
-a shared runner.
+CI compiles every benchmark (they are targets of `cargo check --all-targets`)
+so the harness cannot rot, but does not gate on timings: statistical regression
+detection needs quiet, dedicated hardware, not a shared runner.
 
 ### Web and end-to-end
 
@@ -177,11 +175,8 @@ npx vite build && npx playwright test               # what the e2e job runs
 
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check`
   on every push/PR.
-- `hygiene` job: rejects internal tracking references in comments and docs.
-- `rustsec/audit-check` (`audit` job) plus `cargo deny check advisories bans
-  licenses sources` (`supply-chain.yml`, also weekly).
-- CodeQL SAST over the GitHub Actions workflows and the TypeScript frontend
-  (`codeql.yml`).
+- `cargo deny check advisories bans licenses sources` (`supply-chain.yml`, on
+  every push/PR and weekly).
 
 ## Known gaps
 

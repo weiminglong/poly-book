@@ -195,21 +195,17 @@ GitHub Actions runs the following checks on pushes and pull requests to `main`:
 - `cargo test --workspace --exclude pb-integration-tests`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
-- `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
 - `promtool check rules` + `promtool test rules` — Prometheus alert-rule
-  validation and offline incident unit tests; `amtool check-config` + routing
-  assertions — Alertmanager routing validation (`monitoring` job)
-- `cargo bench --workspace --no-run` — compiles every Criterion benchmark so the
-  latency harness can't rot (`bench` job; statistical regression gating is
-  local-only, since shared runners are too noisy)
-- Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`
-- Fuzz smoke test — all six targets at 30s each on nightly Rust:
-  `fuzz_wal_corruption`, `fuzz_book_delta`, `fuzz_query_guard`, `fuzz_ws_deser`,
-  `fuzz_codec_decode`, `fuzz_fixed_price`
+  validation and offline incident unit tests (`monitoring` job)
+- `docker build` of the production image (`docker-build` job)
+- Web CI — `biome check`, `tsc -b`, `vitest run`, `vite build` in `web/`, then
+  Playwright end-to-end tests against the built bundle
 - `cargo +nightly miri test` — undefined behavior detection for pb-types and pb-book
 
-Supply-chain checks (`cargo-deny` for advisories, bans, and licenses) run on a
-separate weekly schedule and on pushes/PRs.
+Outside the per-PR gate: fuzz smoke tests (all six targets at 30s each on
+nightly Rust) run nightly and on pushes to `main` (`fuzz.yml`), and
+`cargo-deny` (advisories, bans, licenses, sources) runs on PRs and weekly
+(`supply-chain.yml`).
 
 ## Deployment
 
@@ -514,11 +510,9 @@ config lives in [`monitoring/`](../monitoring/):
 - `monitoring/alerts_test.yml` — `promtool` rule unit tests that simulate
   incidents offline (e.g. WAL append failing, silent/stale feed, crossed book,
   WAL lag) and assert the matching alert fires. The CI `monitoring` job runs
-  `promtool check rules` + `promtool test rules` AND `amtool check-config
-  monitoring/alertmanager.yml` + severity→receiver routing assertions, so both
-  rule rot and routing drift are caught without a live Prometheus/Alertmanager.
-  (Only the live PagerDuty/Slack integration secrets and a running Alertmanager
-  remain environment-specific — the routing logic itself is now verified offline.)
+  `promtool check rules` + `promtool test rules`, so rule rot is caught without
+  a live Prometheus. `monitoring/alertmanager.yml` is the routing config the
+  `observability` compose profile mounts; its receivers are placeholders.
 
 ### Time discipline (NTP/PTP)
 

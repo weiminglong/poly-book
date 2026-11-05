@@ -1,0 +1,37 @@
+name: Fuzz
+
+# 30-second smoke runs of every fuzz target. These have caught real bugs
+# (query-guard UTF-8 normalization, codec decode panics) but cost ~12 minutes
+# per run, most of it building the targets, so they run nightly and on pushes
+# to main rather than gating every pull request. Run one locally with
+# `cargo +nightly fuzz run <target>`.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: Fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo install cargo-fuzz --locked || true
+      - name: Fuzz WAL corruption (30s)
+        run: cargo +nightly fuzz run fuzz_wal_corruption -- -max_total_time=30 -timeout=10
+      - name: Fuzz book delta (30s)
+        run: cargo +nightly fuzz run fuzz_book_delta -- -max_total_time=30 -timeout=10
+      - name: Fuzz query guard (30s)
+        run: cargo +nightly fuzz run fuzz_query_guard -- -max_total_time=30 -timeout=10
+      - name: Fuzz WS deserialization (30s)
+        run: cargo +nightly fuzz run fuzz_ws_deser -- -max_total_time=30 -timeout=10
+      - name: Fuzz WAL codec decode (30s)
+        run: cargo +nightly fuzz run fuzz_codec_decode -- -max_total_time=30 -timeout=10
+      - name: Fuzz fixed-point parse (30s)
+        run: cargo +nightly fuzz run fuzz_fixed_price -- -max_total_time=30 -timeout=10

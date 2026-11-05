@@ -22,6 +22,15 @@ is practical to do so.
   `auto-ingest` + `serve`) starts and tracks the live market instead of
   failing with a usage error.
 
+### Changed
+
+- CI trimmed from 15 jobs to 9 and from about 15 minutes to about 7: the
+  `bench` compile-only job (redundant with `cargo check --all-targets`),
+  `release-build` (subsumed by `docker-build`), `hygiene`, `audit`
+  (duplicated `cargo-deny`), the CodeQL workflow (it scanned only YAML and
+  TypeScript), and the Alertmanager routing assertions are gone. The fuzz smoke
+  runs moved to `fuzz.yml`, nightly and on pushes to `main`.
+
 ### Removed
 
 - `infra/` (Terraform that was never applied), the `deploy.yml` workflow (never
