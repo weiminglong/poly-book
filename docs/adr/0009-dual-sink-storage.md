@@ -1,10 +1,13 @@
 # ADR-0009: Dual-Sink Storage — Parquet Cold, ClickHouse Warm
 
 ## Status
-Superseded. The ClickHouse sink was removed as an unused second backend;
-storage is Parquet only (`ParquetSink`, read back by `ParquetReader`). The
-rest of this document is kept as the historical record of the original
-decision.
+Superseded (no replacement ADR). The interactive surfaces that justified a warm
+store — the SQL query workbench and the execution-timeline route — were removed
+as unused, which removed the reason for a second backend. The ClickHouse sink
+went with them; storage is Parquet only (`ParquetSink`, read back by
+`ParquetReader`), which is the "Parquet only" alternative this document
+rejected under its original assumptions. The rest of the text is the
+historical record of that decision and is written in its original tense.
 
 ## Date
 2026-07-06 (records a decision implemented incrementally through March 2026)

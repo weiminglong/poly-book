@@ -2311,11 +2311,9 @@ dependencies = [
  "pb-feed",
  "pb-metrics",
  "pb-replay",
- "pb-service",
  "pb-store",
  "pb-types",
  "pb-wal",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2334,7 +2332,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
- "tracing",
 ]
 
 [[package]]
@@ -2351,7 +2348,6 @@ dependencies = [
  "pb-store",
  "pb-types",
  "reqwest 0.13.4",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -2386,7 +2382,6 @@ dependencies = [
  "parquet",
  "pb-metrics",
  "pb-types",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

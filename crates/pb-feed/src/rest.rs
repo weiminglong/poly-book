@@ -11,7 +11,7 @@ use pb_types::wire::{ClobMarketInfo, GammaEvent, RestBookResponse};
 /// TCP connect timeout for REST calls.
 const REST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Overall per-request timeout. Without this a hung venue request stalls
-/// discovery/backfill (and `auto-ingest` market rotation) indefinitely.
+/// discovery/backfill (and `ingest --auto-rotate` market rotation) indefinitely.
 const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum REST response body parsed as JSON.
 pub const MAX_REST_BODY_BYTES: usize = 4 * 1024 * 1024;

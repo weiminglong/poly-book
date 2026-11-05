@@ -17,7 +17,7 @@ in the browser, no install. Or fully offline with real captured market data:
 
 ![poly-book quant workstation: live order book ladder and depth chart](docs/assets/workstation-demo.png)
 
-Measured hot-path medians (Apple M3, full context and 49-benchmark table in
+Measured hot-path medians (Apple M3, full context and 48-benchmark table in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
 
 | Operation | Median | Rate |

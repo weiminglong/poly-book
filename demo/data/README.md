@@ -18,7 +18,8 @@ PB__STORAGE__PARQUET_BASE_PATH=/tmp/capture poly-book ingest --auto-rotate
 The `ingest_events` dataset was rewritten once after capture to drop
 `BookMismatch` events that an earlier dispatcher bug raised spuriously (it
 compared mid-message and treated the venue's empty-ask marker `"1"` as a real
-level). The venue book data itself (`book_events`, `trade_events`,
+level); 56 `book_mismatch` events that survive the corrected rules remain (28
+per asset). The venue book data itself (`book_events`, `trade_events`,
 `book_checkpoints`) is untouched; replaying its deltas matches 1,683 of the
 1,732 venue snapshots it contains exactly, with top-of-book differing once.
 

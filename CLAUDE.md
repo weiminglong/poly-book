@@ -109,7 +109,7 @@ The workstation backend is read-only with process separation:
   - `GET /api/v1/orderbooks/{asset_id}/snapshot`
   - `GET /api/v1/replay/reconstruct`
   - `GET /api/v1/integrity/summary`
-  - `GET /health`
+  - `GET /health`, `GET /health/live`, `GET /health/ready`
   - `WS /api/v1/streams/orderbook?asset_id=...`
 
 Deferred for later phases:

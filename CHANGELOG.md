@@ -16,10 +16,11 @@ is practical to do so.
   intermediate state of a multi-entry `price_change` message. It now treats
   `"0"`/`"1"` as side-specific empty markers and compares once per asset per
   message. The committed demo capture's `ingest_events` were rewritten without
-  the 16,998 spurious events; its venue data is unchanged.
+  the 16,998 spurious events (56 genuine one-tick disagreements remain); its
+  venue data is unchanged.
 - `serve` no longer requires `--tokens`. Without it, it follows whatever the
   ingest process writes to the WAL, so the `full` compose profile (rotating
-  `auto-ingest` + `serve`) starts and tracks the live market instead of
+  `ingest --auto-rotate` + `serve`) starts and tracks the live market instead of
   failing with a usage error.
 
 ### Changed
@@ -47,7 +48,8 @@ is practical to do so.
   dead `storage.parquet_row_group_size` key is removed. `--log-level info` on
   the command line now wins over `logging.level` in the file, as any explicit
   flag should.
-- CI trimmed from 15 jobs to 9 and from about 15 minutes to about 7: the
+- CI trimmed from 15 jobs to 9, dropping the two longest (`bench` at about 13
+  minutes and `fuzz` at about 12) from the per-PR gate: the
   `bench` compile-only job (redundant with `cargo check --all-targets`),
   `release-build` (subsumed by `docker-build`), `hygiene`, `audit`
   (duplicated `cargo-deny`), the CodeQL workflow (it scanned only YAML and
@@ -56,7 +58,7 @@ is practical to do so.
 
 ### Removed
 
-- About 1,500 lines of tests that only restated `#[derive]`s and `match` arms
+- About 800 lines of tests that only restated `#[derive]`s and `match` arms
   (serde round-trips of derived impls, `Display` of enum names, `Default` is
   zero, HTTP status code tables), along with the dead code some of them
   existed for: the `status_to_static` label table, two unused metrics-server

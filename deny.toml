@@ -21,8 +21,7 @@ ignore = [
     # response parsing — the XML comes from the operator-configured object
     # store (AWS S3 / MinIO), not untrusted input, and the default local-FS
     # Parquet path never touches it. Both are DoS-only, no memory unsafety.
-    # Remove when object_store ships with quick-xml >= 0.41 (also drop the
-    # matching ignore in ci.yml's Security Audit step).
+    # Remove when object_store ships with quick-xml >= 0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 ]

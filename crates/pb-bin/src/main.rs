@@ -125,7 +125,7 @@ enum Commands {
     Serve {
         /// Comma-separated token IDs to serve. Omit to follow whatever the
         /// ingest process writes to the WAL (e.g. the rotating market that
-        /// `auto-ingest` tracks).
+        /// `ingest --auto-rotate` tracks).
         #[arg(long)]
         tokens: Option<String>,
         /// Enable metrics server (use --metrics=false to disable)

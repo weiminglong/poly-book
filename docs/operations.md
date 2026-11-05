@@ -29,8 +29,6 @@ writability, WAL directory state (segments, consumer positions, last-write
 age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
 through the same connector the feed uses, and API/metrics port availability.
 
-Current defaults:
-
 The authoritative, commented defaults are in [`config/default.toml`](../config/default.toml);
 every key there can be overridden with `PB__<SECTION>__<KEY>`.
 

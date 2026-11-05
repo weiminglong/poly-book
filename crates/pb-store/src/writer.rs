@@ -575,7 +575,7 @@ impl ParquetRecordWriter {
 
         // Append a content-derived suffix so two batches that land in the same
         // (asset, hour) bucket with the same first-record timestamp (quiet books,
-        // checkpoints, execution-append re-runs) do not silently overwrite each
+        // checkpoints, backfill re-runs) do not silently overwrite each
         // other. Identical content hashes to the same name, making a true
         // retry idempotent. The 64-bit DefaultHasher gives a ~2^-64 collision per
         // pair; including the byte length as well means a silent overwrite would

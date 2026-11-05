@@ -15,8 +15,8 @@ commands so they can be re-checked instead of trusted.
 
 | # | Failure mode | Primary defense | Backstop | Runs in CI? |
 |---|--------------|-----------------|----------|-------------|
-| 1 | Numeric precision loss or rounding drift in prices/sizes | 16 proptest properties on `FixedPrice`/`FixedSize` (roundtrip, ordering, serde) | `fuzz_fixed_price` (parse + serde roundtrip assert), 161 unit tests in pb-types | yes (`test`, `fuzz`) |
-| 2 | Order-book invariant violations (mis-sorted levels, wrong size accounting) | 17 proptest properties on `L2Book` | `fuzz_book_delta` (arbitrary snapshots + deltas, ordering asserted after every step), 74 unit tests in pb-book | yes (`test`, `fuzz`) |
+| 1 | Numeric precision loss or rounding drift in prices/sizes | 16 proptest properties on `FixedPrice`/`FixedSize` (roundtrip, ordering, serde) | `fuzz_fixed_price` (parse + serde roundtrip assert), 114 unit tests in pb-types | yes (`test`, `fuzz`) |
+| 2 | Order-book invariant violations (mis-sorted levels, wrong size accounting) | 17 proptest properties on `L2Book` | `fuzz_book_delta` (arbitrary snapshots + deltas, ordering asserted after every step), 66 unit tests in pb-book | yes (`test`, `fuzz`) |
 | 3 | Malformed venue input crashing ingest | `fuzz_ws_deser` (arbitrary bytes into the wire parser: must error, never panic) | 69 unit tests in pb-feed (dispatcher normalization, reconnect paths) | yes (`fuzz`, `test`) |
 | 4 | WAL corruption on disk (bit flips, torn writes, zero-filled tails) | `fuzz_wal_corruption` (write, corrupt bytes, assert reader never panics and returns only CRC-valid records) | pb-wal unit tests for truncated-tail recovery, CRC/length corruption, prune safety (81 test attributes) + 2 proptest properties | yes (`fuzz`, `test`) |
 | 5 | Silent WAL byte-format drift between builds | Golden-bytes fixture `golden_codec_book_v3_bytes_are_stable` (pb-wal): any codec change that alters encoded bytes fails the build | `fuzz_codec_decode` (arbitrary bytes into `codec::decode`: error, never panic); version byte rejected on mismatch | yes (`test`, `fuzz`) |
@@ -25,7 +25,7 @@ commands so they can be re-checked instead of trusted.
 | 8 | Crash/restart data loss across the ingest/serve boundary | 2 checkpoint + WAL hydration integration tests (`checkpoint_wal_hydration.rs`) | pb-wal reopen-recovery and position-file tests; standby-writer flock takeover test | yes (`test`) |
 | 9 | Undefined behavior / memory unsafety | `unsafe_code = "forbid"` on every crate (compile-time) | `clippy -D warnings` | yes (`clippy`) |
 | 10 | Latency-harness rot and perf regressions | `cargo check --all-targets` compiles all 8 Criterion benchmarks every CI run | Statistical regression gating against a committed baseline — local only (shared runners are too noisy) | compile: yes (`check`); gating: **no** |
-| 11 | Alert rules that no longer fire, or page the wrong channel | `promtool test rules`: 11 simulated-incident scenarios with fire/no-fire assertions against the 15 rules in `monitoring/alerts.yml` | `promtool check rules` | yes (`monitoring`) |
+| 11 | Alert rules that no longer fire | `promtool test rules`: 11 simulated-incident scenarios with fire/no-fire assertions against the 15 rules in `monitoring/alerts.yml` | `promtool check rules` | yes (`monitoring`) |
 | 12 | Vulnerable dependencies, license violations | `cargo-deny` (advisories/bans/licenses/sources) on every push/PR and weekly | — | yes (`supply-chain.yml`) |
 | 13 | Frontend regressions | vitest suites per feature; `tsc -b` strict typecheck; `biome check` | Playwright end-to-end specs (live feed, replay, order-book demo) against the built bundle | yes (`web`, `e2e`) |
 | 14 | Release-profile-only breakage (panic=abort, LTO) and Docker image rot | `docker build` of the production image in CI (a release-profile build) | — | yes (`docker-build`) |
@@ -123,9 +123,7 @@ replays 11 simulated incidents offline (target down, absent ingest series,
 WAL append failure, WAL decode error, silent feed, consumer lag, and so on)
 with assertions covering both that
 the alert fires with the expected labels and that a healthy signal does not
-fire. CI additionally asserts the Alertmanager severity→receiver
-routing (`critical` → PagerDuty, `warning`/`info` → Slack) so routing cannot
-drift from the rules' severity labels. Live delivery (a real PagerDuty page)
+fire. Live delivery (a real PagerDuty page)
 is environment setup, not covered here.
 
 ### Benchmarks

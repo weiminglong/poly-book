@@ -235,8 +235,9 @@ Current browser transport behavior:
 - virtualized order book table for deep book views
 - render-throttled WebSocket updates (one re-render per animation frame)
 
-The SPA is developed and served separately from `serve-api` today. Packaging the
-Rust API and static frontend assets together remains later work.
+The SPA is developed against the Vite dev server (`web/README.md`) and shipped
+bundled: the Docker image sets `api.static_assets_dir` so `serve-api`/`serve`
+host the built assets (see "Bundled web UI" above).
 
 ## Deferred From This Phase
 

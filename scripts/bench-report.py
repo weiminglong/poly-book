@@ -135,7 +135,7 @@ def main() -> int:
     a("file). Numbers are medians of Criterion's sampled iterations on the machine")
     a("below — single-machine, wall-clock measurements for order-of-magnitude")
     a("reasoning, not a controlled lab benchmark. CI compiles every benchmark on")
-    a("each PR (`bench` job) but does not gate on timings: shared runners are too")
+    a("each PR (as targets of `cargo check --all-targets` in the `check` job) but does not gate on timings: shared runners are too")
     a("noisy for statistical regression detection, so regression checks are run")
     a("locally against this file.")
     a("")

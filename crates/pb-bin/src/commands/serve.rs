@@ -23,7 +23,7 @@ const FOLLOW_IDLE_US: u64 = 10 * 60 * 1_000_000;
 /// With `tokens`, serves exactly those assets (checkpoint hydration per asset).
 /// Without, follows the WAL: every asset the ingest process writes becomes
 /// active and ages out `FOLLOW_IDLE_US` after its last record, so `serve` can
-/// pair with a rotating `auto-ingest`.
+/// pair with a rotating `ingest --auto-rotate`.
 pub async fn run(
     settings: Settings,
     tokens: Option<String>,
@@ -148,17 +148,38 @@ struct FollowTracker {
 impl FollowTracker {
     /// Adopt every asset the read model already projected (after hydration).
     fn seed(&mut self, live: &pb_api::LiveReadModel) {
-        for (asset_id, last_update_us) in live.known_assets() {
-            self.note(asset_id, last_update_us);
+        self.seed_from(live.known_assets());
+    }
+
+    /// An asset the read model knows but has no timestamp for yet (its
+    /// snapshot group is still pending) is treated as current rather than
+    /// idle, otherwise seeding would prune it and discard the pending snapshot.
+    fn seed_from(&mut self, known: Vec<(String, u64)>) {
+        let newest = known
+            .iter()
+            .map(|(_, ts)| *ts)
+            .max()
+            .unwrap_or(0)
+            .max(self.newest_us);
+        for (asset_id, ts) in known {
+            self.note(asset_id, if ts == 0 { newest } else { ts });
         }
     }
 
     /// Record a tailed record. Returns true when it introduces a new asset.
+    /// Checkpoints and per-asset ingest events count as activity too: the
+    /// ingest process checkpoints every active asset on an interval, so a
+    /// quiet-but-live market keeps its book instead of aging out.
     fn observe(&mut self, record: &PersistedRecord) -> bool {
         let asset_id = match record {
             PersistedRecord::Book(e) => e.asset_id.as_str(),
             PersistedRecord::Trade(e) => e.asset_id.as_str(),
-            _ => return false,
+            PersistedRecord::Checkpoint(e) => e.asset_id.as_str(),
+            PersistedRecord::Ingest(e) => match e.asset_id.as_ref() {
+                Some(id) => id.as_str(),
+                None => return false,
+            },
+            PersistedRecord::Validation(_) => return false,
         };
         let Some(ts) = record.recv_timestamp_us() else {
             return false;
@@ -636,6 +657,23 @@ mod tests {
         // "new" keeps ticking; "old" falls outside the idle window.
         t.note("new".to_string(), 1_000_000 + FOLLOW_IDLE_US + 1);
         assert_eq!(t.desired(), vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn follow_tracker_seed_treats_pending_snapshot_as_current() {
+        // "new" has a pending snapshot (no timestamp yet) while "old" ticked
+        // long ago; seeding must keep "new" and let "old" age out.
+        let mut t = FollowTracker::default();
+        t.seed_from(vec![
+            ("old".to_string(), 1_000_000),
+            ("new".to_string(), 0),
+            ("live".to_string(), 1_000_000 + FOLLOW_IDLE_US + 1),
+        ]);
+        assert_eq!(t.desired(), vec!["live".to_string(), "new".to_string()]);
+        // With nothing newer than zero, everything is current.
+        let mut t = FollowTracker::default();
+        t.seed_from(vec![("a".to_string(), 0), ("b".to_string(), 0)]);
+        assert_eq!(t.desired(), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

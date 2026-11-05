@@ -5,7 +5,7 @@ Measured Criterion results for the hot-path operations, regenerated with
 file). Numbers are medians of Criterion's sampled iterations on the machine
 below — single-machine, wall-clock measurements for order-of-magnitude
 reasoning, not a controlled lab benchmark. CI compiles every benchmark on
-each PR (`bench` job) but does not gate on timings: shared runners are too
+each PR (as targets of `cargo check --all-targets` in the `check` job) but does not gate on timings: shared runners are too
 noisy for statistical regression detection, so regression checks are run
 locally against this file.
 

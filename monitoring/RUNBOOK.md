@@ -25,9 +25,9 @@ A firing `critical` alert inhibits the `warning`/`info` alerts of the same
 `alertname`, so an incident pages once instead of as a storm. The config carries
 **no secrets**: the PagerDuty routing key and Slack webhook are read at runtime
 from files the deploy mounts at `/etc/alertmanager/secrets/` —
-`pagerduty_routing_key` and `slack_webhook_url`. CI validates the structure and
-the severity→receiver mapping offline with `amtool` (`monitoring` job); the live
-PagerDuty/Slack integration and a running Alertmanager remain environment setup.
+`pagerduty_routing_key` and `slack_webhook_url`. The receivers are placeholders;
+the live PagerDuty/Slack integration and a running Alertmanager remain
+environment setup.
 
 ---
 

@@ -16,7 +16,6 @@ pb-store = { path = "../../crates/pb-store" }
 pb-replay = { path = "../../crates/pb-replay" }
 pb-metrics = { path = "../../crates/pb-metrics" }
 pb-api = { path = "../../crates/pb-api" }
-pb-service = { path = "../../crates/pb-service" }
 pb-wal = { path = "../../crates/pb-wal" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -27,7 +26,6 @@ object_store = { workspace = true }
 url = { workspace = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
-serde = { workspace = true }
 tempfile = "3"
 
 [[test]]

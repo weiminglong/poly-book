@@ -168,12 +168,7 @@ async fn run_rotation(
 
     loop {
         let now_secs = current_unix_secs();
-        let current_bucket = now_secs - (now_secs % BUCKET_SECS);
-        let target_bucket = if active_bucket.is_none() {
-            current_bucket
-        } else {
-            current_bucket + BUCKET_SECS
-        };
+        let target_bucket = next_target_bucket(active_bucket, now_secs);
 
         // Sleep until the pre-rotation window of the next bucket. On the very
         // first pass there is no active market, so subscribe immediately.
@@ -197,7 +192,9 @@ async fn run_rotation(
             DiscoverOutcome::Found(result) => result,
             DiscoverOutcome::Shutdown => break,
             DiscoverOutcome::Failed => {
-                // Skip this bucket; the loop targets the following one.
+                // Skip this bucket: the outgoing market still expires at the
+                // boundary, so retire it, and target the following bucket.
+                retire_at_boundary(front.take(), target_bucket, shutdown).await;
                 active_bucket = Some(target_bucket);
                 continue;
             }
@@ -205,20 +202,10 @@ async fn run_rotation(
         populate_registry(&slug_registry, &discovery);
         let token_ids = discovery.token_ids;
 
-        // Subscribe to the new market while the old one keeps running.
+        // Subscribe to the new market while the old one keeps running, then
+        // cut the previous market over only once its bucket has ended.
         let next = Generation::spawn(settings, token_ids.clone(), event_tx.clone(), shutdown)?;
-
-        // Cut the previous market over only once its bucket has actually ended.
-        if let Some(old) = front.take() {
-            let wait = target_bucket.saturating_sub(current_unix_secs());
-            if wait > 0 {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
-                    _ = shutdown.cancelled() => {}
-                }
-            }
-            old.stop("rotated-out feed task").await;
-        }
+        retire_at_boundary(front.take(), target_bucket, shutdown).await;
 
         front = Some(next);
         active_bucket = Some(target_bucket);
@@ -237,9 +224,64 @@ async fn run_rotation(
     Ok(())
 }
 
+/// The bucket to subscribe to next. The first pass takes the current bucket;
+/// afterwards the bucket after the active one, unless the loop fell behind the
+/// clock (a long discovery outage), in which case it catches up to now rather
+/// than replaying stale slugs. Deriving this from the active bucket rather
+/// than the clock is what prevents subscribing to the same bucket twice.
+fn next_target_bucket(active_bucket: Option<u64>, now_secs: u64) -> u64 {
+    let current_bucket = now_secs - (now_secs % BUCKET_SECS);
+    match active_bucket {
+        None => current_bucket,
+        Some(active) => (active + BUCKET_SECS).max(current_bucket),
+    }
+}
+
+/// Stop the outgoing market once its bucket boundary has passed.
+async fn retire_at_boundary(
+    old: Option<Generation>,
+    boundary_secs: u64,
+    shutdown: &CancellationToken,
+) {
+    let Some(old) = old else {
+        return;
+    };
+    let wait = boundary_secs.saturating_sub(current_unix_secs());
+    if wait > 0 {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+            _ = shutdown.cancelled() => {}
+        }
+    }
+    old.stop("rotated-out feed task").await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_target_bucket_never_repeats_the_active_bucket() {
+        let b = 1_700_000_100u64; // inside bucket 1_700_000_100 - 100 = ...000
+        let bucket = b - (b % BUCKET_SECS);
+        // First pass: the current bucket.
+        assert_eq!(next_target_bucket(None, b), bucket);
+        // Pre-rotation window at B+290 after subscribing to B: target B+300.
+        assert_eq!(next_target_bucket(Some(bucket), bucket + 290), bucket + 300);
+        // Just after subscribing to B+300 at B+290, the clock still says B:
+        // the next target is B+600, not B+300 again.
+        assert_eq!(
+            next_target_bucket(Some(bucket + 300), bucket + 291),
+            bucket + 600
+        );
+        // A failed bucket B (nothing subscribed) still advances to B+300.
+        assert_eq!(next_target_bucket(Some(bucket), bucket + 25), bucket + 300);
+        // Fallen far behind: catch up to the current bucket.
+        assert_eq!(
+            next_target_bucket(Some(bucket), bucket + 4 * 300 + 7),
+            bucket + 4 * 300
+        );
+    }
 
     #[test]
     fn feed_plan_from_flags() {
