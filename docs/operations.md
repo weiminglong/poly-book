@@ -29,7 +29,7 @@ deploy (`poly-book doctor && poly-book ingest`). Checks: unknown config keys
 writability, WAL directory state (segments, consumer positions, last-write
 age), REST/Gamma reachability with latency, a full WebSocket TLS handshake
 through the same connector the feed uses, ClickHouse ping (warn-only — it is
-an optional component), and API/metrics/gRPC port availability.
+an optional component), and API/metrics port availability.
 
 Current defaults:
 
@@ -64,7 +64,7 @@ clickhouse_database = "poly_book"
 clickhouse_batch_interval_secs = 1   # honored by the ClickHouse sink
 clickhouse_batch_size = 10000        # honored by the ClickHouse sink
 
-# Services default to loopback. Non-loopback API/gRPC binds require
+# Services default to loopback. A non-loopback API bind requires
 # api.auth_token / PB__API__AUTH_TOKEN at startup.
 [metrics]
 listen_addr = "127.0.0.1:9090"
@@ -80,7 +80,7 @@ query_workbench_enabled = false
 query_max_rows = 10000
 query_timeout_secs = 30
 http_request_timeout_secs = 30   # per-request HTTP timeout (504 if exceeded); not the WS stream
-# auth_token = ""                # required for non-loopback API/gRPC binds; all API/WS/gRPC data routes require it (health stays open)
+# auth_token = ""                # required for a non-loopback API bind; all API/WS data routes require it (health stays open)
 
 [wal]
 base_path = "./data/wal"
@@ -90,11 +90,6 @@ max_consumer_lag_bytes = 268435456  # 256 MB — pruning retention window (lag-b
 position_commit_interval_ms = 1000
 flush_interval_ms = 20        # BufWriter flush cadence (tail-reader visibility)
 sync_interval_ms = 200        # fdatasync cadence (bounds OS-crash loss window)
-
-[grpc]
-enabled = false
-# Loopback by default; non-loopback requires api.auth_token.
-listen_addr = "127.0.0.1:50051"
 
 [logging]
 level = "info"
@@ -247,9 +242,9 @@ deliberate act.
 
 GitHub Actions runs the following checks on pushes and pull requests to `main`:
 
-- `cargo check --all-targets` (requires `protobuf-compiler`)
-- `cargo test --workspace --exclude pb-integration-tests` (requires `protobuf-compiler`)
-- `cargo clippy --all-targets -- -D warnings` (requires `protobuf-compiler`)
+- `cargo check --all-targets`
+- `cargo test --workspace --exclude pb-integration-tests`
+- `cargo clippy --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `cargo-audit` — dependency vulnerability scanning via `rustsec/audit-check`
 - `tfsec` + `tflint` (AWS ruleset) + `terraform fmt`/`validate` — Terraform
@@ -449,11 +444,16 @@ cargo run -- ingest --tokens <TOKEN_ID>
 
 # Terminal 2 — serve process (checkpoint hydration + WAL tail + API)
 cargo run -- serve --tokens <TOKEN_ID>
+
+# Or pair with a rotating ingest: serve follows whatever the WAL carries
+cargo run -- auto-ingest        # terminal 1
+cargo run -- serve              # terminal 2
 ```
 
 The `serve` process hydrates from the latest `BookCheckpoint`, replays WAL
 records from that offset, then live-tails the WAL. It can be killed and
-restarted without data loss.
+restarted without data loss. Without `--tokens` it follows the WAL: assets
+appear as ingest writes them and drop off ten minutes after their last record.
 
 ### Storage Recovery (`reconcile`)
 
@@ -578,22 +578,6 @@ PB__API__HISTORICAL_BACKEND=clickhouse cargo run -- serve-api --auto-rotate
 If ClickHouse is configured but unreachable at startup, the system falls back to
 Parquet with a warning.
 
-### gRPC Surface
-
-Enable the gRPC read surface for programmatic access to historical queries:
-
-```bash
-PB__GRPC__ENABLED=true cargo run -- serve --tokens <TOKEN_ID>
-```
-
-The gRPC server listens on `127.0.0.1:50051` by default and exposes
-`Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs via the
-`WorkstationService`. If `api.auth_token` is configured, callers must send
-`Authorization: Bearer <token>` metadata. Startup rejects non-loopback gRPC
-binds without that token. Expensive gRPC backend work is bounded by a 30s
-deadline and a 128-request global in-flight cap; saturated servers return
-`RESOURCE_EXHAUSTED`, and timed-out work returns `DEADLINE_EXCEEDED`.
-
 ### Query Workbench
 
 Enable the query workbench for ad-hoc read-only SQL against ClickHouse:
@@ -690,11 +674,10 @@ byte retention window), so disk usage stays bounded.
 |---------|-------|
 | API     | 3000  |
 | Metrics | 9090  |
-| gRPC    | 50051 |
 
 ### Current Scope
 
-- read-only HTTP, WebSocket, and gRPC API
+- read-only HTTP and WebSocket API
 - live feed status and active asset visibility
 - live in-memory order book snapshots and per-asset WS streaming
 - configurable Parquet or ClickHouse historical backend

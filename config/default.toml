@@ -20,7 +20,7 @@ clickhouse_batch_interval_secs = 1
 clickhouse_batch_size = 10000
 
 # Trust boundary: these services default to loopback (127.0.0.1) so nothing is
-# exposed off-host out of the box. Non-loopback API/gRPC binds require
+# exposed off-host out of the box. A non-loopback API bind requires
 # api.auth_token / PB__API__AUTH_TOKEN at startup. Never bind the metrics or
 # SQL-workbench surfaces to a public interface.
 [metrics]
@@ -57,21 +57,16 @@ query_timeout_secs = 30
 # (replay, integrity, etc.); an over-running request is rejected with 504. Does
 # not apply to the long-lived WebSocket stream.
 http_request_timeout_secs = 30
-# Optional bearer token. When set (non-empty), every API, WebSocket, and gRPC
-# data route requires `Authorization: Bearer <token>`; health probes stay open.
+# Optional bearer token. When set (non-empty), every API and WebSocket data
+# route requires `Authorization: Bearer <token>`; health probes stay open.
 # Leave unset for the default loopback-only workstation. Required before exposing
-# the API or gRPC on any non-loopback interface. Override: PB__API__AUTH_TOKEN.
+# the API on any non-loopback interface. Override: PB__API__AUTH_TOKEN.
 # auth_token = ""
 # Optional directory of built web UI assets (web/dist). When set (non-empty),
 # unknown routes serve the SPA with an index.html fallback, so one process
 # hosts both the API and the workstation UI. The Docker image sets this to its
 # bundled assets. Override: PB__API__STATIC_ASSETS_DIR.
 # static_assets_dir = ""
-
-[grpc]
-enabled = false
-# Loopback by default — see the trust-boundary note above the [metrics] section.
-listen_addr = "127.0.0.1:50051"
 
 [logging]
 level = "info"

@@ -25,7 +25,7 @@ to the appropriate subsystem.
 config/default.toml  →  env vars (PB__ prefix)  →  CLI flags
 ```
 
-Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`.
+Sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`.
 
 Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
 
@@ -37,7 +37,7 @@ Example: `PB__STORAGE__CLICKHOUSE_URL=http://localhost:8123`
   library crates use `thiserror`.
 - Graceful shutdown via `CancellationToken` propagated to all subsystems.
   Both SIGINT and SIGTERM are handled for container/production environments.
-- `serve` and `serve-api` reject non-loopback HTTP/WS or gRPC binds unless
+- `serve` and `serve-api` reject a non-loopback HTTP/WS bind unless
   `api.auth_token` / `PB__API__AUTH_TOKEN` is configured. Loopback remains open
   for local workstation use.
 - In separated `serve` mode, startup hydrates from checkpoints + WAL, then

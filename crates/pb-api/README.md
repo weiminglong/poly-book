@@ -63,7 +63,7 @@ AnyQueryService  ──▶ query workbench handlers (datasets, SQL)
   (the non-Docker default).
 - **Trust boundary**: HTTP/WS routes support optional bearer-token auth via
   `api.auth_token`; health probes stay open. The default loopback bind can stay
-  open for local use, but `pb-bin` rejects non-loopback API/gRPC binds unless a
+  open for local use, but `pb-bin` rejects a non-loopback API bind unless a
   token is configured. HTTP request/response routes are bounded by a
   per-request timeout, a global in-flight concurrency cap, and a request-body
   size limit; the long-lived WS route is intentionally exempt from the request

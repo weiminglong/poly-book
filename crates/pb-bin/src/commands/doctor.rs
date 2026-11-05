@@ -48,17 +48,6 @@ pub async fn run(settings: Config, skip_network: bool) -> Result<()> {
         )
         .await,
     );
-    if settings.get_bool("grpc.enabled").unwrap_or(false) {
-        checks.push(
-            check_port(
-                "grpc port",
-                &settings,
-                "grpc.listen_addr",
-                "127.0.0.1:50051",
-            )
-            .await,
-        );
-    }
 
     let mut warns = 0usize;
     let mut fails = 0usize;

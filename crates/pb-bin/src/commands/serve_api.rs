@@ -91,32 +91,7 @@ pub async fn run(
         pipeline::build_query_service(&settings, effective_backend_is_clickhouse).await;
     let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
     let auth_token = pipeline::api_auth_token_from_settings(&settings);
-
-    // Optionally start gRPC server.
-    let (grpc_enabled, grpc_addr) = pipeline::grpc_config_from_settings(&settings);
-    pipeline::validate_api_auth_boundary(
-        api_listen_addr,
-        grpc_enabled,
-        grpc_addr,
-        auth_token.as_deref(),
-    )?;
-    let grpc_handle = if grpc_enabled {
-        Some(
-            pb_grpc::start_grpc_server(
-                grpc_addr,
-                replay_service.clone(),
-                integrity_service.clone(),
-                execution_service.clone(),
-                max_depth,
-                auth_token.clone(),
-                shutdown.child_token(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        )
-    } else {
-        None
-    };
+    pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
     let state = pb_api::AppState {
         live,
@@ -154,11 +129,7 @@ pub async fn run(
 
     let serve_result = pb_api::serve(listener, state, shutdown.child_token()).await;
     drop(event_tx);
-    let mut handles = vec![runtime_handle, consumer_handle];
-    if let Some(h) = grpc_handle {
-        handles.push(h);
-    }
-    pipeline::shutdown_handles(handles, "serve-api task").await;
+    pipeline::shutdown_handles(vec![runtime_handle, consumer_handle], "serve-api task").await;
     serve_result?;
     Ok(())
 }

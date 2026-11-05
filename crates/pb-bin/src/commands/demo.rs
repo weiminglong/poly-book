@@ -211,12 +211,7 @@ pub async fn run(
     let query_service = None;
     let (query_max_rows, query_timeout_secs) = pipeline::query_config_from_settings(&settings);
     let auth_token = pipeline::api_auth_token_from_settings(&settings);
-    pipeline::validate_api_auth_boundary(
-        api_listen_addr,
-        false,
-        api_listen_addr,
-        auth_token.as_deref(),
-    )?;
+    pipeline::validate_api_auth_boundary(api_listen_addr, auth_token.as_deref())?;
 
     let state = pb_api::AppState {
         live,

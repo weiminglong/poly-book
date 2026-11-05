@@ -44,7 +44,6 @@ pb-types ◄── pb-feed    (wire deserialization)
          ◄── pb-wal     (codec serialization of PersistedRecord)
          ◄── pb-service (domain service types)
          ◄── pb-api     (DTOs, response types)
-         ◄── pb-grpc    (gRPC message conversion)
          ◄── pb-bin     (CLI arg types)
 ```
 

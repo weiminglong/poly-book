@@ -471,26 +471,16 @@ fn is_loopback(addr: SocketAddr) -> bool {
 
 /// Enforce the workstation trust boundary before binding externally.
 ///
-/// Loopback remains open for local development. Any non-loopback HTTP/WS or gRPC
-/// bind must carry the shared API bearer token so an accidental `0.0.0.0` in a
-/// container or ECS task does not expose the read/query surfaces unauthenticated.
-pub fn validate_api_auth_boundary(
-    api_addr: SocketAddr,
-    grpc_enabled: bool,
-    grpc_addr: SocketAddr,
-    auth_token: Option<&str>,
-) -> Result<()> {
+/// Loopback remains open for local development. Any non-loopback HTTP/WS bind
+/// must carry the shared API bearer token so an accidental `0.0.0.0` in a
+/// container does not expose the read/query surfaces unauthenticated.
+pub fn validate_api_auth_boundary(api_addr: SocketAddr, auth_token: Option<&str>) -> Result<()> {
     if auth_token.is_some() {
         return Ok(());
     }
     if !is_loopback(api_addr) {
         bail!(
             "api.auth_token is required when api.listen_addr binds a non-loopback address ({api_addr})"
-        );
-    }
-    if grpc_enabled && !is_loopback(grpc_addr) {
-        bail!(
-            "api.auth_token is required when grpc.listen_addr binds a non-loopback address ({grpc_addr})"
         );
     }
     Ok(())
@@ -654,16 +644,6 @@ pub fn query_config_from_settings(settings: &Config) -> (usize, u64) {
     let max_rows = cfg_int_min(settings, "api.query_max_rows", 10_000, 1) as usize;
     let timeout_secs = cfg_int_min(settings, "api.query_timeout_secs", 30, 1) as u64;
     (max_rows, timeout_secs)
-}
-
-pub fn grpc_config_from_settings(settings: &Config) -> (bool, SocketAddr) {
-    let enabled = settings.get_bool("grpc.enabled").unwrap_or(false);
-    let addr: SocketAddr = settings
-        .get_string("grpc.listen_addr")
-        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
-        .parse()
-        .unwrap_or_else(|_| "127.0.0.1:50051".parse().unwrap());
-    (enabled, addr)
 }
 
 pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
@@ -1029,29 +1009,6 @@ mod tests {
         ));
     }
 
-    // --- grpc_config_from_settings ---
-
-    #[test]
-    fn grpc_config_defaults() {
-        let (enabled, addr) = grpc_config_from_settings(&empty_config());
-        assert!(!enabled);
-        assert_eq!(addr, "127.0.0.1:50051".parse::<SocketAddr>().unwrap());
-    }
-
-    #[test]
-    fn grpc_config_enabled_with_custom_addr() {
-        let settings = Config::builder()
-            .set_override("grpc.enabled", true)
-            .unwrap()
-            .set_override("grpc.listen_addr", "127.0.0.1:9999")
-            .unwrap()
-            .build()
-            .unwrap();
-        let (enabled, addr) = grpc_config_from_settings(&settings);
-        assert!(enabled);
-        assert_eq!(addr, "127.0.0.1:9999".parse::<SocketAddr>().unwrap());
-    }
-
     #[test]
     fn api_auth_token_from_settings_trims_empty_values() {
         assert_eq!(api_auth_token_from_settings(&empty_config()), None);
@@ -1069,15 +1026,10 @@ mod tests {
     fn validate_api_auth_boundary_requires_token_for_external_binds() {
         let api_loopback = "127.0.0.1:3000".parse::<SocketAddr>().unwrap();
         let api_external = "0.0.0.0:3000".parse::<SocketAddr>().unwrap();
-        let grpc_loopback = "127.0.0.1:50051".parse::<SocketAddr>().unwrap();
-        let grpc_external = "0.0.0.0:50051".parse::<SocketAddr>().unwrap();
 
-        assert!(validate_api_auth_boundary(api_loopback, false, grpc_loopback, None).is_ok());
-        assert!(validate_api_auth_boundary(api_external, false, grpc_loopback, None).is_err());
-        assert!(
-            validate_api_auth_boundary(api_external, false, grpc_loopback, Some("secret")).is_ok()
-        );
-        assert!(validate_api_auth_boundary(api_loopback, true, grpc_external, None).is_err());
+        assert!(validate_api_auth_boundary(api_loopback, None).is_ok());
+        assert!(validate_api_auth_boundary(api_external, None).is_err());
+        assert!(validate_api_auth_boundary(api_external, Some("secret")).is_ok());
     }
 
     #[test]

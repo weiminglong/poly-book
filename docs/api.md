@@ -20,14 +20,13 @@ below the service layer without changing response shapes.
 
 ## Security / Trust Boundary
 
-HTTP, WebSocket, and gRPC data surfaces support a shared bearer token via
+HTTP and WebSocket data surfaces support a shared bearer token via
 `api.auth_token` / `PB__API__AUTH_TOKEN`. All services default to binding
-loopback (`127.0.0.1`); startup rejects non-loopback API or gRPC binds unless
-that token is configured. Health probes stay open. Never expose the metrics port
-or the SQL workbench to an untrusted network. HTTP request/response routes are
+loopback (`127.0.0.1`); startup rejects a non-loopback API bind unless that
+token is configured. Health probes stay open. Never expose the metrics port or
+the SQL workbench to an untrusted network. HTTP request/response routes are
 bounded by a per-request timeout, a global in-flight concurrency cap, and a
-request-body size limit; gRPC backend work has a 30s deadline and a 128-request
-global in-flight cap. 5xx responses return an opaque message and log the detail
+request-body size limit. 5xx responses return an opaque message and log the detail
 server-side after URL-bearing ClickHouse transport errors have been stripped of
 request URL context.
 
@@ -202,8 +201,6 @@ Query params:
 - `end_us`
   - `start_us` must be less than `end_us`
   - the window may not exceed **24 hours**; a larger range returns `400`
-  - the same window cap and result-limit clamp are enforced for the gRPC
-    `ExecutionTimeline` RPC
 - `order_id`
   - optional; filters to a single order
 - `asset_id`
@@ -227,10 +224,6 @@ Returns:
   trace fields
 - `total_count`: the full filtered total **before** `limit`/`offset` are applied,
   so a client knows how many pages exist
-- the same window cap, result-limit clamp, `offset`, and `descending` paging are
-  available on the gRPC `ExecutionTimeline` RPC
-- the gRPC surface rejects `limit > 1000`; `limit = 0` uses the default page size
-  of 100
 
 ### `WS /api/v1/streams/orderbook`
 

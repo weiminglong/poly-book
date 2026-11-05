@@ -48,7 +48,7 @@ Test attributes (`#[test]` + `#[tokio::test]`) per crate at this revision:
 |-------|------:|-------|------:|
 | pb-types | 173 | pb-replay | 51 |
 | pb-api | 83 | pb-store | 41 |
-| pb-wal | 82 | pb-grpc | 25 |
+| pb-wal | 82 | | |
 | pb-book | 74 | pb-metrics | 14 |
 | pb-bin | 75 | pb-service | 72 |
 | pb-feed | 67 | `tests/integration` | 22 |

@@ -8,8 +8,9 @@ Accepted
 
 ## Context
 The workstation backend exposes live books, replay reconstruction, integrity
-summaries, execution timelines, and a SQL workbench over HTTP, WebSocket, and
-optionally gRPC. The obvious next step — order entry, cancels, risk toggles —
+summaries, execution timelines, and a SQL workbench over HTTP and WebSocket
+(a gRPC mirror of the same reads existed until it was removed as unused). The
+obvious next step — order entry, cancels, risk toggles —
 would turn it into a trading control plane.
 
 A control plane has prerequisites this repository deliberately does not own
@@ -25,7 +26,7 @@ inspect the system without being anywhere near the capture path.
 ## Decision
 Every serving surface is read-only, and the trust boundary is explicit:
 
-- **No mutation routes.** HTTP, WebSocket, and gRPC expose only reads over
+- **No mutation routes.** HTTP and WebSocket expose only reads over
   data that ingest already persisted. The API processes derive a live read
   model in memory but never write market data; persistence belongs to the
   `ingest`/`auto-ingest` processes alone. The one write-shaped surface — the
@@ -34,9 +35,9 @@ Every serving surface is read-only, and the trust boundary is explicit:
   readonly enforcement) and fuzzed (`fuzz_query_guard`).
 - **Loopback by default.** All surfaces bind to `127.0.0.1`; the default
   trust boundary is the host.
-- **Bearer token required off loopback.** Startup refuses any non-loopback
-  API or gRPC bind unless `api.auth_token` is set. When set, every data route
-  (HTTP, WS, gRPC) requires `Authorization: Bearer <token>`, compared in
+- **Bearer token required off loopback.** Startup refuses a non-loopback
+  API bind unless `api.auth_token` is set. When set, every data route
+  (HTTP, WS) requires `Authorization: Bearer <token>`, compared in
   constant time. `/health/live` and `/health/ready` stay open for
   orchestrator probes; bundled static UI assets are served without auth (the
   UI is public code — every data route it calls is still gated).

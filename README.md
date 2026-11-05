@@ -9,7 +9,7 @@ Rust: lock-free single-writer ingestion over zero-copy WebSocket
 deserialization, an embedded CRC-framed write-ahead log with torn-tail crash
 recovery and flock-based writer failover, split Parquet + ClickHouse storage,
 deterministic point-in-time book reconstruction, and a read-only quant
-workstation (HTTP/WS/gRPC + React UI) on top.
+workstation (HTTP/WS + React UI) on top.
 
 **[Live demo](https://weiminglong.github.io/poly-book/)** — the workstation UI
 in the browser, no install. Or fully offline with real captured market data:
@@ -356,7 +356,6 @@ Workspace crates:
 | `pb-replay` | Historical replay, checkpoint reconstruction, validation, backfill |
 | `pb-wal` | Embedded write-ahead log with append-only segments and CRC32C framing |
 | `pb-service` | Transport-neutral domain service layer with configurable backends |
-| `pb-grpc` | gRPC read surface using tonic (optional, delegates to pb-service) |
 | `pb-metrics` | Prometheus metrics endpoint |
 | `pb-bin` | CLI entrypoint |
 

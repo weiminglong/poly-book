@@ -154,9 +154,11 @@ enum Commands {
     },
     /// Start the read-only serve runtime (WAL reader + checkpoint hydration + HTTP/WS)
     Serve {
-        /// Comma-separated token IDs to serve
+        /// Comma-separated token IDs to serve. Omit to follow whatever the
+        /// ingest process writes to the WAL (e.g. the rotating market that
+        /// `auto-ingest` tracks).
         #[arg(long)]
-        tokens: String,
+        tokens: Option<String>,
         /// Enable metrics server (use --metrics=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         metrics: bool,
@@ -686,9 +688,18 @@ mod tests {
         let cli = Cli::try_parse_from(["poly-book", "serve", "--tokens", "tok1,tok2"]).unwrap();
         match cli.command {
             Commands::Serve { tokens, metrics } => {
-                assert_eq!(tokens, "tok1,tok2");
+                assert_eq!(tokens.as_deref(), Some("tok1,tok2"));
                 assert!(metrics);
             }
+            _ => panic!("expected Serve"),
+        }
+    }
+
+    #[test]
+    fn parse_serve_without_tokens_follows_wal() {
+        let cli = Cli::try_parse_from(["poly-book", "serve"]).unwrap();
+        match cli.command {
+            Commands::Serve { tokens, .. } => assert!(tokens.is_none()),
             _ => panic!("expected Serve"),
         }
     }
@@ -723,12 +734,6 @@ mod tests {
     #[test]
     fn parse_backfill_missing_tokens_fails() {
         let result = Cli::try_parse_from(["poly-book", "backfill"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_serve_missing_tokens_fails() {
-        let result = Cli::try_parse_from(["poly-book", "serve"]);
         assert!(result.is_err());
     }
 

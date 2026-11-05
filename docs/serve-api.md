@@ -46,6 +46,12 @@ the checkpoint offset, then live-tails the WAL written by a separate `ingest`
 process. The live tail resumes from the exact post-hydration WAL position so
 startup does not re-apply records that were already consumed during hydration.
 
+`serve --tokens A,B` serves a fixed asset set with per-asset checkpoint
+hydration. `serve` with no `--tokens` follows the WAL instead: every asset the
+ingest process writes becomes active and ages out ten minutes after its last
+record, so it pairs with a rotating `auto-ingest` (the `full` compose profile).
+Follow mode hydrates from the retained WAL only, without checkpoints.
+
 The browser or client talks only to the API layer. It does not reconstruct the
 book from raw feed messages directly.
 
@@ -68,11 +74,10 @@ the system can support safely.
 
 All surfaces bind to loopback by default (`127.0.0.1`), so the trust boundary is
 the host. Before exposing the API on any non-loopback interface, set
-`api.auth_token` (or `PB__API__AUTH_TOKEN`): when configured, every API,
-WebSocket, and gRPC data route requires `Authorization: Bearer <token>`
-(constant-time compared), while `/health/live` and `/health/ready` stay open for
-orchestrator probes. Startup rejects any non-loopback API or gRPC bind without a
-token. With no token set the workstation stays open on loopback — appropriate
+`api.auth_token` (or `PB__API__AUTH_TOKEN`): when configured, every API and
+WebSocket data route requires `Authorization: Bearer <token>` (constant-time
+compared), while `/health/live` and `/health/ready` stay open for orchestrator
+probes. Startup rejects any non-loopback API bind without a token. With no token set the workstation stays open on loopback — appropriate
 only for a single-operator host. This is bearer-token authentication, not full
 authorization/RBAC, which remains out of scope for the read-only workstation.
 
@@ -198,22 +203,6 @@ The current implementation exposes:
 - `WS /api/v1/streams/orderbook?asset_id=...`
 
 See [docs/api.md](api.md) for route details.
-
-### gRPC Surface
-
-When `grpc.enabled = true`, the `serve` and `serve-api` processes also start a
-gRPC server (default `127.0.0.1:50051`) exposing the same historical query
-services via the `WorkstationService`:
-
-- `Reconstruct` — replay book reconstruction at a target timestamp
-- `IntegritySummary` — integrity check results for an asset time window
-- `ExecutionTimeline` — execution event timeline for an order
-
-The gRPC service delegates to the same `pb-service` traits used by the HTTP
-routes, so backend selection (`parquet` / `clickhouse`) applies equally. It uses
-the same bearer token as HTTP/WS when `api.auth_token` is configured, enforces
-the 24h query-window cap, rejects execution timeline limits above 1000, and
-bounds backend work with a 30s deadline plus a 128-request global in-flight cap.
 
 ### Query Workbench
 

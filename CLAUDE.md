@@ -37,7 +37,6 @@ Full system diagram, crate dependency graph, and runtime topology:
 - **pb-replay**: `EventReader` trait with `ParquetReader`/`ClickHouseReader`. `ReplayEngine` reconstructs book at any timestamp. `run_backfill` for periodic REST snapshots.
 - **pb-wal**: Embedded write-ahead log. BufWriter-wrapped append-only segments with length-prefix + CRC32C framing. `WalWriter` appends, rotates, and reclaims sealed segments via `prune`/`prune_with_backpressure` (count-capped by `max_segments`, single-writer `flock`); `WalReader` tails with independent consumer positions. Versioned codec (`pb_wal::codec`) for forward-compatible `PersistedRecord` serialization.
 - **pb-service**: Transport-neutral domain service layer. Defines `BookService`, `ReplayService`, `IntegrityService`, `ExecutionService`, `QueryService` traits. Concrete implementations for Parquet and ClickHouse backends. Enum dispatch (`AnyReplayService`, `AnyIntegrityService`, `AnyExecutionService`, `AnyQueryService`) for configurable backend selection.
-- **pb-grpc**: gRPC read surface using tonic. Exposes `WorkstationService` with `Reconstruct`, `IntegritySummary`, and `ExecutionTimeline` RPCs. Delegates to `pb-service` traits. Configurable via `[grpc]` config section (disabled by default, port 50051).
 - **pb-metrics**: Prometheus counters/histograms via `metrics` crate, axum HTTP `/metrics` endpoint.
 - **pb-bin**: CLI with clap subcommands including `discover`, `ingest`, `auto-ingest`, `replay`, `backfill`, `execution-replay`, `execution-append`, `serve-api`, `serve`, `demo` (replay a committed capture as a simulated live feed behind the full API, offline), `doctor` (config + connectivity preflight, exits non-zero on failure), and `reconcile` (offline WAL→Parquet rebuild for crash recovery). Process separation: `ingest` (feed + WAL + sinks), `serve` (checkpoint hydration + WAL tail + API), `serve-api` (combined, no WAL). Layered config: `config/default.toml` -> env (`PB__` prefix) -> CLI args.
 
@@ -65,7 +64,7 @@ design notes, and a **Docs to Update After Changes** table.
 - ADRs in `docs/adr/` document key architectural decisions
 
 ## Config
-`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[grpc]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
+`config/default.toml` with sections: `[feed]`, `[storage]`, `[metrics]`, `[wal]`, `[api]`, `[logging]`. Environment override prefix: `PB__` with `__` separator (e.g. `PB__STORAGE__CLICKHOUSE_URL`).
 
 ## Read This First
 If you are working on the workstation API, frontend, or runtime boundaries, read
@@ -103,7 +102,6 @@ The workstation backend is read-only with process separation:
 - `serve` process: checkpoint hydration → WAL tail → watch-based read model → HTTP/WS
 - `serve-api`: combined mode (feed + API in one process, no WAL)
 - configurable backend: `api.historical_backend = "parquet" | "clickhouse"` with auto-fallback
-- optional gRPC surface: `grpc.enabled = true` exposes WorkstationService on port 50051
 - WAL coordination: gap detection, lag tracking, backpressure pruning for multi-replica setups
 - current routes:
   - `GET /api/v1/feed/status`

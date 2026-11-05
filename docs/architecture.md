@@ -86,9 +86,6 @@ pb-bin (CLI entrypoint)
 │   └── pb-store (test fixtures)
 │       ├── pb-types
 │       └── pb-metrics
-├── pb-grpc
-│   ├── pb-types
-│   └── pb-service
 ├── pb-feed
 │   ├── pb-types
 │   └── pb-metrics
@@ -151,7 +148,6 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │  (configurable via api.historical_backend)            │
 │                                                       │
 │  API server on :3000                                  │
-│  gRPC server on :50051 (optional)                     │
 │  Metrics server on :9090                              │
 └───────────────────────────────────────────────────────┘
 ```
@@ -173,7 +169,6 @@ six event datasets. Each dataset has its own Parquet schema and ClickHouse table
 │                                                     │
 │  Metrics server on :9090                            │
 │  API server on :3000                                │
-│  gRPC server on :50051 (optional)                   │
 └─────────────────────────────────────────────────────┘
 ```
 

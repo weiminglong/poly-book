@@ -21,7 +21,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo check --all-targets
 
   test:
@@ -33,7 +32,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo test --workspace --exclude pb-integration-tests
       # Integration suite. The ClickHouse-backed cases are #[ignore]d and
       # skipped here; the Parquet/hydration/replay roundtrips run.
@@ -48,7 +46,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - name: Start MinIO and create the integration bucket
         run: |
           docker run --detach --name pb-minio \
@@ -89,7 +86,6 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       - run: cargo clippy --all-targets -- -D warnings
 
   fmt:
@@ -201,7 +197,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       # Compile every Criterion benchmark so the HFT latency harness (fixed-point,
       # wire deser, book ops, WAL append, dispatcher normalize, read model,
       # cross-backend) cannot silently rot. We do NOT run them to completion here:
@@ -294,7 +289,6 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: ./.github/actions/setup-protobuf
       # Compile the release profile (panic=abort, overflow-checks, LTO) so
       # release-only breakage surfaces in CI, not at deploy time.
       - run: cargo build --release --bin poly-book

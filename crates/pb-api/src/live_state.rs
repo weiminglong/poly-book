@@ -904,6 +904,18 @@ impl LiveReadModel {
     }
 
     /// Read active asset summaries. Zero contention.
+    /// Every asset with projected state, active or not, paired with its last
+    /// book update timestamp. `serve` follow mode seeds its active set from
+    /// this after hydration, before the WAL tail has shown any new record.
+    pub fn known_assets(&self) -> Vec<(String, u64)> {
+        let state = self.state_rx.borrow();
+        state
+            .assets
+            .iter()
+            .map(|(asset_id, view)| (asset_id.clone(), view.last_update_us))
+            .collect()
+    }
+
     pub async fn active_assets(&self, stale_after_secs: u64) -> Vec<ActiveAssetSummary> {
         let now_us = now_us();
         let state = self.state_rx.borrow().clone();

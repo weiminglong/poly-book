@@ -8,7 +8,26 @@ is practical to do so.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The dispatcher's venue cross-check raised a `BookMismatch` on nearly every
+  delta of a market with an empty ask side (the venue reports that side as
+  `best_ask = "1"`, which was treated as a real level) and on every
+  intermediate state of a multi-entry `price_change` message. It now treats
+  `"0"`/`"1"` as side-specific empty markers and compares once per asset per
+  message. The committed demo capture's `ingest_events` were rewritten without
+  the 16,998 spurious events; its venue data is unchanged.
+- `serve` no longer requires `--tokens`. Without it, it follows whatever the
+  ingest process writes to the WAL, so the `full` compose profile (rotating
+  `auto-ingest` + `serve`) starts and tracks the live market instead of
+  failing with a usage error.
+
+### Removed
+
+- The gRPC surface (`pb-grpc`, the `[grpc]` config section, the tonic/prost
+  dependencies, and the `protoc` build requirement). It mirrored the HTTP
+  routes, was disabled by default, and had no consumer. A fresh clone now
+  builds with only a Rust toolchain.
 
 ## [0.1.0] - 2026-07-06
 
