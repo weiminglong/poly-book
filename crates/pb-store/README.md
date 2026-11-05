@@ -38,7 +38,7 @@ PersistedRecord channel
 
 - Storage uses the `object_store` trait for filesystem abstraction. The current
   workspace enables local disk and S3 (including S3-compatible endpoints such as
-  MinIO); GCS support is not compiled in.
+  LocalStack); GCS support is not compiled in.
 - Parquet files are partitioned by event type and time window (`YYYY/MM/DD/HH`).
   The flush interval (5 minutes) balances write amplification against data
   freshness for replay. Records whose timestamp is outside a wide plausible band

@@ -6,7 +6,12 @@ use arrow::datatypes::{UInt32Type, UInt64Type};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
-use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+// parquet 59 deprecates ParquetObjectReader in favour of implementing
+// AsyncFileReader by hand; it still works and is the smallest object_store
+// bridge, so keep it until the replacement is needed for a real reason.
+#[allow(deprecated)]
+use parquet::arrow::async_reader::ParquetObjectReader;
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 
 use pb_types::event::{
     BookCheckpoint, BookEvent, BookEventKind, DataSource, EventProvenance, IngestEvent,
@@ -367,6 +372,7 @@ impl ParquetReader {
         F: Fn(&arrow::record_batch::RecordBatch) -> Result<Vec<T>, ReplayError>,
     {
         let meta = self.store.head(path).await?;
+        #[allow(deprecated)]
         let object_reader =
             ParquetObjectReader::new(self.store.clone(), path.clone()).with_file_size(meta.size);
         let builder = ParquetRecordBatchStreamBuilder::new(object_reader).await?;

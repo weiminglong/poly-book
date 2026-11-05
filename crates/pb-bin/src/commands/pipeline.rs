@@ -138,7 +138,7 @@ impl Supervisor {
 /// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or — when no static keys are set —
 /// the default AWS provider chain (ECS task role / instance profile). It also
 /// honors `AWS_ENDPOINT` (+ `AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`)
-/// so an S3-compatible endpoint (MinIO/LocalStack) can be targeted. Plain
+/// so an S3-compatible endpoint (LocalStack, or any S3 API) can be targeted. Plain
 /// `object_store::parse_url` passes *no* options, so the builder would have no
 /// region/credentials/endpoint and fail against real S3 — hence `parse_url_opts`.
 pub fn build_object_store(base_path: &str) -> Result<(Arc<dyn object_store::ObjectStore>, String)> {

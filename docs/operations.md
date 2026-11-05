@@ -36,7 +36,7 @@ every key there can be overridden with `PB__<SECTION>__<KEY>`.
 `s3://bucket/prefix`. S3 is configured from the process environment (parsed via
 `object_store::parse_url_opts(url, env::vars())`): set `AWS_REGION` and either
 static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or rely on the default AWS
-provider chain. For an S3-compatible endpoint (MinIO/LocalStack) also set
+provider chain. For an S3-compatible endpoint (LocalStack or similar) also set
 `AWS_ENDPOINT`, `AWS_ALLOW_HTTP=true`, and
 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false` (path-style). End-to-end persistence
 plus restart is covered by `tests/integration/s3_minio_roundtrip.rs`.

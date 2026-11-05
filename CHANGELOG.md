@@ -48,6 +48,14 @@ is practical to do so.
   dead `storage.parquet_row_group_size` key is removed. `--log-level info` on
   the command line now wins over `logging.level` in the file, as any explicit
   flag should.
+- CI inputs that drift are pinned: jobs run on `ubuntu-24.04` instead of the
+  floating `ubuntu-latest` (which moved to 26.04 and has no browser build for
+  the pinned Playwright release), and the S3 round-trip job uses LocalStack
+  (MinIO's public images were withdrawn from Docker Hub and quay.io).
+- Dependencies refreshed to clear every open RustSec advisory: arrow/parquet
+  58 → 59 (parquet 59 drops the `thrift` crate), rustls 0.23.46, h2 0.4.20,
+  tokio 1.54, zstd 0.13.4, and the webpki root bundles. The `cargo-deny`
+  check is green again for the first time since September.
 - CI trimmed from 15 jobs to 9, dropping the two longest (`bench` at about 13
   minutes and `fuzz` at about 12) from the per-PR gate: the
   `bench` compile-only job (redundant with `cargo check --all-targets`),

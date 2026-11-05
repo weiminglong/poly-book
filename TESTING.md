@@ -61,9 +61,9 @@ The integration package (`tests/integration/`) splits cleanly:
   (2), dispatcher pipeline (2), Parquet round-trip (2), replay engine (2),
   schema conversion (2).
 - **`#[ignore]`d, Docker-backed, run by the `integration-docker` CI job** (1 test): an
-  S3/MinIO round-trip through the production `ParquetReader`. It requires a
-  running MinIO/S3-compatible endpoint in `PB_TEST_S3_ENDPOINT` (CI starts
-  MinIO explicitly). Run it locally with:
+  S3 round-trip through the production `ParquetReader`. It requires a
+  running S3-compatible endpoint in `PB_TEST_S3_ENDPOINT` (CI starts
+  LocalStack). Run it locally with:
   `cargo test -p pb-integration-tests -- --ignored`.
 
 ### Property-based tests

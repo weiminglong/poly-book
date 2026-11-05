@@ -10,10 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
+# Jobs pin ubuntu-24.04 rather than ubuntu-latest: the floating label moved
+# to 26.04 and the pinned Playwright release had no browser build for it.
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -24,7 +26,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -33,47 +35,49 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --exclude pb-integration-tests
       # Integration suite without Docker: the Parquet/hydration/replay
-      # roundtrips. The MinIO-backed S3 case is #[ignore]d and runs below.
+      # roundtrips. The S3 case is #[ignore]d and runs below against LocalStack.
       - run: cargo test -p pb-integration-tests
 
   integration-docker:
     name: Integration (Docker-backed)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Start MinIO and create the integration bucket
+      # LocalStack is the S3 emulator the object_store crate itself tests
+      # against. (MinIO's public images were withdrawn from Docker Hub and
+      # quay.io in 2025, which broke this job.) Pinned to a dated release.
+      - name: Start LocalStack and create the integration bucket
         run: |
-          docker run --detach --name pb-minio \
-            --publish 9100:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:9100/minio/health/ready >/dev/null; then
+          docker run --detach --name pb-s3 \
+            --publish 4566:4566 \
+            --env SERVICES=s3 \
+            localstack/localstack:2026.10.6
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4566/_localstack/health | grep -q '"s3": "\(available\|running\)"'; then
               break
             fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs pb-minio
+            if [ "$attempt" -eq 60 ]; then
+              docker logs pb-s3
               exit 1
             fi
             sleep 1
           done
-          docker run --rm --network host --entrypoint /bin/sh \
-            minio/mc:RELEASE.2025-07-21T05-28-08Z \
-            -c 'mc alias set local http://127.0.0.1:9100 minioadmin minioadmin && mc mb --ignore-existing local/poly-book-test'
-      # The #[ignore]d case: the MinIO S3 roundtrip through the production
+          docker exec pb-s3 awslocal s3 mb s3://poly-book-test
+      # The #[ignore]d case: the S3 roundtrip through the production
       # ParquetReader (persist, restart, read back over the object store).
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
         env:
-          PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
+          PB_TEST_S3_ENDPOINT: http://127.0.0.1:4566
+          PB_TEST_S3_ACCESS_KEY: test
+          PB_TEST_S3_SECRET_KEY: test
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -85,7 +89,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -96,7 +100,7 @@ jobs:
 
   monitoring:
     name: Monitoring Rules
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Validate the Prometheus alert rules parse (PromQL + structure) and that a
@@ -117,7 +121,7 @@ jobs:
 
   web:
     name: Web (lint, typecheck, test, build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -141,7 +145,7 @@ jobs:
 
   e2e:
     name: E2E (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: web
     defaults:
       run:
@@ -165,7 +169,7 @@ jobs:
 
   docker-build:
     name: Docker build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Verify the production image actually builds.

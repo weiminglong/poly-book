@@ -118,14 +118,14 @@ just ci
 ```
 
 This runs formatting, Clippy, and the full test suite. The integration package
-includes an S3/MinIO round-trip behind `#[ignore]`, so Docker must be
+includes an S3 round-trip behind `#[ignore]`, so Docker must be
 available to run that case.
 
 ### Integration Tests
 
 Integration tests live in `pb-integration-tests` and are excluded from the
-default test run. The S3/MinIO round-trip is `#[ignore]`d and needs a running
-MinIO/S3-compatible endpoint in `PB_TEST_S3_ENDPOINT`:
+default test run. The S3 round-trip is `#[ignore]`d and needs a running
+S3-compatible endpoint (CI uses LocalStack) in `PB_TEST_S3_ENDPOINT`:
 
 ```bash
 # Run integration tests locally

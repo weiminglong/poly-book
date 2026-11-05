@@ -6,7 +6,7 @@ Thanks for contributing. This repository is a Rust workspace for Polymarket mark
 
 - Read the [README](README.md) for project scope and the fastest local workflow.
 - Use the pinned Rust toolchain or Rust 1.94+.
-- Install Docker if you want to run the full integration suite. The S3/MinIO round-trip test needs a MinIO/S3-compatible endpoint.
+- Install Docker if you want to run the full integration suite. The S3 round-trip test needs an S3-compatible endpoint (CI uses LocalStack).
 - Install `just` if you want the shortcut commands. Cargo commands work directly too.
 
 ## Local Setup
@@ -39,7 +39,7 @@ Runs unit tests and fast workspace checks without the integration package.
 cargo test -p pb-integration-tests
 ```
 
-Runs integration tests. The `#[ignore]`d S3/MinIO round-trip additionally needs Docker and `PB_TEST_S3_ENDPOINT` (`-- --ignored`).
+Runs integration tests. The `#[ignore]`d S3 round-trip additionally needs Docker and `PB_TEST_S3_ENDPOINT` (`-- --ignored`).
 
 ```bash
 just ci

@@ -228,7 +228,7 @@ fn classify_response(resp: reqwest::Response) -> Result<reqwest::Response, FeedE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_classify_status_success() {
@@ -267,6 +267,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            // Consume the request head before answering: a response that
+            // arrives before the client has finished writing its request is
+            // rejected by hyper as an unexpected message.
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
                 MAX_REST_BODY_BYTES + 1
