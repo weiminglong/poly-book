@@ -30,7 +30,7 @@ Every serving surface is read-only, and the trust boundary is explicit:
 - **No mutation routes.** HTTP and WebSocket expose only reads over
   data that ingest already persisted. The API processes derive a live read
   model in memory but never write market data; persistence belongs to the
-  `ingest`/`auto-ingest` processes alone. (A guarded read-only SQL workbench
+  `ingest` process alone. (A guarded read-only SQL workbench
   once existed as the one write-shaped surface; it has since been removed.)
 - **Loopback by default.** All surfaces bind to `127.0.0.1`; the default
   trust boundary is the host.

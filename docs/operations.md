@@ -49,7 +49,7 @@ Example overrides:
 ```bash
 PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data \
 PB__LOGGING__LEVEL=debug \
-cargo run -- auto-ingest
+cargo run -- ingest --auto-rotate
 ```
 
 On feed reconnect success, the dispatcher clears per-asset sequence and stale
@@ -263,7 +263,7 @@ original cadence (divided by `--speed`), looping forever, with provenance
 timestamps shifted to the wall clock so live surfaces read as current.
 Historical routes (replay, integrity) answer from the capture with its
 original timestamps; the startup banner prints copy-paste examples with
-known-good values. Any directory produced by `ingest`/`auto-ingest` works as
+known-good values. Any directory produced by `ingest` works as
 `--data-dir`.
 
 ### Docker Compose (one command)
@@ -311,7 +311,7 @@ cargo run -- ingest --tokens <TOKEN_ID>
 cargo run -- serve --tokens <TOKEN_ID>
 
 # Or pair with a rotating ingest: serve follows whatever the WAL carries
-cargo run -- auto-ingest        # terminal 1
+cargo run -- ingest --auto-rotate   # terminal 1
 cargo run -- serve              # terminal 2
 ```
 
@@ -489,7 +489,7 @@ the reconstructed book is deterministic regardless of wall-clock skew. The clock
 
 Use `needs_resync` to detect when a reader has fallen behind pruned WAL segments
 and requires a fresh checkpoint hydration. WAL segments all consumers have
-advanced past are pruned automatically by the ingest/auto-ingest process (lag-
+advanced past are pruned automatically by the ingest process (lag-
 byte retention window), so disk usage stays bounded.
 
 ### Port Defaults

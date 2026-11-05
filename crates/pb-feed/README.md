@@ -121,7 +121,7 @@ Premium V2 events (`best_bid_ask`, `new_market`, `market_resolved`) require
   fresh REST book and re-injects it as a synthetic WS `book` message via the
   shared raw channel, so the normal snapshot path rebuilds the book. The
   REST→WS-`book` conversion is round-trip-tested against `WsMessage` so it matches
-  the live wire format. (Wired in `ingest`; `auto-ingest` relies on rotation.)
+  the live wire format. Wired into every `ingest` and `serve-api` subscription.
 - REST responses are read with a 4 MiB body cap enforced before full buffering:
   oversized `Content-Length` is rejected immediately, and chunked/unknown-length
   bodies are counted as they stream. Discovery pages are capped at 1,000 events,

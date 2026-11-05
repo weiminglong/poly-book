@@ -68,7 +68,7 @@ and feeds decoded records into the live read model.
   reducing write syscalls by ~3x.
 - **Efficient framing**: the 8-byte frame header (4-byte length + 4-byte CRC32C)
   is stack-assembled and written in a single call instead of two separate writes.
-- **Steady-state durability cadence**: the `ingest`/`auto-ingest` event loop
+- **Steady-state durability cadence**: the `ingest` WAL drain loop
   drives `WalWriter::flush()` on `wal.flush_interval_ms` (default 20 ms, for
   tail-reader visibility) and `WalWriter::sync()` (`fdatasync`) on
   `wal.sync_interval_ms` (default 200 ms, bounding the OS-crash data-loss

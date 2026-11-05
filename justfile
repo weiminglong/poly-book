@@ -56,7 +56,7 @@ ingest tokens:
 
 # Auto-discover and ingest BTC 5-min markets continuously
 auto-ingest:
-    cargo run -- auto-ingest
+    cargo run -- ingest --auto-rotate
 
 # Replay orderbook state at a timestamp (microseconds). --mode is required by the
 # CLI; default to recv_time (override with `just replay TOKEN AT exchange_time`).

@@ -1,9 +1,9 @@
-pub mod auto_ingest;
 pub mod backfill;
 pub mod checkpoint_producer;
 pub mod demo;
 pub mod discover;
 pub mod doctor;
+pub mod feed;
 pub mod ingest;
 pub mod market_discovery;
 pub mod pipeline;

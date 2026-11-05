@@ -39,7 +39,7 @@ If the input matches a registered slug, the server resolves it to the canonical
 token ID before processing. Raw token IDs continue to work unchanged.
 
 Slugs are populated automatically from Gamma API metadata during `discover` and
-`auto-ingest` / `serve-api --auto-rotate`. For BTC 5-minute markets with YES/NO
+`ingest --auto-rotate` / `serve-api --auto-rotate`. For BTC 5-minute markets with YES/NO
 token pairs, slugs use `-yes` / `-no` suffixes (e.g.
 `btc-updown-5m-1741500000-yes`).
 

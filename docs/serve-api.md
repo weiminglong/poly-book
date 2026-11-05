@@ -49,7 +49,7 @@ startup does not re-apply records that were already consumed during hydration.
 `serve --tokens A,B` serves a fixed asset set with per-asset checkpoint
 hydration. `serve` with no `--tokens` follows the WAL instead: every asset the
 ingest process writes becomes active and ages out ten minutes after its last
-record, so it pairs with a rotating `auto-ingest` (the `full` compose profile).
+record, so it pairs with a rotating `ingest --auto-rotate` (the `full` compose profile).
 Follow mode hydrates from the retained WAL only, without checkpoints.
 
 The browser or client talks only to the API layer. It does not reconstruct the
@@ -132,7 +132,7 @@ applies, not just feed-driven `serve-api` applies.
 
 The API processes (both `serve-api` and `serve`) derive a live read model in
 memory but do not write new market data to storage. Ingestion persistence is the
-responsibility of the `ingest` or `auto-ingest` processes.
+responsibility of the `ingest` process.
 
 The read model's projector keeps a cached published view for REST reads and
 only rebuilds per-asset snapshot materializations for assets actually touched by

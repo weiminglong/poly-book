@@ -148,7 +148,7 @@ persisted for the affected asset, so the window is queryable.
 
 1. Find the affected `asset_id` from the persisted ingest events
    (`/api/v1/integrity/summary` or the `ingest_events` dataset).
-2. A resnapshot reseeds the shadow book: in `auto-ingest` this happens at the next
+2. A resnapshot reseeds the shadow book: `ingest` fetches a fresh REST book on each divergence; under rotation it also happens at the next
    market rotation; otherwise restart ingest or force a REST backfill snapshot.
 3. If mismatches persist for one asset, suspect a venue-side delta we mis-apply
    (e.g. a new field/semantics) — investigate the raw frames.

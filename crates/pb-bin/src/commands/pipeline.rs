@@ -471,37 +471,20 @@ pub async fn shutdown_handles(handles: Vec<JoinHandle<()>>, label: &str) {
     }
 }
 
-/// Fan out a persisted record to sink channels. Returns `true` if all sends
-/// succeeded, `false` if any channel closed (caller should stop).
+/// Fan out a persisted record to every sink channel. Returns `true` if all
+/// sends succeeded, `false` if any channel closed (the caller should stop).
 pub async fn fanout_event(
     event: pb_types::PersistedRecord,
-    fanout_txs: &[mpsc::Sender<pb_types::PersistedRecord>],
+    sink_txs: &[mpsc::Sender<pb_types::PersistedRecord>],
 ) -> bool {
-    match fanout_txs {
-        [] => true,
-        [a] => {
-            if let Err(e) = a.send(event).await {
-                tracing::warn!("fan-out channel closed: {e}");
-                return false;
-            }
-            true
+    let mut ok = true;
+    for (i, tx) in sink_txs.iter().enumerate() {
+        if let Err(e) = tx.send(event.clone()).await {
+            tracing::warn!(sink = i, "fan-out channel closed: {e}");
+            ok = false;
         }
-        [a, b] => {
-            let ev_a = event.clone();
-            let (ra, rb) = tokio::join!(a.send(ev_a), b.send(event));
-            if ra.is_err() || rb.is_err() {
-                if let Err(e) = ra {
-                    tracing::warn!("fan-out channel 0 closed: {e}");
-                }
-                if let Err(e) = rb {
-                    tracing::warn!("fan-out channel 1 closed: {e}");
-                }
-                return false;
-            }
-            true
-        }
-        _ => unreachable!("at most 2 sinks"),
     }
+    ok
 }
 
 #[cfg(test)]
@@ -823,5 +806,49 @@ mod tests {
         let settings = config_with("storage.checkpoint_interval_secs", "120");
         let cfg = checkpoint_config_from_settings(&settings);
         assert_eq!(cfg.interval, Duration::from_secs(120));
+    }
+
+    // --- fanout_event ---
+
+    fn sample_record() -> pb_types::PersistedRecord {
+        use pb_types::{
+            DataSource, EventProvenance, IngestEvent, IngestEventKind, PersistedRecord,
+        };
+        PersistedRecord::Ingest(IngestEvent {
+            asset_id: None,
+            kind: IngestEventKind::ReconnectSuccess,
+            provenance: EventProvenance {
+                recv_timestamp_us: 1,
+                exchange_timestamp_us: 0,
+                source: DataSource::System,
+                source_event_id: None,
+                source_session_id: None,
+                sequence: None,
+                ingest_ordinal: None,
+            },
+            expected_sequence: None,
+            observed_sequence: None,
+            details: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn fanout_event_delivers_to_every_open_channel() {
+        let (tx1, mut rx1) = mpsc::channel(4);
+        let (tx2, mut rx2) = mpsc::channel(4);
+        assert!(fanout_event(sample_record(), &[]).await);
+        assert!(fanout_event(sample_record(), &[tx1, tx2]).await);
+        assert!(rx1.recv().await.is_some());
+        assert!(rx2.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn fanout_event_fails_closed_when_any_channel_is_closed() {
+        let (open_tx, mut open_rx) = mpsc::channel(4);
+        let (closed_tx, closed_rx) = mpsc::channel(4);
+        drop(closed_rx);
+        assert!(!fanout_event(sample_record(), &[open_tx, closed_tx]).await);
+        // The open channel still received the record.
+        assert!(open_rx.recv().await.is_some());
     }
 }

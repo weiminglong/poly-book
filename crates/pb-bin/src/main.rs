@@ -41,11 +41,15 @@ enum Commands {
         #[arg(long, default_value_t = 500)]
         limit: u64,
     },
-    /// Start live orderbook ingestion
+    /// Start live orderbook ingestion (feed -> WAL -> Parquet) for fixed
+    /// tokens or the rotating BTC 5-minute market
     Ingest {
         /// Comma-separated token IDs to subscribe to
-        #[arg(long)]
+        #[arg(long, conflicts_with = "auto_rotate")]
         tokens: Option<String>,
+        /// Follow the live BTC 5-minute market, rotating every 5 minutes
+        #[arg(long, default_value_t = false)]
+        auto_rotate: bool,
         /// Enable Parquet storage (use --parquet=false to disable)
         #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
         parquet: bool,
@@ -84,15 +88,6 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         duration_mins: u64,
     },
-    /// Continuously discover and ingest BTC 5-min markets, rotating automatically
-    AutoIngest {
-        /// Enable Parquet storage (use --parquet=false to disable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
-        parquet: bool,
-        /// Enable metrics server (use --metrics=false to disable)
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
-        metrics: bool,
-    },
     /// Preflight checklist: validate config and probe every external
     /// dependency (feed endpoints, storage paths, ports); exits non-zero on
     /// failure so it can gate deploys
@@ -117,7 +112,7 @@ enum Commands {
     /// Start the read-only API server with a live feed and replay access
     ServeApi {
         /// Comma-separated token IDs to subscribe to
-        #[arg(long)]
+        #[arg(long, conflicts_with = "auto_rotate")]
         tokens: Option<String>,
         /// Automatically rotate to the live BTC 5-minute market
         #[arg(long, default_value_t = false)]
@@ -255,13 +250,15 @@ async fn main() -> Result<()> {
         }
         Commands::Ingest {
             tokens,
+            auto_rotate,
             parquet,
             metrics,
             standby,
         } => {
+            let plan = commands::feed::FeedPlan::from_flags(tokens, auto_rotate)?;
             commands::ingest::run(
                 settings,
-                tokens,
+                plan,
                 parquet,
                 metrics,
                 standby,
@@ -293,9 +290,6 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::AutoIngest { parquet, metrics } => {
-            commands::auto_ingest::run(settings, parquet, metrics, shutdown, slug_registry).await?;
-        }
         Commands::Doctor { skip_network } => {
             commands::doctor::run(settings, skip_network).await?;
         }
@@ -312,15 +306,8 @@ async fn main() -> Result<()> {
             auto_rotate,
             metrics,
         } => {
-            commands::serve_api::run(
-                settings,
-                tokens,
-                auto_rotate,
-                metrics,
-                shutdown,
-                slug_registry,
-            )
-            .await?;
+            let plan = commands::feed::FeedPlan::from_flags(tokens, auto_rotate)?;
+            commands::serve_api::run(settings, plan, metrics, shutdown, slug_registry).await?;
         }
         Commands::Serve { tokens, metrics } => {
             commands::serve::run(settings, tokens, metrics, shutdown, slug_registry).await?;
@@ -434,11 +421,13 @@ mod tests {
         match cli.command {
             Commands::Ingest {
                 tokens,
+                auto_rotate,
                 parquet,
                 metrics,
                 standby,
             } => {
                 assert!(tokens.is_none());
+                assert!(!auto_rotate);
                 assert!(parquet);
                 assert!(metrics);
                 assert!(!standby);
@@ -546,34 +535,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_auto_ingest() {
-        let cli = Cli::try_parse_from(["poly-book", "auto-ingest"]).unwrap();
+    fn parse_ingest_auto_rotate() {
+        let cli = Cli::try_parse_from(["poly-book", "ingest", "--auto-rotate"]).unwrap();
         match cli.command {
-            Commands::AutoIngest { parquet, metrics } => {
-                assert!(parquet);
-                assert!(metrics);
+            Commands::Ingest {
+                tokens,
+                auto_rotate,
+                ..
+            } => {
+                assert!(tokens.is_none());
+                assert!(auto_rotate);
             }
-            _ => panic!("expected AutoIngest"),
+            _ => panic!("expected Ingest"),
         }
+        // --tokens and --auto-rotate are mutually exclusive.
+        assert!(
+            Cli::try_parse_from(["poly-book", "ingest", "--tokens", "tok1", "--auto-rotate"])
+                .is_err()
+        );
     }
 
     #[test]
     fn parse_serve_api() {
-        let cli = Cli::try_parse_from([
-            "poly-book",
-            "serve-api",
-            "--tokens",
-            "tok1",
-            "--auto-rotate",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["poly-book", "serve-api", "--auto-rotate"]).unwrap();
         match cli.command {
             Commands::ServeApi {
                 tokens,
                 auto_rotate,
                 ..
             } => {
-                assert_eq!(tokens.as_deref(), Some("tok1"));
+                assert!(tokens.is_none());
                 assert!(auto_rotate);
             }
             _ => panic!("expected ServeApi"),

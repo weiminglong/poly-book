@@ -167,7 +167,7 @@ cargo run -- discover --filter btc --limit 100
 ```bash
 just auto-ingest
 # or
-cargo run -- auto-ingest
+cargo run -- ingest --auto-rotate
 ```
 
 Continuously rotates to the live BTC 5-minute market and ingests data.
@@ -368,7 +368,7 @@ Runtime config is layered:
 Example:
 
 ```bash
-PB__LOGGING__LEVEL=debug cargo run -- auto-ingest
+PB__LOGGING__LEVEL=debug cargo run -- ingest --auto-rotate
 ```
 
 Operational details, deployment notes, and data layout live in

@@ -9,8 +9,7 @@ to the appropriate subsystem.
 | Command | Purpose |
 |---------|---------|
 | `discover` | Find active BTC 5-minute prediction markets (with keyword filter). |
-| `ingest` | Start live orderbook ingestion with Parquet/metrics toggles. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
-| `auto-ingest` | Continuously discover and ingest, rotating to the live market automatically. |
+| `ingest` | Start live orderbook ingestion (feed → WAL → Parquet) for `--tokens` or, with `--auto-rotate`, the rotating BTC 5-minute market. `--standby` runs it as a hot standby that waits for the active writer's WAL lock and auto-promotes when released (writer failover). |
 | `replay` | Reconstruct historical orderbook state at a specific timestamp (`--mode` defaults to `recv_time`). |
 | `backfill` | Periodic REST API snapshot backfill for checkpoint seeding. |
 | `serve-api` | Start the read-only API server with live feed and replay access. |
@@ -45,18 +44,18 @@ Example: `PB__STORAGE__PARQUET_BASE_PATH=/tmp/poly-book-data`
   commit cadence is tunable via `wal.position_commit_interval_ms`.
 - WAL writer is owned directly on the single-threaded event loop (no
   `Arc<Mutex<_>>` overhead).
-- `fanout_event()` helper in `pipeline.rs` deduplicates event routing logic
-  shared between `ingest` and `auto_ingest`.
-- Forwarder tasks use idiomatic `while let` receive loops instead of
-  `tokio::select!` patterns.
-- **Task supervision**: long-lived background tasks (feed, dispatcher, storage
-  sinks, fan-out forwarders, WAL drain, checkpoint producer) are registered with
-  a `pipeline::Supervisor` (a tagged `JoinSet`). If any exits unexpectedly —
-  returns, errors, or panics — before a coordinated shutdown, `ingest`/
-  `auto-ingest` cancel the shutdown token and return a non-zero error rather than
-  continuing with a dead component or exiting 0. In `auto_ingest` the rotating
-  per-market feed generations are deliberately *not* supervised this way (their
-  cycling is the expected steady state and is managed via `Generation`).
+- `feed.rs` holds the one live-feed runtime (`run_feed`): a `FeedPlan` is either
+  a fixed token set or auto-rotate, and `ingest` and `serve-api` both drive it,
+  so rotation timing (subscribe 10 s before the bucket, keep the outgoing
+  market until its boundary) and the REST resnapshot self-heal are identical in
+  both.
+- **Task supervision**: long-lived background tasks (storage sink, WAL drain,
+  checkpoint producer) are registered with a `pipeline::Supervisor` (a tagged
+  `JoinSet`). If any exits unexpectedly — returns, errors, or panics — before a
+  coordinated shutdown, `ingest` cancels the shutdown token and returns a
+  non-zero error rather than continuing with a dead component or exiting 0. The
+  rotating per-market feed generations are deliberately *not* supervised this
+  way (their cycling is the expected steady state).
 - **WAL→storage reconciliation**: with all Parquet-writing tasks stopped,
   `reconcile` acquires the exclusive WAL lease,
   starts at the earliest retained segment, and aborts on CRC, segment, or decode

@@ -52,7 +52,7 @@ services:
     image: poly-book:local
     profiles: [full]
     command:
-      ["--config", "/etc/poly-book/default.toml", "auto-ingest"]
+      ["--config", "/etc/poly-book/default.toml", "ingest", "--auto-rotate"]
     environment:
       PB__METRICS__LISTEN_ADDR: 0.0.0.0:9090
       PB__LOGGING__LEVEL: info

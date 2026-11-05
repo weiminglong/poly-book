@@ -40,7 +40,7 @@ reads `../demo/data` relative to its own directory (falling back to
 
 ## Data provenance
 
-`demo/data/` is a real capture, recorded with `poly-book auto-ingest` on
+`demo/data/` is a real capture, recorded with `poly-book ingest --auto-rotate` on
 2026-07-06 (UTC): the complete life of one Polymarket BTC 5-minute up/down
 market — two complementary outcome tokens, roughly 536k events over five
 minutes — in the same hour-partitioned split-Parquet layout
