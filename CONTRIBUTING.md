@@ -6,7 +6,7 @@ Thanks for contributing. This repository is a Rust workspace for Polymarket mark
 
 - Read the [README](README.md) for project scope and the fastest local workflow.
 - Use the pinned Rust toolchain or Rust 1.94+.
-- Install Docker if you want to run the full integration suite. The S3 round-trip test needs an S3-compatible endpoint (CI uses LocalStack).
+- Install Docker if you want to run the full integration suite. The S3 round-trip test needs an S3-compatible endpoint (CI uses `adobe/s3mock`).
 - Install `just` if you want the shortcut commands. Cargo commands work directly too.
 
 ## Local Setup

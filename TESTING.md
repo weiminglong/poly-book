@@ -63,7 +63,7 @@ The integration package (`tests/integration/`) splits cleanly:
 - **`#[ignore]`d, Docker-backed, run by the `integration-docker` CI job** (1 test): an
   S3 round-trip through the production `ParquetReader`. It requires a
   running S3-compatible endpoint in `PB_TEST_S3_ENDPOINT` (CI starts
-  LocalStack). Run it locally with:
+  `adobe/s3mock`). Run it locally with:
   `cargo test -p pb-integration-tests -- --ignored`.
 
 ### Property-based tests

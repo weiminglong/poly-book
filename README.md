@@ -125,7 +125,7 @@ available to run that case.
 
 Integration tests live in `pb-integration-tests` and are excluded from the
 default test run. The S3 round-trip is `#[ignore]`d and needs a running
-S3-compatible endpoint (CI uses LocalStack) in `PB_TEST_S3_ENDPOINT`:
+S3-compatible endpoint (CI uses an S3 mock) in `PB_TEST_S3_ENDPOINT`:
 
 ```bash
 # Run integration tests locally

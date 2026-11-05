@@ -35,7 +35,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --exclude pb-integration-tests
       # Integration suite without Docker: the Parquet/hydration/replay
-      # roundtrips. The S3 case is #[ignore]d and runs below against LocalStack.
+      # roundtrips. The S3 case is #[ignore]d and runs below against an S3 mock.
       - run: cargo test -p pb-integration-tests
 
   integration-docker:
@@ -47,17 +47,18 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # LocalStack is the S3 emulator the object_store crate itself tests
-      # against. (MinIO's public images were withdrawn from Docker Hub and
-      # quay.io in 2025, which broke this job.) Pinned to a dated release.
-      - name: Start LocalStack and create the integration bucket
+      # adobe/s3mock: a small Apache-2.0 S3 server that creates the bucket
+      # itself. (MinIO's public images were withdrawn from Docker Hub and
+      # quay.io in 2025, and LocalStack's image now exits without a paid
+      # license token, which broke this job twice.) Pinned by version.
+      - name: Start the S3 mock with the integration bucket
         run: |
           docker run --detach --name pb-s3 \
-            --publish 4566:4566 \
-            --env SERVICES=s3 \
-            localstack/localstack:2026.10.6
+            --publish 9100:9090 \
+            --env initialBuckets=poly-book-test \
+            adobe/s3mock:5.2.3
           for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:4566/_localstack/health | grep -q '"s3": "\(available\|running\)"'; then
+            if curl --fail --silent --output /dev/null http://127.0.0.1:9100/poly-book-test; then
               break
             fi
             if [ "$attempt" -eq 60 ]; then
@@ -66,12 +67,11 @@ jobs:
             fi
             sleep 1
           done
-          docker exec pb-s3 awslocal s3 mb s3://poly-book-test
       # The #[ignore]d case: the S3 roundtrip through the production
       # ParquetReader (persist, restart, read back over the object store).
       - run: cargo test -p pb-integration-tests -- --ignored --test-threads=1
         env:
-          PB_TEST_S3_ENDPOINT: http://127.0.0.1:4566
+          PB_TEST_S3_ENDPOINT: http://127.0.0.1:9100
           PB_TEST_S3_ACCESS_KEY: test
           PB_TEST_S3_SECRET_KEY: test
 

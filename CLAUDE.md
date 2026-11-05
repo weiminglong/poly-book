@@ -121,7 +121,7 @@ The following jobs in `.github/workflows/ci.yml` should pass before merging:
 
 - `check` — `cargo check --all-targets`
 - `test` — `cargo test --workspace --exclude pb-integration-tests` plus the non-Docker integration suite
-- `integration-docker` — the #[ignore]d Docker-backed integration case (S3 round-trip through the production `ParquetReader` against LocalStack)
+- `integration-docker` — the #[ignore]d Docker-backed integration case (S3 round-trip through the production `ParquetReader` against an S3 mock)
 - `clippy` — `cargo clippy --all-targets -- -D warnings`
 - `fmt` — `cargo fmt --all -- --check`
 - `monitoring` — `promtool check rules` + `promtool test rules` (alert-rule syntax + offline incident unit tests)

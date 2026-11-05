@@ -50,8 +50,9 @@ is practical to do so.
   flag should.
 - CI inputs that drift are pinned: jobs run on `ubuntu-24.04` instead of the
   floating `ubuntu-latest` (which moved to 26.04 and has no browser build for
-  the pinned Playwright release), and the S3 round-trip job uses LocalStack
-  (MinIO's public images were withdrawn from Docker Hub and quay.io).
+  the pinned Playwright release), and the S3 round-trip job uses the
+  Apache-2.0 `adobe/s3mock` server (MinIO's public images were withdrawn from
+  Docker Hub and quay.io, and LocalStack now exits without a paid license).
 - Dependencies refreshed to clear every open RustSec advisory: arrow/parquet
   58 → 59 (parquet 59 drops the `thrift` crate), rustls 0.23.46, h2 0.4.20,
   tokio 1.54, zstd 0.13.4, and the webpki root bundles. The `cargo-deny`

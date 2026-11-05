@@ -9,12 +9,12 @@
 //! `ParquetReader` reads the original records through object-store range reads.
 //! It also asserts no local `s3:`-named directory is created.
 //!
-//! Run with a LocalStack (or any S3-compatible) endpoint:
-//!   PB_TEST_S3_ENDPOINT=http://127.0.0.1:4566 \
+//! Run with any S3-compatible endpoint (CI uses adobe/s3mock):
+//!   PB_TEST_S3_ENDPOINT=http://127.0.0.1:9100 \
 //!   cargo test -p pb-integration-tests --test s3_minio_roundtrip -- --ignored
 //!
 //! Optional overrides: PB_TEST_S3_BUCKET (default poly-book-test),
-//! PB_TEST_S3_ACCESS_KEY / PB_TEST_S3_SECRET_KEY (default `test`, LocalStack's).
+//! PB_TEST_S3_ACCESS_KEY / PB_TEST_S3_SECRET_KEY (default `test`).
 
 use std::sync::Arc;
 use std::time::Duration;
